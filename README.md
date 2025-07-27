@@ -7,6 +7,7 @@ The project relies on the following Python packages:
 - pyautogui
 - pyscreeze
 - pillow
+- opencv-python
 - screeninfo
 - pyvda
 - pywin32
