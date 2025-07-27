@@ -1,5 +1,5 @@
 from src.ErrorCode import WindowNotFoundError, WindowHandleNotInitialized
-from pyvda import AppView, get_apps_by_z_order, VirtualDesktop
+from pyvda import get_apps_by_z_order, VirtualDesktop
 
 import win32gui
 
