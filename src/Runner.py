@@ -27,13 +27,13 @@ class Runner:
                 registry_key = winreg.OpenKey(hive, subkey)
                 value, reg_type = winreg.QueryValueEx(registry_key, '')
                 winreg.CloseKey(registry_key)
-
-                match = re.search(r'"([^"]+)"', value)
-                if not match:
-                    raise WindowsError(f'정규식이 일치하지 않는 상태')
-                self.__exe_paths[target] = match.group(1)
-            except RegistryReadError as error:
+            except OSError as error:
                 raise RegistryReadError(f'레지스트리 값을 읽는 중 오류가 발생했습니다: {error}')
+
+            match = re.search(r'"([^"]+)"', value)
+            if not match:
+                raise RegexMatchError('정규식이 일치하지 않는 상태')
+            self.__exe_paths[target] = match.group(1)
         return
 
     def run(self) -> None:
