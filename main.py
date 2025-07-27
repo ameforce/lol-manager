@@ -1,7 +1,14 @@
-from src.ErrorCode import *
+from src.ErrorCode import (
+    ExecutionError,
+    RegistryReadError,
+    RegexMatchError,
+    WindowHandleNotInitialized,
+    WindowNotFoundError,
+)
 
 from src.Runner import Runner
 from src.Mover import Mover
+from src.AutoPicker import AutoPicker
 
 import logging
 
@@ -37,6 +44,13 @@ def main() -> None:
     except (WindowNotFoundError, WindowHandleNotInitialized) as e:
         logging.error(e)
         exit(e.code)
+
+    autopicker = AutoPicker()
+    logger.info('자동 매칭 수락 기능 실행 중...')
+    if autopicker.run():
+        logger.info('자동 매칭 수락 완료')
+    else:
+        logger.warning('자동 매칭 수락 실패')
 
     return
 

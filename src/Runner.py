@@ -1,4 +1,4 @@
-from src.ErrorCode import RegistryReadError, RegexMatchError, ExecutionError
+from src.ErrorCode import RegistryReadError, ExecutionError
 
 import subprocess
 import winreg
