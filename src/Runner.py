@@ -30,9 +30,9 @@ class Runner:
 
                 match = re.search(r'"([^"]+)"', value)
                 if not match:
-                    raise WindowsError('정규식이 일치하지 않는 상태')
+                    raise RegexMatchError('정규 표현식이 일치하지 않습니다')
                 self.__exe_paths[target] = match.group(1)
-            except RegistryReadError as error:
+            except OSError as error:
                 raise RegistryReadError(f'레지스트리 값을 읽는 중 오류가 발생했습니다: {error}')
         return
 
