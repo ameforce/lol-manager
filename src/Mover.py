@@ -5,7 +5,21 @@ import win32gui
 
 
 class Mover:
-    """특정 창을 가상 데스크톱으로 이동시키는 클래스입니다."""
+    """특정 창을 가상 데스크톱으로 이동시키는 클래스입니다.
+
+    기본적으로 모든 창을 가상 데스크톱 3번으로 이동하며,
+    생성자에서 'opgg-electron-app'과 'league of legends' 창을
+    탐색해 해당 창들의 핸들을 저장합니다.
+
+    ``update_app_view_by_title`` 메서드는 현재 열린 창들의 제목을
+    확인해 각 핸들을 갱신하며, 원하는 창을 찾지 못하면
+    :class:`WindowNotFoundError` 예외가 발생할 수 있습니다.
+
+    ``move_windows_to_game_desktop`` 메서드는 저장된 핸들을 사용해
+    창을 가상 데스크톱 3으로 이동합니다. 이때 창 핸들이
+    초기화되지 않은 경우 :class:`WindowHandleNotInitialized` 예외가
+    발생합니다.
+    """
 
     def __init__(self) -> None:
         self.__window_handles = {
