@@ -1,0 +1,6 @@
+pyautogui
+pyscreeze
+pillow
+screeninfo
+pyvda
+pywin32
