@@ -42,6 +42,7 @@ ROLE_LABEL_KO: Dict[str, str] = {
 }
 APP_USER_MODEL_ID = "LOLManager"
 DISPLAY_SEPARATOR_PREFIX = "────────"
+BanCandidateValues = Tuple[List[str], Dict[str, str], str]
 
 
 def display_value_to_champion_name(
@@ -85,6 +86,11 @@ def build_ban_candidate_values(
         values.append(f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}")
         values.extend(remaining)
     return values
+
+
+def should_reuse_ban_candidate_values(values: BanCandidateValues) -> bool:
+    labels, _label_to_name, _source = values
+    return bool(labels)
 
 
 def _set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
@@ -231,7 +237,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
     role_ranked_entries: Dict[str, List[Tuple[str, str, str]]] = {}
     role_href_index: Dict[str, Dict[str, str]] = {}
-    counter_cache: Dict[Tuple[str, str], Tuple[List[str], Dict[str, str], str]] = {}
+    counter_cache: Dict[Tuple[str, str], BanCandidateValues] = {}
     ban_label_to_name: Dict[str, str] = {}
     _ban_update_after: Dict[str, str] = {}
     _ban_update_token: Dict[str, int] = {}
@@ -642,7 +648,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         champion_name: str,
         *,
         allow_refresh: bool,
-    ) -> Tuple[List[str], Dict[str, str], str]:
+    ) -> BanCandidateValues:
         ranked_entries = role_ranked_entries.get(role) or []
         if allow_refresh:
             result = get_counter_recommendations(
@@ -771,7 +777,11 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
             cache_key = (role, normalize_name(champ))
             cached = counter_cache.get(cache_key)
-            if cached is not None and not allow_refresh:
+            if (
+                cached is not None
+                and not allow_refresh
+                and should_reuse_ban_candidate_values(cached)
+            ):
                 labels, label_to_name, source = cached
                 _set_ban_candidates(
                     field_key=field_key,
@@ -795,7 +805,10 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     champ,
                     allow_refresh=allow_refresh,
                 )
-                counter_cache[cache_key] = values
+                if should_reuse_ban_candidate_values(values):
+                    counter_cache[cache_key] = values
+                else:
+                    counter_cache.pop(cache_key, None)
                 labels, label_to_name, source = values
                 root.after(
                     0,
@@ -815,6 +828,35 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             threading.Thread(target=_worker, daemon=True).start()
 
         _ban_update_after[field_key] = root.after(delay_ms, _kick)
+
+    def _retry_ban_update_if_needed(
+        *,
+        field_key: str,
+        role: str,
+        champion_var: "tk.StringVar",
+        ban_cb: "ttk.Combobox",
+        ban_var: "tk.StringVar",
+    ) -> None:
+        champ = _display_to_champion_name(str(champion_var.get() or ""))
+        if not champ:
+            return
+
+        canon = champion_index.get(normalize_name(champ)) if champion_index else None
+        champ_name = canon if canon else champ
+        cache_key = (role, normalize_name(champ_name))
+        cached = counter_cache.get(cache_key)
+        if cached is not None and should_reuse_ban_candidate_values(cached):
+            return
+
+        _schedule_ban_update(
+            field_key=field_key,
+            role=role,
+            champion_var=champion_var,
+            ban_cb=ban_cb,
+            ban_var=ban_var,
+            delay_ms=0,
+            allow_refresh=True,
+        )
 
     def _refresh_configured_bans(*, allow_refresh: bool) -> None:
         for role in ROLE_ORDER:
@@ -886,6 +928,37 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 ban_var=rv.reserve2_ban,
             ),
         )
+
+        try:
+            w.ban_cb.configure(
+                postcommand=lambda role=role, rv=rv, w=w: _retry_ban_update_if_needed(
+                    field_key=f"{role}:primary",
+                    role=role,
+                    champion_var=rv.champion,
+                    ban_cb=w.ban_cb,
+                    ban_var=rv.ban,
+                )
+            )
+            w.reserve1_ban_cb.configure(
+                postcommand=lambda role=role, rv=rv, w=w: _retry_ban_update_if_needed(
+                    field_key=f"{role}:reserve1",
+                    role=role,
+                    champion_var=rv.reserve1_champion,
+                    ban_cb=w.reserve1_ban_cb,
+                    ban_var=rv.reserve1_ban,
+                )
+            )
+            w.reserve2_ban_cb.configure(
+                postcommand=lambda role=role, rv=rv, w=w: _retry_ban_update_if_needed(
+                    field_key=f"{role}:reserve2",
+                    role=role,
+                    champion_var=rv.reserve2_champion,
+                    ban_cb=w.reserve2_ban_cb,
+                    ban_var=rv.reserve2_ban,
+                )
+            )
+        except Exception:
+            pass
 
     def _on_tab_changed(_event=None) -> None:
         try:

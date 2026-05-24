@@ -11,6 +11,7 @@ from lolmanager.gui.config_gui import (
     DISPLAY_SEPARATOR_PREFIX,
     build_ban_candidate_values,
     display_value_to_champion_name,
+    should_reuse_ban_candidate_values,
 )
 
 
@@ -81,6 +82,14 @@ def test_gui_ban_candidates_keep_recommendations_above_all_champions() -> None:
     ]
     assert f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}" in values
     assert values[-2:] == ["가렌", "아리"]
+
+
+def test_gui_does_not_reuse_failed_ban_candidate_attempts() -> None:
+    assert not should_reuse_ban_candidate_values(([], {}, "cache_miss"))
+    assert not should_reuse_ban_candidate_values(([], {}, "opgg"))
+    assert should_reuse_ban_candidate_values(
+        (["퀸 (1티어, 42.8%, score 85.9)"], {"퀸 (1티어, 42.8%, score 85.9)": "퀸"}, "opgg")
+    )
 
 
 def test_config_load_strips_recommendation_metadata_before_runtime(tmp_path: Path) -> None:
