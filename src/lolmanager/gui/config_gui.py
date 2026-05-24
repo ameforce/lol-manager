@@ -16,11 +16,14 @@ from lolmanager.core.opgg_champion_list import (
     normalize_name,
 )
 from lolmanager.core.opgg_counter_recommendations import (
+    AUTO_BAN_LABEL,
+    AUTO_BAN_VALUE,
     DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     build_label_name_map,
     default_counter_cache_path,
     display_value_to_champion_name as _display_value_to_champion_name,
     get_counter_recommendations,
+    is_auto_ban_value,
     load_recommendation_cache,
 )
 from lolmanager.platform.paths import champion_config_path, resource_path
@@ -75,8 +78,6 @@ def build_ban_candidate_values(
     all_champion_values: List[str],
 ) -> List[str]:
     clean_labels = [str(label or "").strip() for label in labels if str(label or "").strip()]
-    if not clean_labels:
-        return list(all_champion_values)
 
     recommended_keys = {
         normalize_name(name)
@@ -89,10 +90,14 @@ def build_ban_candidate_values(
         if normalize_name(display_value_to_champion_name(value)) not in recommended_keys
     ]
 
-    values = [
-        f"{DISPLAY_SEPARATOR_PREFIX} 추천 밴 {DISPLAY_SEPARATOR_PREFIX}",
-        *clean_labels,
-    ]
+    values = [AUTO_BAN_LABEL]
+    if clean_labels:
+        values.extend(
+            [
+                f"{DISPLAY_SEPARATOR_PREFIX} 추천 밴 {DISPLAY_SEPARATOR_PREFIX}",
+                *clean_labels,
+            ]
+        )
     if remaining:
         values.append(f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}")
         values.extend(remaining)
@@ -188,7 +193,8 @@ def _normalize_reserves(
         if key in seen:
             continue
         seen.add(key)
-        out.append({"champion": c, "ban": str(ban or "").strip()})
+        ban_value = AUTO_BAN_VALUE if is_auto_ban_value(ban) else str(ban or "").strip()
+        out.append({"champion": c, "ban": ban_value})
         if len(out) >= 2:
             break
     return out
@@ -290,6 +296,12 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         return display_value_to_champion_name(s, label_to_name=ban_label_to_name)
 
+    def _display_ban_config_value(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
+
     def _refine_selected_to_name(field_key: str, var: "tk.StringVar") -> None:
         raw = str(var.get() or "").strip()
         if not raw:
@@ -370,7 +382,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         info = config.get(role) or {}
         champ = str(info.get("champion") or "").strip()
-        ban = str(info.get("ban") or "").strip()
+        ban = _display_ban_config_value(str(info.get("ban") or "").strip())
         coord = info.get("pick_coord") or None
         px = ""
         py = ""
@@ -380,9 +392,17 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         reserves = config.get_reserve_picks(role)
         r1c = str(reserves[0][0]).strip() if len(reserves) >= 1 else ""
-        r1b = str(reserves[0][1]).strip() if len(reserves) >= 1 else ""
+        r1b = (
+            _display_ban_config_value(str(reserves[0][1]).strip())
+            if len(reserves) >= 1
+            else ""
+        )
         r2c = str(reserves[1][0]).strip() if len(reserves) >= 2 else ""
-        r2b = str(reserves[1][1]).strip() if len(reserves) >= 2 else ""
+        r2b = (
+            _display_ban_config_value(str(reserves[1][1]).strip())
+            if len(reserves) >= 2
+            else ""
+        )
 
         rv = _RoleVars(
             champion=tk.StringVar(value=champ),
@@ -740,7 +760,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             if current_label and str(ban_var.get() or "").strip() != current_label:
                 ban_var.set(current_label)
             elif not current_name:
-                ban_var.set(labels[0])
+                ban_var.set(AUTO_BAN_LABEL)
             selected_raw = str(ban_var.get() or "").strip()
             if selected_raw:
                 _last_valid_raw[f"{field_key}:ban"] = selected_raw
@@ -1039,12 +1059,19 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
     def _canonicalize_or_error(
-        role_label: str, field_label: str, raw_value: str, var: "tk.StringVar"
+        role_label: str,
+        field_label: str,
+        raw_value: str,
+        var: "tk.StringVar",
+        *,
+        allow_auto: bool = False,
     ) -> Optional[str]:
         raw = str(raw_value or "").strip()
         v = _display_to_champion_name(raw)
         if not v:
             return ""
+        if allow_auto and is_auto_ban_value(v):
+            return AUTO_BAN_VALUE
         if not champion_index:
             return v
         key = normalize_name(v)
@@ -1086,7 +1113,13 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             )
             if champ is None:
                 return False
-            ban = _canonicalize_or_error(role_label, "ban", v.ban.get(), v.ban)
+            ban = _canonicalize_or_error(
+                role_label,
+                "ban",
+                v.ban.get(),
+                v.ban,
+                allow_auto=True,
+            )
             if ban is None:
                 return False
             px = v.pick_x.get().strip()
@@ -1100,7 +1133,11 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             if r1c is None:
                 return False
             r1b = _canonicalize_or_error(
-                role_label, "reserve1 ban", v.reserve1_ban.get(), v.reserve1_ban
+                role_label,
+                "reserve1 ban",
+                v.reserve1_ban.get(),
+                v.reserve1_ban,
+                allow_auto=True,
             )
             if r1b is None:
                 return False
@@ -1113,7 +1150,11 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             if r2c is None:
                 return False
             r2b = _canonicalize_or_error(
-                role_label, "reserve2 ban", v.reserve2_ban.get(), v.reserve2_ban
+                role_label,
+                "reserve2 ban",
+                v.reserve2_ban.get(),
+                v.reserve2_ban,
+                allow_auto=True,
             )
             if r2b is None:
                 return False
@@ -1212,7 +1253,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 info = config.get(role) or {}
                 v = role_vars[role]
                 v.champion.set(str(info.get("champion") or "").strip())
-                v.ban.set(str(info.get("ban") or "").strip())
+                v.ban.set(
+                    _display_ban_config_value(str(info.get("ban") or "").strip())
+                )
                 coord = info.get("pick_coord") or None
                 if isinstance(coord, (list, tuple)) and len(coord) >= 2:
                     v.pick_x.set(str(coord[0]))
@@ -1225,13 +1268,17 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     str(reserves[0][0]).strip() if len(reserves) >= 1 else ""
                 )
                 v.reserve1_ban.set(
-                    str(reserves[0][1]).strip() if len(reserves) >= 1 else ""
+                    _display_ban_config_value(str(reserves[0][1]).strip())
+                    if len(reserves) >= 1
+                    else ""
                 )
                 v.reserve2_champion.set(
                     str(reserves[1][0]).strip() if len(reserves) >= 2 else ""
                 )
                 v.reserve2_ban.set(
-                    str(reserves[1][1]).strip() if len(reserves) >= 2 else ""
+                    _display_ban_config_value(str(reserves[1][1]).strip())
+                    if len(reserves) >= 2
+                    else ""
                 )
         finally:
             _autosave_suspended = old

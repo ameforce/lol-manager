@@ -13,6 +13,15 @@ from typing import Callable, Iterable, Optional, Tuple
 CACHE_VERSION = 2
 DEFAULT_MAX_AGE_SEC = 12 * 60 * 60
 DEFAULT_DISPLAY_SEPARATOR_PREFIX = "────────"
+AUTO_BAN_VALUE = "__auto__"
+AUTO_BAN_LABEL = "자동 추천 (최고 score)"
+_AUTO_BAN_ALIASES = {
+    AUTO_BAN_VALUE.casefold(),
+    AUTO_BAN_LABEL.casefold(),
+    "auto",
+    "자동",
+    "자동 추천",
+}
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,13 @@ def matchup_winrate_score(matchup_winrate: Optional[float]) -> float:
     return round(max(0.0, min(50.0, raw)), 1)
 
 
+def is_auto_ban_value(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return text.casefold() in _AUTO_BAN_ALIASES
+
+
 def display_value_to_champion_name(
     value: object,
     *,
@@ -81,6 +97,8 @@ def display_value_to_champion_name(
     text = str(value or "").strip()
     if not text:
         return ""
+    if is_auto_ban_value(text):
+        return AUTO_BAN_VALUE
     if label_to_name and text in label_to_name:
         return str(label_to_name[text] or "").strip()
     if separator_prefix and text.startswith(separator_prefix):

@@ -54,8 +54,13 @@ from lolmanager.core.champion_fetcher import (
     sort_counter_candidates_by_role_rank,
 )
 from lolmanager.core.opgg_counter_recommendations import (
+    AUTO_BAN_LABEL,
+    DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     build_label_name_map,
     build_recommendations,
+    default_counter_cache_path,
+    is_auto_ban_value,
+    load_recommendation_cache,
 )
 from lolmanager.platform.resolution_detector import (
     select_image_set,
@@ -83,6 +88,54 @@ ANSI_RESET = "\033[0m"
 DEFAULT_PICK_COORD = (386, 163)
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
+
+
+def display_ban_name_for_summary(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
+
+
+def resolve_ban_name_for_runtime(
+    cache_path: Path,
+    *,
+    role: str,
+    champion_name: str,
+    configured_ban: object,
+    logger: logging.Logger,
+    max_age_sec: float = COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+    now: Optional[float] = None,
+) -> str:
+    ban_name = str(configured_ban or "").strip()
+    if not is_auto_ban_value(ban_name):
+        return ban_name
+
+    result = load_recommendation_cache(
+        cache_path,
+        role=role,
+        configured_pick=champion_name,
+        max_age_sec=max_age_sec,
+        now=now,
+    )
+    if result.recommendations:
+        selected = str(result.recommendations[0].champion or "").strip()
+        if selected:
+            logger.info(
+                "자동 추천 밴 적용: %s -> %s (%s)",
+                champion_name,
+                selected,
+                result.status,
+            )
+            return selected
+
+    logger.warning(
+        "자동 추천 밴 후보가 없습니다: role=%s champion=%s status=%s",
+        role,
+        champion_name,
+        result.status,
+    )
+    return ""
 
 
 @unique
@@ -512,7 +565,7 @@ def prompt_reserve_picks_for_role(
     reserves: list[tuple[str, str]] = []
 
     for idx in (1, 2):
-        ban_label = primary_ban if primary_ban else "미설정"
+        ban_label = display_ban_name_for_summary(primary_ban) if primary_ban else "미설정"
         yn = (
             input(
                 f"[{role}] 현재 픽: {primary} (ban={ban_label}) | 예비 챔피언 {idx} 설정? (y/N): "
@@ -545,14 +598,14 @@ def _print_pick_pool_summary(
     primary_ban: str,
     reserves: list[tuple[str, str]],
 ) -> None:
-    ban_label = primary_ban if primary_ban else "미설정"
+    ban_label = display_ban_name_for_summary(primary_ban) if primary_ban else "미설정"
     print(f"[{role}] 기본: {primary} (ban={ban_label})")
     for idx in (1, 2):
         if idx <= len(reserves):
             champ, ban = reserves[idx - 1]
             champ = str(champ or "").strip()
             ban = str(ban or "").strip()
-            ban_label = ban if ban else "미설정"
+            ban_label = display_ban_name_for_summary(ban) if ban else "미설정"
             print(f"  - 예비{idx}: {champ} (ban={ban_label})")
         else:
             print(f"  - 예비{idx}: 미설정")
@@ -1064,6 +1117,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     lcu = LcuClient()
 
     config = ChampionConfig()
+    counter_cache_path = default_counter_cache_path(config.path.resolve())
 
     print("\n=== 현재 챔피언 설정 ===")
     for role in ROLE_ORDER:
@@ -1073,7 +1127,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             continue
         ban = str(info.get("ban") or "").strip()
         if ban:
-            print(f"[{role}] {champ} (ban: {ban})")
+            print(f"[{role}] {champ} (ban: {display_ban_name_for_summary(ban)})")
         else:
             print(f"[{role}] {champ}")
 
@@ -1559,6 +1613,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger.warning("밴 검색 템플릿이 없습니다: %s", tpl_banpick_search)
                 return
 
+            ban_name = resolve_ban_name_for_runtime(
+                counter_cache_path,
+                role=role or "",
+                champion_name=champion_name,
+                configured_ban=ban_name,
+                logger=logger,
+            )
+
             if not ban_name:
                 logger.warning("밴 챔피언이 설정되지 않았습니다. 밴 단계 건너뜀.")
                 return
@@ -1935,7 +1997,13 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
                         pick_index = next_idx
                         champion_name = next_champ
-                        ban_name = next_ban
+                        ban_name = resolve_ban_name_for_runtime(
+                            counter_cache_path,
+                            role=role or "",
+                            champion_name=champion_name,
+                            configured_ban=next_ban,
+                            logger=logger,
+                        )
                         logger.info(
                             "픽 준비 버튼 클릭 완료(예비 전환): %s", champion_name
                         )
