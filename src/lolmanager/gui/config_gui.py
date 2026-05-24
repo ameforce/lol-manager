@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import threading
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.opgg_champion_list import (
@@ -43,6 +43,17 @@ ROLE_LABEL_KO: Dict[str, str] = {
 APP_USER_MODEL_ID = "LOLManager"
 DISPLAY_SEPARATOR_PREFIX = "────────"
 BanCandidateValues = Tuple[List[str], Dict[str, str], str]
+AUTOSAVE_DELAY_MS = 600
+ROLE_VAR_FIELD_NAMES: Tuple[str, ...] = (
+    "champion",
+    "ban",
+    "pick_x",
+    "pick_y",
+    "reserve1_champion",
+    "reserve1_ban",
+    "reserve2_champion",
+    "reserve2_ban",
+)
 
 
 def display_value_to_champion_name(
@@ -125,6 +136,25 @@ class _RoleWidgets:
     reserve1_ban_cb: "ttk.Combobox"
     reserve2_champion_cb: "ttk.Combobox"
     reserve2_ban_cb: "ttk.Combobox"
+
+
+def attach_role_var_autosave_traces(
+    role_vars: Dict[str, _RoleVars],
+    on_change: Callable[[str, str], None],
+) -> List[str]:
+    handles: List[str] = []
+    for role, rv in role_vars.items():
+        for field_name in ROLE_VAR_FIELD_NAMES:
+            var = getattr(rv, field_name)
+            handles.append(
+                var.trace_add(
+                    "write",
+                    lambda *_args, role=role, field_name=field_name: on_change(
+                        role, field_name
+                    ),
+                )
+            )
+    return handles
 
 
 def _parse_int_pair(x: str, y: str) -> Optional[Tuple[int, int]]:
@@ -212,7 +242,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         top,
         text=(
             "설정 변경은 여기서만 수행하세요.\n"
-            "저장은 설정 파일에만 반영되며, 실제 적용은 메인 앱(LOLManager)에서 Stop→Start 또는 재실행 후 반영됩니다."
+            "변경은 자동 저장되며, 실제 적용은 메인 앱(LOLManager)에서 Stop→Start 또는 재실행 후 반영됩니다."
         ),
         wraplength=900,
     ).pack(side=tk.TOP, anchor=tk.W)
@@ -241,6 +271,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     ban_label_to_name: Dict[str, str] = {}
     _ban_update_after: Dict[str, str] = {}
     _ban_update_token: Dict[str, int] = {}
+    _autosave_after: Dict[str, str] = {}
+    _autosave_suspended = False
     tab_to_role: Dict[str, str] = {}
     _last_valid_raw: Dict[str, str] = {}
 
@@ -892,6 +924,41 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 allow_refresh=allow_refresh,
             )
 
+    def _cancel_pending_autosave() -> bool:
+        prev = _autosave_after.get("id")
+        if not prev:
+            return False
+        _autosave_after.pop("id", None)
+        try:
+            root.after_cancel(prev)
+        except Exception:
+            pass
+        return True
+
+    def _schedule_autosave(delay_ms: int = AUTOSAVE_DELAY_MS) -> None:
+        nonlocal _autosave_suspended
+        if _autosave_suspended:
+            return
+
+        _cancel_pending_autosave()
+
+        status_var.set("자동 저장 대기 중...")
+
+        def _run() -> None:
+            _autosave_after.pop("id", None)
+            _apply_save()
+
+        _autosave_after["id"] = root.after(delay_ms, _run)
+
+    def _set_var_silently(var: "tk.StringVar", value: str) -> None:
+        nonlocal _autosave_suspended
+        old = _autosave_suspended
+        _autosave_suspended = True
+        try:
+            var.set(value)
+        finally:
+            _autosave_suspended = old
+
     for role in ROLE_ORDER:
         rv = role_vars.get(role)
         w = role_widgets.get(role)
@@ -983,19 +1050,34 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         key = normalize_name(v)
         canonical = champion_index.get(key)
         if canonical is None:
-            messagebox.showerror(
-                "저장 실패",
-                f"[{role_label}] {field_label} 값이 op.gg 챔피언 목록에 없습니다:\n{v}",
+            status_var.set(
+                f"자동 저장 보류: [{role_label}] {field_label} 챔피언명 확인 필요"
             )
-            status_var.set("저장 실패: 챔피언명 오류")
             return None
 
         if canonical != v and raw == v:
-            var.set(canonical)
+            _set_var_silently(var, canonical)
         return canonical
 
-    def _apply_save(close_after: bool) -> None:
+    def _parse_coord_for_autosave(
+        role_label: str, x: str, y: str
+    ) -> Tuple[bool, Optional[Tuple[int, int]]]:
+        xs = str(x or "").strip()
+        ys = str(y or "").strip()
+        if not xs and not ys:
+            return (True, None)
+        if not xs or not ys:
+            status_var.set(f"자동 저장 보류: [{role_label}] pick_coord x, y 모두 필요")
+            return (False, None)
+        try:
+            return (True, (int(xs), int(ys)))
+        except ValueError:
+            status_var.set(f"자동 저장 보류: [{role_label}] pick_coord는 숫자만 가능")
+            return (False, None)
+
+    def _apply_save() -> bool:
         canon_by_role: Dict[str, Dict[str, str]] = {}
+        coord_by_role: Dict[str, Optional[Tuple[int, int]]] = {}
         for role in ROLE_ORDER:
             v = role_vars[role]
             role_label = ROLE_LABEL_KO.get(role, role)
@@ -1003,10 +1085,10 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 role_label, "champion", v.champion.get(), v.champion
             )
             if champ is None:
-                return
+                return False
             ban = _canonicalize_or_error(role_label, "ban", v.ban.get(), v.ban)
             if ban is None:
-                return
+                return False
             px = v.pick_x.get().strip()
             py = v.pick_y.get().strip()
             r1c = _canonicalize_or_error(
@@ -1016,12 +1098,12 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 v.reserve1_champion,
             )
             if r1c is None:
-                return
+                return False
             r1b = _canonicalize_or_error(
                 role_label, "reserve1 ban", v.reserve1_ban.get(), v.reserve1_ban
             )
             if r1b is None:
-                return
+                return False
             r2c = _canonicalize_or_error(
                 role_label,
                 "reserve2 champion",
@@ -1029,22 +1111,24 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 v.reserve2_champion,
             )
             if r2c is None:
-                return
+                return False
             r2b = _canonicalize_or_error(
                 role_label, "reserve2 ban", v.reserve2_ban.get(), v.reserve2_ban
             )
             if r2b is None:
-                return
+                return False
             reserves_raw = [(r1c or "", r1b or ""), (r2c or "", r2b or "")]
             reserves = [(c, b) for (c, b) in reserves_raw if str(c or "").strip()]
+            coord_ok, coord = _parse_coord_for_autosave(
+                role_label, v.pick_x.get(), v.pick_y.get()
+            )
+            if not coord_ok:
+                return False
             if not champ and (ban or px or py or reserves):
-                messagebox.showerror(
-                    "저장 실패",
-                    f"[{role_label}] champion이 비어있습니다.\n"
-                    "champion 없이 ban/pick_coord/reserve_picks를 저장하면 런타임 동작이 깨질 수 있습니다.",
+                status_var.set(
+                    f"자동 저장 보류: [{role_label}] champion 없이 다른 값 저장 불가"
                 )
-                status_var.set("저장 실패: 입력 검증 오류")
-                return
+                return False
             canon_by_role[role] = {
                 "champion": str(champ or "").strip(),
                 "ban": str(ban or "").strip(),
@@ -1053,6 +1137,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 "r2c": str(r2c or "").strip(),
                 "r2b": str(r2b or "").strip(),
             }
+            coord_by_role[role] = coord
 
         new_data: Dict[str, Dict] = (
             dict(config.data) if isinstance(config.data, dict) else {}
@@ -1077,7 +1162,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             else:
                 entry.pop("ban", None)
 
-            coord = _parse_int_pair(v.pick_x.get(), v.pick_y.get())
+            coord = coord_by_role.get(role)
             if coord is not None:
                 entry["pick_coord"] = [int(coord[0]), int(coord[1])]
             else:
@@ -1099,17 +1184,14 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             config.data = new_data
             config.save()
         except Exception as exc:
-            messagebox.showerror(
-                "저장 실패", f"설정 파일 저장 중 오류가 발생했습니다:\n{exc}"
-            )
-            status_var.set("저장 실패: 파일 저장 오류")
-            return
+            status_var.set(f"자동 저장 실패: {exc}")
+            return False
 
-        status_var.set("저장 완료")
-        if close_after:
-            root.destroy()
+        status_var.set("자동 저장 완료")
+        return True
 
     def _reload() -> None:
+        nonlocal _autosave_suspended
         try:
             fresh = ChampionConfig(path=config.path)
         except Exception as exc:
@@ -1121,43 +1203,54 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         config.data = fresh.data
 
-        for role in ROLE_ORDER:
-            info = config.get(role) or {}
-            v = role_vars[role]
-            v.champion.set(str(info.get("champion") or "").strip())
-            v.ban.set(str(info.get("ban") or "").strip())
-            coord = info.get("pick_coord") or None
-            if isinstance(coord, (list, tuple)) and len(coord) >= 2:
-                v.pick_x.set(str(coord[0]))
-                v.pick_y.set(str(coord[1]))
-            else:
-                v.pick_x.set("")
-                v.pick_y.set("")
-            reserves = config.get_reserve_picks(role)
-            v.reserve1_champion.set(
-                str(reserves[0][0]).strip() if len(reserves) >= 1 else ""
-            )
-            v.reserve1_ban.set(
-                str(reserves[0][1]).strip() if len(reserves) >= 1 else ""
-            )
-            v.reserve2_champion.set(
-                str(reserves[1][0]).strip() if len(reserves) >= 2 else ""
-            )
-            v.reserve2_ban.set(
-                str(reserves[1][1]).strip() if len(reserves) >= 2 else ""
-            )
+        _cancel_pending_autosave()
+
+        old = _autosave_suspended
+        _autosave_suspended = True
+        try:
+            for role in ROLE_ORDER:
+                info = config.get(role) or {}
+                v = role_vars[role]
+                v.champion.set(str(info.get("champion") or "").strip())
+                v.ban.set(str(info.get("ban") or "").strip())
+                coord = info.get("pick_coord") or None
+                if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                    v.pick_x.set(str(coord[0]))
+                    v.pick_y.set(str(coord[1]))
+                else:
+                    v.pick_x.set("")
+                    v.pick_y.set("")
+                reserves = config.get_reserve_picks(role)
+                v.reserve1_champion.set(
+                    str(reserves[0][0]).strip() if len(reserves) >= 1 else ""
+                )
+                v.reserve1_ban.set(
+                    str(reserves[0][1]).strip() if len(reserves) >= 1 else ""
+                )
+                v.reserve2_champion.set(
+                    str(reserves[1][0]).strip() if len(reserves) >= 2 else ""
+                )
+                v.reserve2_ban.set(
+                    str(reserves[1][1]).strip() if len(reserves) >= 2 else ""
+                )
+        finally:
+            _autosave_suspended = old
 
         status_var.set("다시 불러옴")
         _refresh_configured_bans(allow_refresh=True)
 
-    ttk.Button(btns, text="다시 불러오기", command=_reload).pack(side=tk.LEFT, padx=6)
-    ttk.Button(btns, text="저장", command=lambda: _apply_save(close_after=False)).pack(
-        side=tk.LEFT, padx=6
+    attach_role_var_autosave_traces(
+        role_vars,
+        lambda _role, _field: _schedule_autosave(),
     )
-    ttk.Button(
-        btns, text="저장 후 닫기", command=lambda: _apply_save(close_after=True)
-    ).pack(side=tk.LEFT, padx=6)
-    ttk.Button(btns, text="닫기", command=root.destroy).pack(side=tk.LEFT, padx=6)
+
+    def _close() -> None:
+        if _cancel_pending_autosave():
+            _apply_save()
+        root.destroy()
+
+    ttk.Button(btns, text="다시 불러오기", command=_reload).pack(side=tk.LEFT, padx=6)
+    ttk.Button(btns, text="닫기", command=_close).pack(side=tk.LEFT, padx=6)
 
     _load_champion_list_async()
 

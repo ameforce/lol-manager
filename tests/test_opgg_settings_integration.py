@@ -9,6 +9,9 @@ from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.champion_fetcher import CounterMatchup
 from lolmanager.gui.config_gui import (
     DISPLAY_SEPARATOR_PREFIX,
+    ROLE_VAR_FIELD_NAMES,
+    _RoleVars,
+    attach_role_var_autosave_traces,
     build_ban_candidate_values,
     display_value_to_champion_name,
     should_reuse_ban_candidate_values,
@@ -90,6 +93,44 @@ def test_gui_does_not_reuse_failed_ban_candidate_attempts() -> None:
     assert should_reuse_ban_candidate_values(
         (["퀸 (1티어, 42.8%, score 85.9)"], {"퀸 (1티어, 42.8%, score 85.9)": "퀸"}, "opgg")
     )
+
+
+class _FakeVar:
+    def __init__(self) -> None:
+        self.callbacks = []
+
+    def trace_add(self, mode: str, callback):
+        self.callbacks.append((mode, callback))
+        return f"trace-{len(self.callbacks)}"
+
+
+def test_autosave_traces_watch_every_config_field() -> None:
+    vars_by_role = {
+        "mid": _RoleVars(
+            champion=_FakeVar(),
+            ban=_FakeVar(),
+            pick_x=_FakeVar(),
+            pick_y=_FakeVar(),
+            reserve1_champion=_FakeVar(),
+            reserve1_ban=_FakeVar(),
+            reserve2_champion=_FakeVar(),
+            reserve2_ban=_FakeVar(),
+        )
+    }
+    changed = []
+
+    handles = attach_role_var_autosave_traces(
+        vars_by_role,
+        lambda role, field: changed.append((role, field)),
+    )
+
+    assert len(handles) == len(ROLE_VAR_FIELD_NAMES)
+    for field_name in ROLE_VAR_FIELD_NAMES:
+        fake_var = getattr(vars_by_role["mid"], field_name)
+        assert fake_var.callbacks[0][0] == "write"
+        fake_var.callbacks[0][1]()
+
+    assert changed == [("mid", field_name) for field_name in ROLE_VAR_FIELD_NAMES]
 
 
 def test_config_load_strips_recommendation_metadata_before_runtime(tmp_path: Path) -> None:
