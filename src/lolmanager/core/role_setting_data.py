@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_LABEL, is_auto_ban_value
 
 
 def _norm_champ_name(name: object) -> str:
@@ -11,6 +12,13 @@ def _norm_champ_name(name: object) -> str:
     if not s:
         return ""
     return " ".join(s.split()).casefold()
+
+
+def _display_ban_value(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
 
 
 def load_role_setting_data(config_path: Path, role_key: str) -> dict[str, object]:
@@ -28,7 +36,7 @@ def load_role_setting_data(config_path: Path, role_key: str) -> dict[str, object
     else:
         primary_champ = str(champ_raw or "").strip()
 
-    ban = str(info.get("ban") or "").strip()
+    ban = _display_ban_value(info.get("ban"))
     reserves = cfg.get_reserve_picks(role_key) if role_key else []
     reserve_pairs: list[tuple[str, str]] = []
 
@@ -46,7 +54,7 @@ def load_role_setting_data(config_path: Path, role_key: str) -> dict[str, object
             continue
         if reserve_norm:
             seen_norms.add(reserve_norm)
-        reserve_pairs.append((reserve_champ, str(b or "").strip()))
+        reserve_pairs.append((reserve_champ, _display_ban_value(b)))
 
     coord_val = info.get("pick_coord")
     coord: Optional[tuple[int, int]] = None

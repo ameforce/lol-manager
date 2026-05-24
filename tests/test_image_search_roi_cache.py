@@ -24,6 +24,8 @@ def _reset_image_search_state() -> None:
     match_cache = getattr(image_search, "_TEMPLATE_MATCH_RESULT_CACHE", None)
     if match_cache is not None:
         match_cache.clear()
+    if hasattr(image_search, "_LAST_GRAB_FRAME_TOKEN"):
+        image_search._LAST_GRAB_FRAME_TOKEN = 0
     image_search._load_template_gray_cached.cache_clear()
     image_search._LAST_GRAB_RECT = None
     image_search._LAST_GRAB_AT_MONO = 0.0
@@ -167,6 +169,31 @@ class ImageSearchRoiCacheTests(unittest.TestCase):
 
         self.assertEqual(first_cached_hit_calls, 1)
         self.assertEqual(match_calls["count"], first_cached_hit_calls)
+
+    def test_match_result_cache_does_not_reuse_stale_result_across_frames(self) -> None:
+        template = _template()
+        frame = _screen_without_template()
+        rect = (0, 0, frame.shape[1], frame.shape[0])
+
+        def fake_grab(_rect):
+            return _bgra_from_gray(frame), frame
+
+        with (
+            mock.patch.object(image_search, "_load_template_gray", return_value=template),
+            mock.patch.object(image_search, "_grab_region_bgra_and_gray", side_effect=fake_grab),
+        ):
+            self.assertIsNone(
+                image_search.find_template_center(rect, self.template_path, threshold=0.999)
+            )
+            image_search._TEMPLATE_MISS_CACHE.clear()
+
+            if hasattr(image_search, "_LAST_GRAB_FRAME_TOKEN"):
+                image_search._LAST_GRAB_FRAME_TOKEN += 1
+            frame[:, :] = _screen_with_template(template, x=50, y=60)
+
+            self.assertIsNotNone(
+                image_search.find_template_center(rect, self.template_path, threshold=0.999)
+            )
 
     def test_multi_template_search_captures_once(self) -> None:
         template = _template()
