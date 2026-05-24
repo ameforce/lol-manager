@@ -658,7 +658,16 @@ def detect_match_reset(
     threshold: float,
     confirm_check_interval: float,
     logger: logging.Logger,
+    lcu: Optional[LcuClient] = None,
 ) -> bool:
+    phase = _poll_lcu_phase(lcu, logger, stage)
+    if phase == PHASE_CHAMP_SELECT:
+        logger.debug(
+            "LCU 챔피언 선택 상태 유지(%s). 대전 찾기 이미지 복귀 판단을 생략합니다.",
+            stage,
+        )
+        return False
+
     accepted, finding = poll_match_state(
         rect,
         stage,
@@ -667,6 +676,7 @@ def detect_match_reset(
         threshold,
         confirm_check_interval,
         logger,
+        lcu=lcu,
     )
     if accepted or finding:
         logger.info("매칭 상태 재감지(%s). 현재 단계를 중단합니다.", stage)
@@ -1346,6 +1356,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1430,6 +1441,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1499,6 +1511,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1537,6 +1550,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
