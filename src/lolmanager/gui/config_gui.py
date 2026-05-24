@@ -15,6 +15,13 @@ from lolmanager.core.opgg_champion_list import (
     load_champion_list_cache,
     normalize_name,
 )
+from lolmanager.core.opgg_counter_recommendations import (
+    DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+    build_label_name_map,
+    default_counter_cache_path,
+    get_counter_recommendations,
+    load_recommendation_cache,
+)
 from lolmanager.platform.paths import champion_config_path, resource_path
 from lolmanager.platform.runtime import is_frozen
 
@@ -33,6 +40,26 @@ ROLE_LABEL_KO: Dict[str, str] = {
     "support": "서폿",
 }
 APP_USER_MODEL_ID = "LOLManager"
+DISPLAY_SEPARATOR_PREFIX = "────────"
+
+
+def display_value_to_champion_name(
+    value: str,
+    *,
+    label_to_name: Optional[Dict[str, str]] = None,
+) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if label_to_name and s in label_to_name:
+        return str(label_to_name[s] or "").strip()
+    if s.startswith(DISPLAY_SEPARATOR_PREFIX):
+        return ""
+
+    dot = s.find(". ")
+    if dot > 0 and s[:dot].strip().isdigit():
+        return s[dot + 2 :].strip()
+    return s
 
 
 def _set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
@@ -117,6 +144,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         ) from exc
 
     config = ChampionConfig(path=(config_path or champion_config_path()))
+    counter_cache_path = default_counter_cache_path(config.path.resolve())
 
     _set_app_user_model_id()
     root = tk.Tk()
@@ -176,15 +204,16 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     all_champion_values: List[str] = []
     role_widgets: Dict[str, _RoleWidgets] = {}
 
-    role_ranked_entries: Dict[str, List[Tuple[str, str]]] = {}
+    role_ranked_entries: Dict[str, List[Tuple[str, str, str]]] = {}
     role_href_index: Dict[str, Dict[str, str]] = {}
-    counter_cache: Dict[Tuple[str, str], List[str]] = {}
+    counter_cache: Dict[Tuple[str, str], Tuple[List[str], Dict[str, str], str]] = {}
+    ban_label_to_name: Dict[str, str] = {}
     _ban_update_after: Dict[str, str] = {}
     _ban_update_token: Dict[str, int] = {}
     tab_to_role: Dict[str, str] = {}
     _last_valid_raw: Dict[str, str] = {}
 
-    _SEP_PREFIX = "────────"
+    _SEP_PREFIX = DISPLAY_SEPARATOR_PREFIX
 
     def _is_separator_value(value: str) -> bool:
         return str(value or "").strip().startswith(_SEP_PREFIX)
@@ -196,10 +225,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         if _is_separator_value(s):
             return ""
 
-        dot = s.find(". ")
-        if dot > 0 and s[:dot].strip().isdigit():
-            return s[dot + 2 :].strip()
-        return s
+        return display_value_to_champion_name(s, label_to_name=ban_label_to_name)
 
     def _refine_selected_to_name(field_key: str, var: "tk.StringVar") -> None:
         raw = str(var.get() or "").strip()
@@ -364,7 +390,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         out: List[str] = []
         ranked_keys: set[str] = set()
         last_tier: Optional[str] = None
-        for rank, (name, tier_label) in enumerate(ranked, start=1):
+        for rank, entry in enumerate(ranked, start=1):
+            name, tier_label = entry[0], entry[1]
             n = str(name or "").strip()
             if not n:
                 continue
@@ -465,7 +492,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         for role, entries in (by_position or {}).items():
             if not isinstance(role, str) or not entries:
                 continue
-            ranked: List[Tuple[str, str]] = []
+            ranked: List[Tuple[str, str, str]] = []
             href_map: Dict[str, str] = {}
             for name, tier_label, href in entries:
                 n = str(name or "").strip()
@@ -473,7 +500,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 h = str(href or "").strip()
                 if not n:
                     continue
-                ranked.append((n, t))
+                ranked.append((n, t, h))
                 if h:
                     href_map[normalize_name(n)] = h
             if ranked:
@@ -486,6 +513,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         if by_position:
             status_var.set(f"op.gg 순위 데이터 반영 완료 ({source})")
+            _refresh_configured_bans(allow_refresh=True)
 
     def _set_champion_list(names: List[str], source: str) -> None:
         nonlocal champion_index
@@ -505,6 +533,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         for role in ROLE_ORDER:
             _apply_ranked_values_for_role(role)
+        _refresh_configured_bans(allow_refresh=False)
 
     def _load_champion_list_async() -> None:
         cfg_path = config.path.resolve()
@@ -526,7 +555,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     cache_path, max_age_sec=7 * 24 * 60 * 60, timeout_sec=10.0
                 )
             except Exception as exc:
-                root.after(0, lambda: status_var.set(f"챔피언 목록 로드 실패: {exc}"))
+                msg = f"챔피언 목록 로드 실패: {exc}"
+                root.after(0, lambda: status_var.set(msg))
                 return
             root.after(0, lambda: _set_champion_list(names, source))
             root.after(0, lambda: _set_role_dataset(by_position, source))
@@ -550,18 +580,32 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         except Exception:
             return None
 
-    def _fetch_ban_candidates(role: str, champion_name: str) -> List[str]:
-        href = _resolve_opgg_href(role, champion_name)
-        if not href:
-            return []
-        try:
-            from lolmanager.core.champion_fetcher import fetch_counters_from_detail
-        except Exception:
-            return []
-        try:
-            return fetch_counters_from_detail(href, limit=10)
-        except Exception:
-            return []
+    def _build_recommendation_values(
+        role: str,
+        champion_name: str,
+        *,
+        allow_refresh: bool,
+    ) -> Tuple[List[str], Dict[str, str], str]:
+        ranked_entries = role_ranked_entries.get(role) or []
+        if allow_refresh:
+            result = get_counter_recommendations(
+                counter_cache_path,
+                role=role,
+                configured_pick=champion_name,
+                ranked_entries=ranked_entries,
+                detail_href=_resolve_opgg_href(role, champion_name),
+                max_age_sec=COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+            )
+        else:
+            result = load_recommendation_cache(
+                counter_cache_path,
+                role=role,
+                configured_pick=champion_name,
+                max_age_sec=COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+            )
+
+        labels, label_to_name = build_label_name_map(result.recommendations)
+        return (labels, label_to_name, result.status)
 
     def _set_ban_candidates(
         *,
@@ -571,36 +615,39 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         champion_name: str,
         ban_cb: "ttk.Combobox",
         ban_var: "tk.StringVar",
-        candidates: List[str],
+        labels: List[str],
+        label_to_name: Dict[str, str],
+        source: str,
     ) -> None:
         if _ban_update_token.get(field_key, 0) != token:
             return
 
-        out: List[str] = []
-        seen: set[str] = set()
-        for c in candidates:
-            raw = str(c or "").strip()
-            if not raw:
-                continue
-            canonical = champion_index.get(normalize_name(raw), raw)
-            key = normalize_name(canonical)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(canonical)
-
-        values = out if out else all_champion_values
+        ban_label_to_name.update(label_to_name)
+        values = labels if labels else all_champion_values
         try:
             ban_cb.configure(values=values)
         except Exception:
             pass
 
-        if out and not str(ban_var.get() or "").strip():
-            ban_var.set(out[0])
+        if labels:
+            current_name = _display_to_champion_name(str(ban_var.get() or ""))
+            current_key = normalize_name(current_name) if current_name else ""
+            current_label = ""
+            if current_key:
+                for label, name in label_to_name.items():
+                    if normalize_name(name) == current_key:
+                        current_label = label
+                        break
+            if current_label and str(ban_var.get() or "").strip() != current_label:
+                ban_var.set(current_label)
+            elif not current_name:
+                ban_var.set(labels[0])
 
         role_label = ROLE_LABEL_KO.get(role, role)
-        if out:
-            status_var.set(f"[{role_label}] 밴 후보 갱신 완료 ({len(out)}개)")
+        if labels:
+            status_var.set(
+                f"[{role_label}] 밴 후보 갱신 완료 ({len(labels)}개, {source})"
+            )
         else:
             status_var.set(
                 f"[{role_label}] 밴 후보를 가져오지 못했습니다(수동 입력 가능)"
@@ -614,6 +661,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         ban_cb: "ttk.Combobox",
         ban_var: "tk.StringVar",
         delay_ms: int = 450,
+        allow_refresh: bool = False,
     ) -> None:
         _apply_ranked_values_for_role(role)
 
@@ -659,7 +707,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
             cache_key = (role, normalize_name(champ))
             cached = counter_cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and not allow_refresh:
+                labels, label_to_name, source = cached
                 _set_ban_candidates(
                     field_key=field_key,
                     token=token,
@@ -667,7 +716,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     champion_name=champ,
                     ban_cb=ban_cb,
                     ban_var=ban_var,
-                    candidates=cached,
+                    labels=labels,
+                    label_to_name=label_to_name,
+                    source=source,
                 )
                 return
 
@@ -675,8 +726,13 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             status_var.set(f"[{role_label}] 밴 후보 불러오는 중...")
 
             def _worker() -> None:
-                candidates = _fetch_ban_candidates(role, champ)
-                counter_cache[cache_key] = candidates
+                values = _build_recommendation_values(
+                    role,
+                    champ,
+                    allow_refresh=allow_refresh,
+                )
+                counter_cache[cache_key] = values
+                labels, label_to_name, source = values
                 root.after(
                     0,
                     lambda: _set_ban_candidates(
@@ -686,13 +742,49 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                         champion_name=champ,
                         ban_cb=ban_cb,
                         ban_var=ban_var,
-                        candidates=candidates,
+                        labels=labels,
+                        label_to_name=label_to_name,
+                        source=source,
                     ),
                 )
 
             threading.Thread(target=_worker, daemon=True).start()
 
         _ban_update_after[field_key] = root.after(delay_ms, _kick)
+
+    def _refresh_configured_bans(*, allow_refresh: bool) -> None:
+        for role in ROLE_ORDER:
+            rv = role_vars.get(role)
+            w = role_widgets.get(role)
+            if not rv or not w:
+                continue
+            _schedule_ban_update(
+                field_key=f"{role}:primary",
+                role=role,
+                champion_var=rv.champion,
+                ban_cb=w.ban_cb,
+                ban_var=rv.ban,
+                delay_ms=0,
+                allow_refresh=allow_refresh,
+            )
+            _schedule_ban_update(
+                field_key=f"{role}:reserve1",
+                role=role,
+                champion_var=rv.reserve1_champion,
+                ban_cb=w.reserve1_ban_cb,
+                ban_var=rv.reserve1_ban,
+                delay_ms=0,
+                allow_refresh=allow_refresh,
+            )
+            _schedule_ban_update(
+                field_key=f"{role}:reserve2",
+                role=role,
+                champion_var=rv.reserve2_champion,
+                ban_cb=w.reserve2_ban_cb,
+                ban_var=rv.reserve2_ban,
+                delay_ms=0,
+                allow_refresh=allow_refresh,
+            )
 
     for role in ROLE_ORDER:
         rv = role_vars.get(role)
@@ -919,6 +1011,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             )
 
         status_var.set("다시 불러옴")
+        _refresh_configured_bans(allow_refresh=True)
 
     ttk.Button(btns, text="다시 불러오기", command=_reload).pack(side=tk.LEFT, padx=6)
     ttk.Button(btns, text="저장", command=lambda: _apply_save(close_after=False)).pack(

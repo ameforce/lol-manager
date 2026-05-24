@@ -49,7 +49,13 @@ from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.champion_fetcher import (
     fetch_top_champions,
     fetch_champion_slug,
+    fetch_counter_matchups_from_detail,
     fetch_counters_from_detail,
+    sort_counter_candidates_by_role_rank,
+)
+from lolmanager.core.opgg_counter_recommendations import (
+    build_label_name_map,
+    build_recommendations,
 )
 from lolmanager.platform.resolution_detector import (
     select_image_set,
@@ -294,11 +300,42 @@ def prompt_ban_selection(
     selected_name: str,
     href: Optional[str],
     logger: logging.Logger,
+    ranked_entries: Optional[Iterable[object]] = None,
 ) -> Optional[str]:
     slug = href or fetch_champion_slug(role, selected_name)
+    labels: list[str] = []
+    label_to_name: dict[str, str] = {}
+    if slug:
+        try:
+            recommendations = build_recommendations(
+                role=role,
+                configured_pick=selected_name,
+                matchups=fetch_counter_matchups_from_detail(slug, limit=10),
+                ranked_entries=ranked_entries or (),
+                source_url=slug,
+            )
+            labels, label_to_name = build_label_name_map(recommendations)
+        except Exception as exc:
+            logger.info("OP.GG 추천 밴 후보 계산 실패: %s", exc)
+
+    if labels:
+        print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
+        for idx, label in enumerate(labels, start=1):
+            print(f"  {idx}. {label}")
+        ban_choice = input("번호 입력 (기본 1): ").strip()
+        try:
+            ban_idx = int(ban_choice) - 1 if ban_choice else 0
+        except ValueError:
+            ban_idx = 0
+        ban_idx = max(0, min(ban_idx, len(labels) - 1))
+        return label_to_name.get(labels[ban_idx], labels[ban_idx])
+
     ban_candidates: list[str] = []
     if slug:
-        ban_candidates = fetch_counters_from_detail(slug, limit=10)
+        ban_candidates = sort_counter_candidates_by_role_rank(
+            fetch_counters_from_detail(slug, limit=10),
+            ranked_entries or (),
+        )
     if ban_candidates:
         print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
         for idx, name in enumerate(ban_candidates, start=1):
@@ -365,7 +402,9 @@ def ensure_champion_for_role(
     sel_idx = max(0, min(sel_idx, len(candidates) - 1))
     selected_name, _tier_info, href = candidates[sel_idx]
 
-    selected_ban = prompt_ban_selection(role, selected_name, href, logger)
+    selected_ban = prompt_ban_selection(
+        role, selected_name, href, logger, ranked_entries=candidates
+    )
     config.set(role, selected_name, None, ban_champion=selected_ban)
     logger.info(
         "포지션 %s 챔피언 설정 완료: %s, 밴: %s", role, selected_name, selected_ban
@@ -378,8 +417,11 @@ def _prompt_ban_required(
     champion_name: str,
     href: Optional[str],
     logger: logging.Logger,
+    ranked_entries: Optional[Iterable[object]] = None,
 ) -> str:
-    ban = prompt_ban_selection(role, champion_name, href, logger)
+    ban = prompt_ban_selection(
+        role, champion_name, href, logger, ranked_entries=ranked_entries
+    )
     if ban:
         return ban
     manual = input(
@@ -408,6 +450,8 @@ def _prompt_champion_and_ban_from_opgg(
     if not candidates:
         logger.error("챔피언 후보가 없습니다(%s).", role)
         return ("", "")
+
+    ranked_entries = list(candidates)
 
     if exclude_champions:
         excluded = {
@@ -453,7 +497,9 @@ def _prompt_champion_and_ban_from_opgg(
         sel_idx = 0
     sel_idx = max(0, min(sel_idx, len(candidates) - 1))
     selected_name, _tier_info, href = candidates[sel_idx]
-    selected_ban = _prompt_ban_required(role, selected_name, href, logger)
+    selected_ban = _prompt_ban_required(
+        role, selected_name, href, logger, ranked_entries=ranked_entries
+    )
     return (selected_name, selected_ban)
 
 
