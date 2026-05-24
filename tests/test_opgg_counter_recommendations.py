@@ -10,7 +10,6 @@ from lolmanager.core.champion_fetcher import (
 from lolmanager.core.opgg_counter_recommendations import (
     build_label_name_map,
     build_recommendations,
-    candidate_winrate_from_pick_winrate,
     default_counter_cache_path,
     format_recommendation_label,
     get_counter_recommendations,
@@ -59,23 +58,32 @@ class _Response:
 
 
 def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None:
-    matchups = parse_counter_matchups_from_html(COUNTER_HTML, source_url="/malphite")
+    html = """
+    <section>
+      <h3>상대하기 어려운 챔피언</h3>
+      <ul>
+        <li><a><img alt="블라디미르" /><span>45.60%</span></a></li>
+        <li><a><img alt="제라스" /><span>48.90%</span></a></li>
+      </ul>
+    </section>
+    """
+    matchups = parse_counter_matchups_from_html(html, source_url="/katarina")
     ranked_entries = [
-        ("신지드", ("2티어", "green"), "/ko/lol/champions/singed/build/top"),
-        ("퀸", ("1티어", "blue"), "/ko/lol/champions/quinn/build/top"),
+        ("블라디미르", ("2티어", "green"), "/ko/lol/champions/vladimir/build/mid"),
+        ("제라스", ("1티어", "blue"), "/ko/lol/champions/xerath/build/mid"),
     ]
 
     recommendations = build_recommendations(
-        role="top",
-        configured_pick="말파이트",
+        role="mid",
+        configured_pick="카타리나",
         matchups=matchups,
         ranked_entries=ranked_entries,
-        source_url="/malphite",
+        source_url="/katarina",
     )
 
-    assert [r.champion for r in recommendations] == ["퀸", "신지드"]
-    assert recommendations[0].tier == "1티어"
-    assert recommendations[0].matchup_winrate == 57.18
+    assert [r.champion for r in recommendations] == ["블라디미르", "제라스"]
+    assert recommendations[0].tier == "2티어"
+    assert recommendations[0].matchup_winrate == 45.6
     assert recommendations[0].total_score > recommendations[1].total_score
 
 
@@ -86,9 +94,9 @@ def test_score_helpers_use_documented_defaults() -> None:
     assert tier_score("5티어") == 10
     assert tier_score("unknown") == 0
 
-    assert candidate_winrate_from_pick_winrate(42.82) == 57.18
-    assert matchup_winrate_score(57.18) == 35.9
-    assert matchup_winrate_score(45.0) == 0
+    assert matchup_winrate_score(42.82) == 35.9
+    assert matchup_winrate_score(45.0) == 25.0
+    assert matchup_winrate_score(57.18) == 0
 
 
 def test_sort_tie_break_uses_raw_matchup_winrate_after_score_clamp() -> None:
@@ -151,7 +159,7 @@ def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
     label = format_recommendation_label(recommendations[0])
     labels, label_to_name = build_label_name_map(recommendations)
 
-    assert label == "퀸 (1티어, 57.2%, score 85.9)"
+    assert label == "퀸 (1티어, 42.8%, score 85.9)"
     assert labels[0] == label
     assert label_to_name[label] == "퀸"
 

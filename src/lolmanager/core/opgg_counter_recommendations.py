@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -9,8 +10,9 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 DEFAULT_MAX_AGE_SEC = 12 * 60 * 60
+DEFAULT_DISPLAY_SEPARATOR_PREFIX = "────────"
 
 
 @dataclass(frozen=True)
@@ -66,8 +68,32 @@ def candidate_winrate_from_pick_winrate(pick_winrate: float) -> float:
 def matchup_winrate_score(matchup_winrate: Optional[float]) -> float:
     if matchup_winrate is None:
         return 0
-    raw = (float(matchup_winrate) - 50.0) * 5.0
+    raw = (50.0 - float(matchup_winrate)) * 5.0
     return round(max(0.0, min(50.0, raw)), 1)
+
+
+def display_value_to_champion_name(
+    value: object,
+    *,
+    label_to_name: Optional[dict[str, str]] = None,
+    separator_prefix: str = DEFAULT_DISPLAY_SEPARATOR_PREFIX,
+) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if label_to_name and text in label_to_name:
+        return str(label_to_name[text] or "").strip()
+    if separator_prefix and text.startswith(separator_prefix):
+        return ""
+
+    dot = text.find(". ")
+    if dot > 0 and text[:dot].strip().isdigit():
+        return text[dot + 2 :].strip()
+
+    match = re.match(r"^(?P<name>.+?)\s+\([^()]*\bscore\s+[-+]?\d+(?:\.\d+)?\)$", text)
+    if match:
+        return match.group("name").strip()
+    return text
 
 
 def _entry_name(entry: object) -> str:
@@ -137,7 +163,7 @@ def build_recommendations(
         if pick_winrate is None:
             matchup_winrate = None
         else:
-            matchup_winrate = candidate_winrate_from_pick_winrate(float(pick_winrate))
+            matchup_winrate = round(float(pick_winrate), 2)
         tier_points = tier_score(tier)
         matchup_points = matchup_winrate_score(matchup_winrate)
         total_points = round(tier_points + matchup_points, 1)
@@ -167,8 +193,8 @@ def build_recommendations(
         recommendations,
         key=lambda r: (
             -r.total_score,
-            -(r.matchup_winrate if r.matchup_winrate is not None else -1.0),
             -r.tier_score_value,
+            r.matchup_winrate if r.matchup_winrate is not None else 101.0,
             r.source_order,
             r.champion,
         ),

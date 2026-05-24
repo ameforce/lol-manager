@@ -19,6 +19,7 @@ from lolmanager.core.opgg_counter_recommendations import (
     DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     build_label_name_map,
     default_counter_cache_path,
+    display_value_to_champion_name as _display_value_to_champion_name,
     get_counter_recommendations,
     load_recommendation_cache,
 )
@@ -48,18 +49,42 @@ def display_value_to_champion_name(
     *,
     label_to_name: Optional[Dict[str, str]] = None,
 ) -> str:
-    s = str(value or "").strip()
-    if not s:
-        return ""
-    if label_to_name and s in label_to_name:
-        return str(label_to_name[s] or "").strip()
-    if s.startswith(DISPLAY_SEPARATOR_PREFIX):
-        return ""
+    return _display_value_to_champion_name(
+        value,
+        label_to_name=label_to_name,
+        separator_prefix=DISPLAY_SEPARATOR_PREFIX,
+    )
 
-    dot = s.find(". ")
-    if dot > 0 and s[:dot].strip().isdigit():
-        return s[dot + 2 :].strip()
-    return s
+
+def build_ban_candidate_values(
+    *,
+    labels: List[str],
+    label_to_name: Dict[str, str],
+    all_champion_values: List[str],
+) -> List[str]:
+    clean_labels = [str(label or "").strip() for label in labels if str(label or "").strip()]
+    if not clean_labels:
+        return list(all_champion_values)
+
+    recommended_keys = {
+        normalize_name(name)
+        for name in label_to_name.values()
+        if str(name or "").strip()
+    }
+    remaining = [
+        value
+        for value in all_champion_values
+        if normalize_name(display_value_to_champion_name(value)) not in recommended_keys
+    ]
+
+    values = [
+        f"{DISPLAY_SEPARATOR_PREFIX} 추천 밴 {DISPLAY_SEPARATOR_PREFIX}",
+        *clean_labels,
+    ]
+    if remaining:
+        values.append(f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}")
+        values.extend(remaining)
+    return values
 
 
 def _set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
@@ -251,6 +276,20 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         if canonical != raw:
             var.set(canonical)
 
+    def _remember_or_restore_display_value(
+        field_key: str, var: "tk.StringVar"
+    ) -> None:
+        raw = str(var.get() or "").strip()
+        if not raw:
+            _last_valid_raw[field_key] = ""
+            return
+        if _is_separator_value(raw):
+            prev_raw = _last_valid_raw.get(field_key, "")
+            if prev_raw != raw:
+                var.set(prev_raw)
+            return
+        _last_valid_raw[field_key] = raw
+
     def _add_labeled_entry(
         parent, row: int, label: str, var: "tk.StringVar", width: int = 26
     ) -> None:
@@ -361,6 +400,24 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             lambda _e,
             fk=f"{role}:reserve2",
             v=rv.reserve2_champion: _refine_selected_to_name(fk, v),
+        )
+        ban_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, fk=f"{role}:primary:ban", v=rv.ban: (
+                _remember_or_restore_display_value(fk, v)
+            ),
+        )
+        r1b_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, fk=f"{role}:reserve1:ban", v=rv.reserve1_ban: (
+                _remember_or_restore_display_value(fk, v)
+            ),
+        )
+        r2b_cb.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, fk=f"{role}:reserve2:ban", v=rv.reserve2_ban: (
+                _remember_or_restore_display_value(fk, v)
+            ),
         )
 
         role_widgets[role] = _RoleWidgets(
@@ -623,7 +680,11 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             return
 
         ban_label_to_name.update(label_to_name)
-        values = labels if labels else all_champion_values
+        values = build_ban_candidate_values(
+            labels=labels,
+            label_to_name=label_to_name,
+            all_champion_values=all_champion_values,
+        )
         try:
             ban_cb.configure(values=values)
         except Exception:
@@ -642,6 +703,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 ban_var.set(current_label)
             elif not current_name:
                 ban_var.set(labels[0])
+            selected_raw = str(ban_var.get() or "").strip()
+            if selected_raw:
+                _last_valid_raw[f"{field_key}:ban"] = selected_raw
 
         role_label = ROLE_LABEL_KO.get(role, role)
         if labels:
