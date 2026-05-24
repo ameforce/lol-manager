@@ -71,6 +71,26 @@ def display_value_to_champion_name(
     )
 
 
+def build_auto_ban_label(labels: List[str]) -> str:
+    top_label = next(
+        (str(label or "").strip() for label in labels if str(label or "").strip()),
+        "",
+    )
+    if not top_label:
+        return AUTO_BAN_LABEL
+
+    top_name = display_value_to_champion_name(top_label)
+    if not top_name:
+        return AUTO_BAN_LABEL
+
+    prefix = f"{top_name} ("
+    if top_label.startswith(prefix) and top_label.endswith(")"):
+        detail = top_label[len(prefix) : -1].strip()
+        if detail:
+            return f"자동 추천 (현재 최고: {top_name}, {detail})"
+    return f"자동 추천 (현재 최고: {top_name})"
+
+
 def build_ban_candidate_values(
     *,
     labels: List[str],
@@ -90,7 +110,7 @@ def build_ban_candidate_values(
         if normalize_name(display_value_to_champion_name(value)) not in recommended_keys
     ]
 
-    values = [AUTO_BAN_LABEL]
+    values = [build_auto_ban_label(clean_labels)]
     if clean_labels:
         values.extend(
             [
@@ -749,7 +769,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             pass
 
         if labels:
-            current_name = _display_to_champion_name(str(ban_var.get() or ""))
+            current_raw = str(ban_var.get() or "").strip()
+            auto_label = values[0] if values else AUTO_BAN_LABEL
+            current_name = _display_to_champion_name(current_raw)
             current_key = normalize_name(current_name) if current_name else ""
             current_label = ""
             if current_key:
@@ -757,10 +779,12 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     if normalize_name(name) == current_key:
                         current_label = label
                         break
-            if current_label and str(ban_var.get() or "").strip() != current_label:
+            if is_auto_ban_value(current_raw) and current_raw != auto_label:
+                ban_var.set(auto_label)
+            elif current_label and current_raw != current_label:
                 ban_var.set(current_label)
             elif not current_name:
-                ban_var.set(AUTO_BAN_LABEL)
+                ban_var.set(auto_label)
             selected_raw = str(ban_var.get() or "").strip()
             if selected_raw:
                 _last_valid_raw[f"{field_key}:ban"] = selected_raw

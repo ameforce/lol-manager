@@ -85,7 +85,8 @@ def is_auto_ban_value(value: object) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    return text.casefold() in _AUTO_BAN_ALIASES
+    normalized = text.casefold()
+    return normalized in _AUTO_BAN_ALIASES or normalized.startswith("자동 추천 (")
 
 
 def display_value_to_champion_name(

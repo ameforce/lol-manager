@@ -71,6 +71,12 @@ def test_gui_display_value_maps_recommendation_label_to_plain_name() -> None:
     assert display_value_to_champion_name("  3. 아리", label_to_name={}) == "아리"
     assert display_value_to_champion_name("──────── 1티어 ────────") == ""
     assert display_value_to_champion_name(AUTO_BAN_LABEL) == AUTO_BAN_VALUE
+    assert (
+        display_value_to_champion_name(
+            "자동 추천 (현재 최고: 우디르, 3티어, 46.4%, score 48.0)"
+        )
+        == AUTO_BAN_VALUE
+    )
 
 
 def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions() -> None:
@@ -87,7 +93,7 @@ def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions()
     )
 
     assert values[:4] == [
-        AUTO_BAN_LABEL,
+        "자동 추천 (현재 최고: 블라디미르, 2티어, 45.6%, score 62.0)",
         f"{DISPLAY_SEPARATOR_PREFIX} 추천 밴 {DISPLAY_SEPARATOR_PREFIX}",
         "블라디미르 (2티어, 45.6%, score 62.0)",
         "제라스 (1티어, 48.9%, score 55.5)",
