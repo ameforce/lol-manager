@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+import re
+from dataclasses import dataclass
+from typing import Iterable, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CounterMatchup:
+    champion: str
+    pick_winrate: Optional[float]
+    games: Optional[int]
+    source_order: int
+    raw_text: str
+    href: Optional[str] = None
+    source_url: str = ""
 
 
 POSITION_URLS = {
@@ -27,6 +40,46 @@ TIER_COLORS: dict[str, Tuple[str, str]] = {
     "#9aa4af": ("4티어", "gray"),
     "#a88a67": ("5티어", "brown"),
 }
+
+
+def _normalize_name(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def _ranked_entry_name(entry: object) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("name") or entry.get("champion") or "").strip()
+    if isinstance(entry, (list, tuple)) and entry:
+        return str(entry[0] or "").strip()
+    return str(entry or "").strip()
+
+
+def sort_counter_candidates_by_role_rank(
+    counter_candidates: Iterable[str],
+    ranked_entries: Iterable[object],
+) -> List[str]:
+    rank_by_name: dict[str, int] = {}
+    for rank, entry in enumerate(ranked_entries):
+        name = _ranked_entry_name(entry)
+        if not name:
+            continue
+        rank_by_name.setdefault(_normalize_name(name), rank)
+
+    deduped: list[tuple[bool, int, int, str]] = []
+    seen: set[str] = set()
+    for counter_order, candidate in enumerate(counter_candidates):
+        name = str(candidate or "").strip()
+        if not name:
+            continue
+        key = _normalize_name(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        rank = rank_by_name.get(key)
+        rank_order = rank if rank is not None else 1_000_000
+        deduped.append((rank is None, rank_order, counter_order, name))
+
+    return [name for _unknown, _rank, _counter_order, name in sorted(deduped)]
 
 
 def _tier_from_fill(fill: Optional[str]) -> Tuple[str, str]:
@@ -180,10 +233,130 @@ def fetch_champion_slug(position: str, champion_name: str) -> Optional[str]:
     return None
 
 
-def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
-    url = detail_href
+def _absolute_opgg_url(detail_href: str) -> str:
+    url = str(detail_href or "").strip()
     if url.startswith("/"):
-        url = "https://op.gg" + url
+        return "https://op.gg" + url
+    return url
+
+
+def _parse_percent(value: str) -> Optional[float]:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*%", value or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_games(value: str) -> Optional[int]:
+    match = re.search(r"([\d,]+)\s*게임", value or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _compact_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _counter_links_from_difficult_section(soup: BeautifulSoup) -> List[object]:
+    header_text = soup.find(
+        string=lambda text: bool(text and "상대하기 어려운" in str(text))
+    )
+    if header_text is not None:
+        header = getattr(header_text, "parent", None)
+        if header is not None:
+            ul = header.find_next("ul")
+            if ul is not None:
+                links = ul.select("li a")
+                if links:
+                    return list(links)
+
+    links = soup.select("section:nth-of-type(1) div:nth-of-type(3) ul li a")
+    if links:
+        return list(links)
+    return list(soup.select("section ul li a"))
+
+
+def parse_counter_matchups_from_html(
+    html_text: str,
+    *,
+    source_url: str = "",
+    limit: int = 10,
+) -> List[CounterMatchup]:
+    soup = BeautifulSoup(html_text or "", "lxml")
+    links = _counter_links_from_difficult_section(soup)
+    matchups: List[CounterMatchup] = []
+    seen: set[str] = set()
+
+    for link in links:
+        img = link.select_one("img")
+        champion = ""
+        if img is not None:
+            champion = str(img.get("alt") or "").strip()
+        if not champion:
+            text = _compact_text(link.get_text(" ", strip=True))
+            champion = re.sub(r"\d+(?:\.\d+)?\s*%.*$", "", text).strip()
+        if not champion:
+            continue
+
+        key = _normalize_name(champion)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        raw_text = _compact_text(link.get_text(" ", strip=True))
+        if not raw_text and getattr(link, "parent", None) is not None:
+            raw_text = _compact_text(link.parent.get_text(" ", strip=True))
+        matchups.append(
+            CounterMatchup(
+                champion=champion,
+                pick_winrate=_parse_percent(raw_text),
+                games=_parse_games(raw_text),
+                source_order=len(matchups),
+                raw_text=raw_text,
+                href=str(link.get("href") or "").strip() or None,
+                source_url=source_url,
+            )
+        )
+        if len(matchups) >= limit:
+            break
+
+    return matchups
+
+
+def fetch_counter_matchups_from_detail(
+    detail_href: str,
+    limit: int = 10,
+) -> List[CounterMatchup]:
+    url = _absolute_opgg_url(detail_href)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
+        return []
+    return parse_counter_matchups_from_html(resp.text, source_url=url, limit=limit)
+
+
+def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
+    try:
+        matchups = fetch_counter_matchups_from_detail(detail_href, limit=limit)
+    except Exception as exc:
+        logger.info("상세 카운터 구조화 파싱 실패: %s", exc)
+        matchups = []
+    if matchups:
+        return [matchup.champion for matchup in matchups[:limit]]
+
+    url = _absolute_opgg_url(detail_href)
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

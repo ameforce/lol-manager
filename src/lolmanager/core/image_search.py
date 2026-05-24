@@ -97,10 +97,12 @@ _LAST_GRAB_RECT: Optional[Tuple[int, int, int, int]] = None
 _LAST_GRAB_AT_MONO: float = 0.0
 _LAST_GRAB_BGRA: Optional[np.ndarray] = None
 _LAST_GRAB_GRAY: Optional[np.ndarray] = None
+_LAST_GRAB_FRAME_TOKEN: int = 0
 
 
 def _grab_region_bgra(rect: Tuple[int, int, int, int]) -> np.ndarray:
     global _LAST_GRAB_RECT, _LAST_GRAB_AT_MONO, _LAST_GRAB_BGRA, _LAST_GRAB_GRAY
+    global _LAST_GRAB_FRAME_TOKEN
     global _PROF_GRAB_CALLS, _PROF_GRAB_MISSES, _PROF_GRAB_SEC
 
     left, top, right, bottom = rect
@@ -130,6 +132,7 @@ def _grab_region_bgra(rect: Tuple[int, int, int, int]) -> np.ndarray:
     if _PROFILE_IMAGE:
         _PROF_GRAB_MISSES += 1
         _PROF_GRAB_SEC += float(time.perf_counter() - float(t0))
+    _LAST_GRAB_FRAME_TOKEN += 1
     _LAST_GRAB_RECT = rect
     _LAST_GRAB_AT_MONO = float(now)
     _LAST_GRAB_BGRA = bgra
@@ -160,7 +163,7 @@ def _grab_region_bgra_and_gray(
 _TEMPLATE_ROI_CACHE: dict[str, tuple[Tuple[int, int, int, int], float]] = {}
 _TEMPLATE_MISS_CACHE: dict[str, float] = {}
 _TEMPLATE_MATCH_RESULT_CACHE: dict[
-    tuple[str, int, int, Tuple[int, int, int, int]],
+    tuple[str, int, int, int, Tuple[int, int, int, int]],
     tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ] = {}
 _TEMPLATE_MATCH_RESULT_CACHE_MAX = 256
@@ -237,13 +240,13 @@ def _clear_recent_template_miss(key: str) -> None:
 
 
 def _get_cached_match_result(
-    cache_key: tuple[str, int, int, Tuple[int, int, int, int]],
+    cache_key: tuple[str, int, int, int, Tuple[int, int, int, int]],
 ) -> Optional[tuple[float, Tuple[int, int], Tuple[int, int, int, int]]]:
     return _TEMPLATE_MATCH_RESULT_CACHE.get(cache_key)
 
 
 def _set_cached_match_result(
-    cache_key: tuple[str, int, int, Tuple[int, int, int, int]],
+    cache_key: tuple[str, int, int, int, Tuple[int, int, int, int]],
     result: tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ) -> None:
     if len(_TEMPLATE_MATCH_RESULT_CACHE) >= _TEMPLATE_MATCH_RESULT_CACHE_MAX:
@@ -498,7 +501,13 @@ def find_template_center(
     ) -> tuple[float, Tuple[int, int], Tuple[int, int, int, int]]:
         if roi is None:
             full_roi = (0, 0, screen_w, screen_h)
-            result_key = (key, id(screen_gray), id(template_gray), full_roi)
+            result_key = (
+                key,
+                _LAST_GRAB_FRAME_TOKEN,
+                id(screen_gray),
+                id(template_gray),
+                full_roi,
+            )
             cached = _get_cached_match_result(result_key)
             if cached is not None:
                 return cached
@@ -519,7 +528,13 @@ def find_template_center(
         if sh < template_h or sw < template_w:
             return -1.0, (0, 0), (x1, y1, x2, y2)
         roi_box = (x1, y1, x2, y2)
-        result_key = (key, id(screen_gray), id(template_gray), roi_box)
+        result_key = (
+            key,
+            _LAST_GRAB_FRAME_TOKEN,
+            id(screen_gray),
+            id(template_gray),
+            roi_box,
+        )
         cached = _get_cached_match_result(result_key)
         if cached is not None:
             return cached
@@ -603,7 +618,13 @@ def find_template_match(
     ) -> tuple[float, Tuple[int, int]]:
         if roi is None:
             full_roi = (0, 0, screen_w, screen_h)
-            result_key = (key, id(screen_gray), id(template_gray), full_roi)
+            result_key = (
+                key,
+                _LAST_GRAB_FRAME_TOKEN,
+                id(screen_gray),
+                id(template_gray),
+                full_roi,
+            )
             cached = _get_cached_match_result(result_key)
             if cached is not None:
                 return cached[0], cached[1]
@@ -624,7 +645,13 @@ def find_template_match(
         if sh < template_h or sw < template_w:
             return -1.0, (0, 0)
         roi_box = (x1, y1, x2, y2)
-        result_key = (key, id(screen_gray), id(template_gray), roi_box)
+        result_key = (
+            key,
+            _LAST_GRAB_FRAME_TOKEN,
+            id(screen_gray),
+            id(template_gray),
+            roi_box,
+        )
         cached = _get_cached_match_result(result_key)
         if cached is not None:
             return cached[0], cached[1]

@@ -49,7 +49,18 @@ from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.champion_fetcher import (
     fetch_top_champions,
     fetch_champion_slug,
+    fetch_counter_matchups_from_detail,
     fetch_counters_from_detail,
+    sort_counter_candidates_by_role_rank,
+)
+from lolmanager.core.opgg_counter_recommendations import (
+    AUTO_BAN_LABEL,
+    DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+    build_label_name_map,
+    build_recommendations,
+    default_counter_cache_path,
+    is_auto_ban_value,
+    load_recommendation_cache,
 )
 from lolmanager.platform.resolution_detector import (
     select_image_set,
@@ -77,6 +88,54 @@ ANSI_RESET = "\033[0m"
 DEFAULT_PICK_COORD = (386, 163)
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
+
+
+def display_ban_name_for_summary(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
+
+
+def resolve_ban_name_for_runtime(
+    cache_path: Path,
+    *,
+    role: str,
+    champion_name: str,
+    configured_ban: object,
+    logger: logging.Logger,
+    max_age_sec: float = COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+    now: Optional[float] = None,
+) -> str:
+    ban_name = str(configured_ban or "").strip()
+    if not is_auto_ban_value(ban_name):
+        return ban_name
+
+    result = load_recommendation_cache(
+        cache_path,
+        role=role,
+        configured_pick=champion_name,
+        max_age_sec=max_age_sec,
+        now=now,
+    )
+    if result.recommendations:
+        selected = str(result.recommendations[0].champion or "").strip()
+        if selected:
+            logger.info(
+                "자동 추천 밴 적용: %s -> %s (%s)",
+                champion_name,
+                selected,
+                result.status,
+            )
+            return selected
+
+    logger.warning(
+        "자동 추천 밴 후보가 없습니다: role=%s champion=%s status=%s",
+        role,
+        champion_name,
+        result.status,
+    )
+    return ""
 
 
 @unique
@@ -294,11 +353,42 @@ def prompt_ban_selection(
     selected_name: str,
     href: Optional[str],
     logger: logging.Logger,
+    ranked_entries: Optional[Iterable[object]] = None,
 ) -> Optional[str]:
     slug = href or fetch_champion_slug(role, selected_name)
+    labels: list[str] = []
+    label_to_name: dict[str, str] = {}
+    if slug:
+        try:
+            recommendations = build_recommendations(
+                role=role,
+                configured_pick=selected_name,
+                matchups=fetch_counter_matchups_from_detail(slug, limit=10),
+                ranked_entries=ranked_entries or (),
+                source_url=slug,
+            )
+            labels, label_to_name = build_label_name_map(recommendations)
+        except Exception as exc:
+            logger.info("OP.GG 추천 밴 후보 계산 실패: %s", exc)
+
+    if labels:
+        print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
+        for idx, label in enumerate(labels, start=1):
+            print(f"  {idx}. {label}")
+        ban_choice = input("번호 입력 (기본 1): ").strip()
+        try:
+            ban_idx = int(ban_choice) - 1 if ban_choice else 0
+        except ValueError:
+            ban_idx = 0
+        ban_idx = max(0, min(ban_idx, len(labels) - 1))
+        return label_to_name.get(labels[ban_idx], labels[ban_idx])
+
     ban_candidates: list[str] = []
     if slug:
-        ban_candidates = fetch_counters_from_detail(slug, limit=10)
+        ban_candidates = sort_counter_candidates_by_role_rank(
+            fetch_counters_from_detail(slug, limit=10),
+            ranked_entries or (),
+        )
     if ban_candidates:
         print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
         for idx, name in enumerate(ban_candidates, start=1):
@@ -365,7 +455,9 @@ def ensure_champion_for_role(
     sel_idx = max(0, min(sel_idx, len(candidates) - 1))
     selected_name, _tier_info, href = candidates[sel_idx]
 
-    selected_ban = prompt_ban_selection(role, selected_name, href, logger)
+    selected_ban = prompt_ban_selection(
+        role, selected_name, href, logger, ranked_entries=candidates
+    )
     config.set(role, selected_name, None, ban_champion=selected_ban)
     logger.info(
         "포지션 %s 챔피언 설정 완료: %s, 밴: %s", role, selected_name, selected_ban
@@ -378,8 +470,11 @@ def _prompt_ban_required(
     champion_name: str,
     href: Optional[str],
     logger: logging.Logger,
+    ranked_entries: Optional[Iterable[object]] = None,
 ) -> str:
-    ban = prompt_ban_selection(role, champion_name, href, logger)
+    ban = prompt_ban_selection(
+        role, champion_name, href, logger, ranked_entries=ranked_entries
+    )
     if ban:
         return ban
     manual = input(
@@ -408,6 +503,8 @@ def _prompt_champion_and_ban_from_opgg(
     if not candidates:
         logger.error("챔피언 후보가 없습니다(%s).", role)
         return ("", "")
+
+    ranked_entries = list(candidates)
 
     if exclude_champions:
         excluded = {
@@ -453,7 +550,9 @@ def _prompt_champion_and_ban_from_opgg(
         sel_idx = 0
     sel_idx = max(0, min(sel_idx, len(candidates) - 1))
     selected_name, _tier_info, href = candidates[sel_idx]
-    selected_ban = _prompt_ban_required(role, selected_name, href, logger)
+    selected_ban = _prompt_ban_required(
+        role, selected_name, href, logger, ranked_entries=ranked_entries
+    )
     return (selected_name, selected_ban)
 
 
@@ -466,7 +565,7 @@ def prompt_reserve_picks_for_role(
     reserves: list[tuple[str, str]] = []
 
     for idx in (1, 2):
-        ban_label = primary_ban if primary_ban else "미설정"
+        ban_label = display_ban_name_for_summary(primary_ban) if primary_ban else "미설정"
         yn = (
             input(
                 f"[{role}] 현재 픽: {primary} (ban={ban_label}) | 예비 챔피언 {idx} 설정? (y/N): "
@@ -499,14 +598,14 @@ def _print_pick_pool_summary(
     primary_ban: str,
     reserves: list[tuple[str, str]],
 ) -> None:
-    ban_label = primary_ban if primary_ban else "미설정"
+    ban_label = display_ban_name_for_summary(primary_ban) if primary_ban else "미설정"
     print(f"[{role}] 기본: {primary} (ban={ban_label})")
     for idx in (1, 2):
         if idx <= len(reserves):
             champ, ban = reserves[idx - 1]
             champ = str(champ or "").strip()
             ban = str(ban or "").strip()
-            ban_label = ban if ban else "미설정"
+            ban_label = display_ban_name_for_summary(ban) if ban else "미설정"
             print(f"  - 예비{idx}: {champ} (ban={ban_label})")
         else:
             print(f"  - 예비{idx}: 미설정")
@@ -658,7 +757,22 @@ def detect_match_reset(
     threshold: float,
     confirm_check_interval: float,
     logger: logging.Logger,
+    lcu: Optional[LcuClient] = None,
 ) -> bool:
+    phase = _poll_lcu_phase(lcu, logger, stage)
+    if phase == PHASE_CHAMP_SELECT:
+        logger.debug(
+            "LCU 챔피언 선택 상태 유지(%s). 대전 찾기 이미지 복귀 판단을 생략합니다.",
+            stage,
+        )
+        return False
+    if phase == PHASE_IN_PROGRESS:
+        logger.info(
+            "LCU 인게임 시작 감지(%s). 챔피언 선택 단계를 중단합니다.",
+            stage,
+        )
+        return True
+
     accepted, finding = poll_match_state(
         rect,
         stage,
@@ -667,6 +781,7 @@ def detect_match_reset(
         threshold,
         confirm_check_interval,
         logger,
+        lcu=lcu,
     )
     if accepted or finding:
         logger.info("매칭 상태 재감지(%s). 현재 단계를 중단합니다.", stage)
@@ -900,6 +1015,71 @@ def process_postgame(
         time.sleep(interval_sec)
 
 
+def monitor_ingame_and_postgame(
+    tpl_end_next: Path,
+    tpl_end_one_more: Path,
+    tpl_find_match: Path,
+    tpl_finding_match: Path,
+    tpl_accept: Path,
+    tpl_confirm_templates: Sequence[Path],
+    tpl_prepick: Path,
+    available_roles: list[tuple[str, Path]],
+    threshold: float,
+    confirm_check_interval: float,
+    interval_sec: float,
+    logger: logging.Logger,
+    lcu: Optional[LcuClient] = None,
+) -> None:
+    logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
+    skip_postgame = False
+    while True:
+        phase = _poll_lcu_phase(lcu, logger, "인게임 감시", max_age_sec=1.0)
+        if phase in {
+            PHASE_WAITING_FOR_STATS,
+            PHASE_PRE_END_OF_GAME,
+            PHASE_END_OF_GAME,
+        }:
+            logger.info("LCU 게임 종료 단계 감지: phase=%s", phase)
+            break
+        if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT}:
+            logger.info(
+                "LCU 상태가 인게임 이후 단계로 전환되었습니다(phase=%s). postgame 화면 처리를 건너뜁니다.",
+                phase,
+            )
+            if phase == PHASE_READY_CHECK:
+                _accept_ready_check_via_lcu(lcu, "인게임 감시", logger)
+            skip_postgame = True
+            break
+        if is_game_client_active():
+            _set_client_state(ClientState.INGAME, time.monotonic(), logger)
+            time.sleep(1.0)
+            continue
+        break
+
+    if skip_postgame:
+        return
+
+    logger.info("엔드 화면 처리 시작.")
+    for tpl in (tpl_end_next, tpl_end_one_more):
+        if not tpl.exists():
+            logger.warning("엔드 버튼 템플릿이 없습니다: %s", tpl)
+    process_postgame(
+        tpl_end_next,
+        tpl_end_one_more,
+        tpl_find_match,
+        tpl_finding_match,
+        tpl_accept,
+        tpl_confirm_templates,
+        tpl_prepick,
+        available_roles,
+        threshold,
+        confirm_check_interval,
+        interval_sec,
+        logger,
+        lcu=lcu,
+    )
+
+
 def cli_main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(prog="lolmanager-cli", add_help=True)
     parser.add_argument(
@@ -937,6 +1117,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     lcu = LcuClient()
 
     config = ChampionConfig()
+    counter_cache_path = default_counter_cache_path(config.path.resolve())
 
     print("\n=== 현재 챔피언 설정 ===")
     for role in ROLE_ORDER:
@@ -946,7 +1127,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             continue
         ban = str(info.get("ban") or "").strip()
         if ban:
-            print(f"[{role}] {champ} (ban: {ban})")
+            print(f"[{role}] {champ} (ban: {display_ban_name_for_summary(ban)})")
         else:
             print(f"[{role}] {champ}")
 
@@ -1096,6 +1277,31 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     confirm_check_interval = 0.2
 
     while True:
+        phase_at_cycle = _poll_lcu_phase(lcu, logger, "사이클 시작", max_age_sec=0.5)
+        if phase_at_cycle == PHASE_IN_PROGRESS or (
+            phase_at_cycle is None and is_game_client_active()
+        ):
+            logger.info(
+                "이미 인게임 상태 감지(사이클 시작). 게임 종료 감시로 전환합니다."
+            )
+            monitor_ingame_and_postgame(
+                tpl_end_next,
+                tpl_end_one_more,
+                tpl_find_match,
+                tpl_finding_match,
+                tpl_accept,
+                tpl_confirm_templates,
+                tpl_prepick,
+                available_roles,
+                threshold,
+                confirm_check_interval,
+                interval_sec,
+                logger,
+                lcu=lcu,
+            )
+            logger.info("다음 매칭 사이클을 시작합니다.")
+            continue
+
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
         finding_early = False
@@ -1346,6 +1552,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1406,11 +1613,20 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger.warning("밴 검색 템플릿이 없습니다: %s", tpl_banpick_search)
                 return
 
+            ban_name = resolve_ban_name_for_runtime(
+                counter_cache_path,
+                role=role or "",
+                champion_name=champion_name,
+                configured_ban=ban_name,
+                logger=logger,
+            )
+
             if not ban_name:
                 logger.warning("밴 챔피언이 설정되지 않았습니다. 밴 단계 건너뜀.")
                 return
 
             logger.info("밴 챔피언 검색 시작: %s", ban_name)
+            ban_search_misses = 0
             while True:
                 rect = ensure_active_rect(logger)
                 try_pick_popups(
@@ -1430,6 +1646,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1440,7 +1657,15 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
                     logger.info("밴 검색창 클릭 완료.")
                     break
-                logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
+                ban_search_misses += 1
+                if ban_search_misses == 1 or ban_search_misses % 5 == 0:
+                    logger.info(
+                        "밴 검색창 미검출(%d회). %.1fs 후 재시도...",
+                        ban_search_misses,
+                        interval_sec,
+                    )
+                else:
+                    logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
                 time.sleep(interval_sec)
 
             if restart_cycle:
@@ -1499,6 +1724,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1537,6 +1763,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     threshold,
                     confirm_check_interval,
                     logger,
+                    lcu=lcu,
                 ):
                     restart_cycle = True
                     break
@@ -1770,7 +1997,13 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
                         pick_index = next_idx
                         champion_name = next_champ
-                        ban_name = next_ban
+                        ban_name = resolve_ban_name_for_runtime(
+                            counter_cache_path,
+                            role=role or "",
+                            champion_name=champion_name,
+                            configured_ban=next_ban,
+                            logger=logger,
+                        )
                         logger.info(
                             "픽 준비 버튼 클릭 완료(예비 전환): %s", champion_name
                         )
@@ -1880,40 +2113,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             if restart_cycle:
                 continue
 
-            logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
-            skip_postgame = False
-            while True:
-                phase = _poll_lcu_phase(lcu, logger, "인게임 감시", max_age_sec=1.0)
-                if phase in {
-                    PHASE_WAITING_FOR_STATS,
-                    PHASE_PRE_END_OF_GAME,
-                    PHASE_END_OF_GAME,
-                }:
-                    logger.info("LCU 게임 종료 단계 감지: phase=%s", phase)
-                    break
-                if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT}:
-                    logger.info(
-                        "LCU 상태가 인게임 이후 단계로 전환되었습니다(phase=%s). postgame 화면 처리를 건너뜁니다.",
-                        phase,
-                    )
-                    if phase == PHASE_READY_CHECK:
-                        _accept_ready_check_via_lcu(lcu, "인게임 감시", logger)
-                    skip_postgame = True
-                    break
-                if is_game_client_active():
-                    _set_client_state(ClientState.INGAME, time.monotonic(), logger)
-                    time.sleep(1.0)
-                    continue
-                break
-
-            if skip_postgame:
-                continue
-
-            logger.info("엔드 화면 처리 시작.")
-            for tpl in (tpl_end_next, tpl_end_one_more):
-                if not tpl.exists():
-                    logger.warning("엔드 버튼 템플릿이 없습니다: %s", tpl)
-            process_postgame(
+            monitor_ingame_and_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
                 tpl_find_match,

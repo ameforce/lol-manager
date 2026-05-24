@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+from lolmanager.core.opgg_counter_recommendations import display_value_to_champion_name
 from lolmanager.platform.paths import champion_config_path, project_root, resource_path
 from lolmanager.platform.runtime import is_frozen
 
@@ -110,13 +111,13 @@ def _normalize_reserve_picks(value: Any) -> List[Dict[str, str]]:
         champ = ""
         ban = ""
         if isinstance(item, dict):
-            champ = str(item.get("champion") or "").strip()
-            ban = str(item.get("ban") or "").strip()
+            champ = display_value_to_champion_name(item.get("champion"))
+            ban = display_value_to_champion_name(item.get("ban"))
         elif isinstance(item, (list, tuple)):
             if len(item) >= 1:
-                champ = str(item[0] or "").strip()
+                champ = display_value_to_champion_name(item[0])
             if len(item) >= 2:
-                ban = str(item[1] or "").strip()
+                ban = display_value_to_champion_name(item[1])
         else:
             continue
 
@@ -149,10 +150,18 @@ class ChampionConfig:
                         champ = champ[0] if champ else ""
                         entry["champion"] = champ
                         changed = True
+                    normalized_champ = display_value_to_champion_name(champ)
+                    if normalized_champ != str(champ or "").strip():
+                        entry["champion"] = normalized_champ
+                        changed = True
                     ban = entry.get("ban")
                     if isinstance(ban, (list, tuple)):
                         ban = ban[0] if ban else ""
                         entry["ban"] = ban
+                        changed = True
+                    normalized_ban = display_value_to_champion_name(ban)
+                    if normalized_ban != str(ban or "").strip():
+                        entry["ban"] = normalized_ban
                         changed = True
 
                     if "reserve_picks" in entry:
