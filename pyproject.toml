@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lolmanager"
+version = "0.1.0"
+description = "League of Legends 클라이언트 창 크기 기반 이미지 세트 선택 유틸리티"
+requires-python = ">=3.14"
+dependencies = [
+    "pywinauto>=0.6.8",
+    "psutil>=5.9.0",
+    "mss>=9.0.1",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "playwright>=1.41.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.3",
+    "pyperclip>=1.8.2",
+    "html5lib>=1.1",
+    "ttkbootstrap>=1.10.1",
+]
+
+[project.scripts]
+lolmanager = "lolmanager.cli.entrypoint:main"
+lolmanager-cli = "lolmanager.cli.entrypoint:cli_main"
+lolmanager-config = "lolmanager.gui.config_gui:run_config_gui"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lolmanager"]
+include = [
+    "src/lolmanager/resources/**",
+]

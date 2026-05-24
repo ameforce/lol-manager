@@ -1,0 +1,72 @@
+{
+  "top": {
+    "champion": "케일",
+    "ban": "트린다미어",
+    "reserve_picks": [
+      {
+        "champion": "티모",
+        "ban": "사이온"
+      },
+      {
+        "champion": "베인",
+        "ban": "오공"
+      }
+    ]
+  },
+  "jungle": {
+    "champion": "바이",
+    "ban": "람머스",
+    "reserve_picks": [
+      {
+        "champion": "마스터 이",
+        "ban": "이블린"
+      },
+      {
+        "champion": "신 짜오",
+        "ban": "우디르"
+      }
+    ]
+  },
+  "mid": {
+    "champion": "카타리나",
+    "ban": "다이애나",
+    "reserve_picks": [
+      {
+        "champion": "오리아나",
+        "ban": "초가스"
+      },
+      {
+        "champion": "트위스티드 페이트",
+        "ban": "카시오페아"
+      }
+    ]
+  },
+  "adc": {
+    "champion": "애쉬",
+    "ban": "트리스타나",
+    "reserve_picks": [
+      {
+        "champion": "징크스",
+        "ban": "코그모"
+      },
+      {
+        "champion": "베인",
+        "ban": "사미라"
+      }
+    ]
+  },
+  "support": {
+    "champion": "룰루",
+    "ban": "세라핀",
+    "reserve_picks": [
+      {
+        "champion": "나미",
+        "ban": "마오카이"
+      },
+      {
+        "champion": "잔나",
+        "ban": "아무무"
+      }
+    ]
+  }
+}
