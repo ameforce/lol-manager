@@ -667,6 +667,12 @@ def detect_match_reset(
             stage,
         )
         return False
+    if phase == PHASE_IN_PROGRESS:
+        logger.info(
+            "LCU 인게임 시작 감지(%s). 챔피언 선택 단계를 중단합니다.",
+            stage,
+        )
+        return True
 
     accepted, finding = poll_match_state(
         rect,
@@ -910,6 +916,71 @@ def process_postgame(
         time.sleep(interval_sec)
 
 
+def monitor_ingame_and_postgame(
+    tpl_end_next: Path,
+    tpl_end_one_more: Path,
+    tpl_find_match: Path,
+    tpl_finding_match: Path,
+    tpl_accept: Path,
+    tpl_confirm_templates: Sequence[Path],
+    tpl_prepick: Path,
+    available_roles: list[tuple[str, Path]],
+    threshold: float,
+    confirm_check_interval: float,
+    interval_sec: float,
+    logger: logging.Logger,
+    lcu: Optional[LcuClient] = None,
+) -> None:
+    logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
+    skip_postgame = False
+    while True:
+        phase = _poll_lcu_phase(lcu, logger, "인게임 감시", max_age_sec=1.0)
+        if phase in {
+            PHASE_WAITING_FOR_STATS,
+            PHASE_PRE_END_OF_GAME,
+            PHASE_END_OF_GAME,
+        }:
+            logger.info("LCU 게임 종료 단계 감지: phase=%s", phase)
+            break
+        if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT}:
+            logger.info(
+                "LCU 상태가 인게임 이후 단계로 전환되었습니다(phase=%s). postgame 화면 처리를 건너뜁니다.",
+                phase,
+            )
+            if phase == PHASE_READY_CHECK:
+                _accept_ready_check_via_lcu(lcu, "인게임 감시", logger)
+            skip_postgame = True
+            break
+        if is_game_client_active():
+            _set_client_state(ClientState.INGAME, time.monotonic(), logger)
+            time.sleep(1.0)
+            continue
+        break
+
+    if skip_postgame:
+        return
+
+    logger.info("엔드 화면 처리 시작.")
+    for tpl in (tpl_end_next, tpl_end_one_more):
+        if not tpl.exists():
+            logger.warning("엔드 버튼 템플릿이 없습니다: %s", tpl)
+    process_postgame(
+        tpl_end_next,
+        tpl_end_one_more,
+        tpl_find_match,
+        tpl_finding_match,
+        tpl_accept,
+        tpl_confirm_templates,
+        tpl_prepick,
+        available_roles,
+        threshold,
+        confirm_check_interval,
+        interval_sec,
+        logger,
+        lcu=lcu,
+    )
+
+
 def cli_main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(prog="lolmanager-cli", add_help=True)
     parser.add_argument(
@@ -1106,6 +1177,31 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     confirm_check_interval = 0.2
 
     while True:
+        phase_at_cycle = _poll_lcu_phase(lcu, logger, "사이클 시작", max_age_sec=0.5)
+        if phase_at_cycle == PHASE_IN_PROGRESS or (
+            phase_at_cycle is None and is_game_client_active()
+        ):
+            logger.info(
+                "이미 인게임 상태 감지(사이클 시작). 게임 종료 감시로 전환합니다."
+            )
+            monitor_ingame_and_postgame(
+                tpl_end_next,
+                tpl_end_one_more,
+                tpl_find_match,
+                tpl_finding_match,
+                tpl_accept,
+                tpl_confirm_templates,
+                tpl_prepick,
+                available_roles,
+                threshold,
+                confirm_check_interval,
+                interval_sec,
+                logger,
+                lcu=lcu,
+            )
+            logger.info("다음 매칭 사이클을 시작합니다.")
+            continue
+
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
         finding_early = False
@@ -1422,6 +1518,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 return
 
             logger.info("밴 챔피언 검색 시작: %s", ban_name)
+            ban_search_misses = 0
             while True:
                 rect = ensure_active_rect(logger)
                 try_pick_popups(
@@ -1452,7 +1549,15 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
                     logger.info("밴 검색창 클릭 완료.")
                     break
-                logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
+                ban_search_misses += 1
+                if ban_search_misses == 1 or ban_search_misses % 5 == 0:
+                    logger.info(
+                        "밴 검색창 미검출(%d회). %.1fs 후 재시도...",
+                        ban_search_misses,
+                        interval_sec,
+                    )
+                else:
+                    logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
                 time.sleep(interval_sec)
 
             if restart_cycle:
@@ -1894,40 +1999,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             if restart_cycle:
                 continue
 
-            logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
-            skip_postgame = False
-            while True:
-                phase = _poll_lcu_phase(lcu, logger, "인게임 감시", max_age_sec=1.0)
-                if phase in {
-                    PHASE_WAITING_FOR_STATS,
-                    PHASE_PRE_END_OF_GAME,
-                    PHASE_END_OF_GAME,
-                }:
-                    logger.info("LCU 게임 종료 단계 감지: phase=%s", phase)
-                    break
-                if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT}:
-                    logger.info(
-                        "LCU 상태가 인게임 이후 단계로 전환되었습니다(phase=%s). postgame 화면 처리를 건너뜁니다.",
-                        phase,
-                    )
-                    if phase == PHASE_READY_CHECK:
-                        _accept_ready_check_via_lcu(lcu, "인게임 감시", logger)
-                    skip_postgame = True
-                    break
-                if is_game_client_active():
-                    _set_client_state(ClientState.INGAME, time.monotonic(), logger)
-                    time.sleep(1.0)
-                    continue
-                break
-
-            if skip_postgame:
-                continue
-
-            logger.info("엔드 화면 처리 시작.")
-            for tpl in (tpl_end_next, tpl_end_one_more):
-                if not tpl.exists():
-                    logger.warning("엔드 버튼 템플릿이 없습니다: %s", tpl)
-            process_postgame(
+            monitor_ingame_and_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
                 tpl_find_match,

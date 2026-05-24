@@ -99,6 +99,30 @@ class CliLcuStateTests(unittest.TestCase):
         poll.assert_not_called()
         search.assert_not_called()
 
+    def test_match_reset_exits_when_lcu_reaches_in_progress(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseLcu(PHASE_IN_PROGRESS)
+
+        with (
+            mock.patch.object(entrypoint, "poll_match_state", return_value=(False, False)) as poll,
+            mock.patch.object(entrypoint, "search_and_act", return_value=False) as search,
+        ):
+            reset = entrypoint.detect_match_reset(
+                (0, 0, 1280, 720),
+                "밴 검색",
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                0.85,
+                0.2,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertTrue(reset)
+        poll.assert_not_called()
+        search.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
