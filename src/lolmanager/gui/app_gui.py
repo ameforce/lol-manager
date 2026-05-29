@@ -6,11 +6,12 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import psutil
 import tkinter as tk
@@ -18,7 +19,9 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from lolmanager.core.auto_ban_refresh import AutoBanRefreshCoordinator
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_LABEL
 from lolmanager.core.role_setting_data import load_role_setting_data
 from lolmanager.core.match_timing import format_duration_mmss, load_match_timing_stats
 from lolmanager.platform.paths import (
@@ -71,6 +74,38 @@ ROLE_LABEL_KO: dict[str, str] = {
 
 
 ROLE_CLEAR_STATES: set[str] = {"UNKNOWN", "LOBBY", "MATCH_FINDING", "MATCH_ACCEPT_WAIT"}
+
+
+def compact_role_ban_label_for_main_ui(value: object) -> str:
+    text = str(value or "").strip()
+    if text == AUTO_BAN_LABEL:
+        return "자동 추천"
+
+    match = re.fullmatch(
+        r"자동 추천 \(현재 최고: (?P<champion>.+?), (?P<tier>.+?), "
+        r"(?P<winrate>[^,]+), score (?P<score>[-+]?\d+(?:\.\d+)?)\)",
+        text,
+    )
+    if not match:
+        return text
+
+    tier = match.group("tier").strip()
+    tier = re.sub(r"^(\d+)티어$", r"\1T", tier)
+    return f"{match.group('champion').strip()} {tier} {match.group('winrate').strip()}"
+
+
+class _GuiWarningLogger:
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self._emit = emit
+
+    def warning(self, msg: object, *args: object) -> None:
+        text = str(msg)
+        if args:
+            try:
+                text = text % args
+            except Exception:
+                text = " ".join([text, *(str(arg) for arg in args)])
+        self._emit(f"[GUI] {text}\n")
 
 
 def external_sync_delay_ms(*, in_game: bool) -> int:
@@ -415,6 +450,7 @@ class LolManagerGui:
             self._last_config_mtime_ns = 0
         self._pending_config_apply_at: Optional[float] = None
         self._auto_start_pending = bool(auto_start)
+        self._auto_ban_refresher: Optional[AutoBanRefreshCoordinator] = None
 
         self._client_seen_once = False
         self._league_exit_guard = LeagueClientExitGuard(league_client_exe_path())
@@ -550,10 +586,40 @@ class LolManagerGui:
 
         self._refresh_match_stats(force=True)
 
+        self._auto_ban_refresher = AutoBanRefreshCoordinator(
+            config_path=self.config_path,
+            schedule_after_ms=self._schedule_auto_ban_refresh,
+            run_background=self._run_auto_ban_refresh_background,
+            on_updated=self._on_auto_ban_refresh_updated,
+            logger=_GuiWarningLogger(
+                lambda line: self.root.after(
+                    0,
+                    lambda line=line: self._append_log(line),
+                )
+            ),
+        )
+        self._auto_ban_refresher.start()
+
         self._start_external_sync_worker()
 
         if auto_start:
             self.root.after(250, self.start)
+
+    def _schedule_auto_ban_refresh(
+        self,
+        delay_ms: int,
+        callback: Callable[[], None],
+    ) -> object:
+        return self.root.after(max(0, int(delay_ms)), callback)
+
+    def _run_auto_ban_refresh_background(self, callback: Callable[[], None]) -> None:
+        threading.Thread(target=callback, daemon=True).start()
+
+    def _on_auto_ban_refresh_updated(self) -> None:
+        try:
+            self.root.after(0, self._refresh_role_setting)
+        except Exception:
+            pass
 
     def _show_root_noactivate(self) -> None:
         if os.name != "nt":
@@ -1239,6 +1305,7 @@ class LolManagerGui:
 
         active_champ = pool[active_idx][0] if 0 <= active_idx < len(pool) else ""
         active_ban = pool[active_idx][1] if 0 <= active_idx < len(pool) else ""
+        active_ban_display = compact_role_ban_label_for_main_ui(active_ban)
 
         blocked_norms = tuple(self._blocked_pick_norms)
         blocked_set = self._blocked_pick_norms_set
@@ -1248,6 +1315,7 @@ class LolManagerGui:
             role_key,
             primary,
             primary_ban,
+            active_ban_display,
             tuple(reserve_pairs),
             coord,
             active_norm,
@@ -1275,10 +1343,10 @@ class LolManagerGui:
             else:
                 txt.insert(tk.END, "설정 없음")
 
-            if active_ban:
+            if active_ban_display:
                 txt.insert(tk.END, " | ")
                 txt.insert(tk.END, "ban: ", ("ban",))
-                txt.insert(tk.END, active_ban, ("ban",))
+                txt.insert(tk.END, active_ban_display, ("ban",))
 
             if pool and len(pool) >= 2 and 0 <= active_idx < len(pool):
                 blocked_rank = {n: i for i, n in enumerate(blocked_norms)}
@@ -2119,6 +2187,12 @@ class LolManagerGui:
             self._pending_config_apply_at = time.monotonic()
             self._append_log("[GUI] Config changed detected.\n")
             self._refresh_role_setting()
+            refresher = getattr(self, "_auto_ban_refresher", None)
+            if refresher is not None:
+                try:
+                    refresher.refresh_configured_targets()
+                except Exception:
+                    pass
 
         if self._pending_config_apply_at is not None:
             if (
@@ -2483,6 +2557,12 @@ class LolManagerGui:
             self._last_client_rect = rect
 
     def _on_close(self) -> None:
+        try:
+            refresher = getattr(self, "_auto_ban_refresher", None)
+            if refresher is not None:
+                refresher.close()
+        except Exception:
+            pass
         try:
             after_id = getattr(self, "_proc_usage_after_id", None)
             if after_id:

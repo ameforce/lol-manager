@@ -11,9 +11,11 @@ from lolmanager.core.opgg_counter_recommendations import (
     AUTO_BAN_LABEL,
     AUTO_BAN_VALUE,
     CounterRecommendation,
+    build_auto_ban_label_from_recommendations,
     default_counter_cache_path,
     save_recommendation_cache,
 )
+from lolmanager.core.role_setting_data import load_role_setting_data
 from lolmanager.gui.config_gui import (
     DISPLAY_SEPARATOR_PREFIX,
     ROLE_VAR_FIELD_NAMES,
@@ -100,6 +102,122 @@ def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions()
     ]
     assert f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}" in values
     assert values[-2:] == ["가렌", "아리"]
+
+
+def test_auto_ban_label_helper_uses_current_top_recommendation_detail() -> None:
+    label = build_auto_ban_label_from_recommendations(
+        [
+            CounterRecommendation(
+                role="top",
+                configured_pick="말파이트",
+                champion="퀸",
+                tier="1티어",
+                matchup_winrate=42.8,
+                pick_winrate=42.8,
+                tier_score_value=50,
+                matchup_score=35.9,
+                total_score=85.9,
+                source_order=0,
+            )
+        ]
+    )
+
+    assert label == "자동 추천 (현재 최고: 퀸, 1티어, 42.8%, score 85.9)"
+    assert build_auto_ban_label_from_recommendations([]) == AUTO_BAN_LABEL
+
+
+def test_role_setting_data_displays_cached_auto_ban_recommendation_details(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "champion_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mid": {
+                    "champion": "카타리나",
+                    "ban": AUTO_BAN_VALUE,
+                    "reserve_picks": [
+                        {"champion": "오리아나", "ban": AUTO_BAN_VALUE},
+                        {"champion": "아리", "ban": "제드"},
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cache_path = default_counter_cache_path(config_path)
+    save_recommendation_cache(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        recommendations=[
+            CounterRecommendation(
+                role="mid",
+                configured_pick="카타리나",
+                champion="퀸",
+                tier="1티어",
+                matchup_winrate=42.8,
+                pick_winrate=42.8,
+                tier_score_value=50,
+                matchup_score=35.9,
+                total_score=85.9,
+                source_order=0,
+            )
+        ],
+        fetched_at_unix=100.0,
+    )
+    save_recommendation_cache(
+        cache_path,
+        role="mid",
+        configured_pick="오리아나",
+        recommendations=[
+            CounterRecommendation(
+                role="mid",
+                configured_pick="오리아나",
+                champion="제라스",
+                tier="1티어",
+                matchup_winrate=48.9,
+                pick_winrate=48.9,
+                tier_score_value=50,
+                matchup_score=5.5,
+                total_score=55.5,
+                source_order=0,
+            )
+        ],
+        fetched_at_unix=100.0,
+    )
+
+    data = load_role_setting_data(
+        config_path,
+        "mid",
+        counter_cache_path=cache_path,
+        max_age_sec=1,
+        now=1000.0,
+    )
+
+    assert data["ban"] == "자동 추천 (현재 최고: 퀸, 1티어, 42.8%, score 85.9)"
+    assert data["reserves"] == [
+        ("오리아나", "자동 추천 (현재 최고: 제라스, 1티어, 48.9%, score 55.5)"),
+        ("아리", "제드"),
+    ]
+
+
+def test_role_setting_data_falls_back_for_auto_ban_without_recommendations(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "champion_config.json"
+    config_path.write_text(
+        json.dumps(
+            {"top": {"champion": "말파이트", "ban": AUTO_BAN_VALUE}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    data = load_role_setting_data(config_path, "top")
+
+    assert data["ban"] == AUTO_BAN_LABEL
 
 
 def test_runtime_auto_ban_uses_top_cached_recommendation(tmp_path: Path) -> None:

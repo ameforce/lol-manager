@@ -232,6 +232,35 @@ def format_recommendation_label(recommendation: CounterRecommendation) -> str:
     )
 
 
+def build_auto_ban_label(labels: Iterable[str]) -> str:
+    top_label = next(
+        (str(label or "").strip() for label in labels if str(label or "").strip()),
+        "",
+    )
+    if not top_label:
+        return AUTO_BAN_LABEL
+
+    top_name = display_value_to_champion_name(top_label)
+    if not top_name:
+        return AUTO_BAN_LABEL
+
+    prefix = f"{top_name} ("
+    if top_label.startswith(prefix) and top_label.endswith(")"):
+        detail = top_label[len(prefix) : -1].strip()
+        if detail:
+            return f"자동 추천 (현재 최고: {top_name}, {detail})"
+    return f"자동 추천 (현재 최고: {top_name})"
+
+
+def build_auto_ban_label_from_recommendations(
+    recommendations: Iterable[CounterRecommendation],
+) -> str:
+    return build_auto_ban_label(
+        format_recommendation_label(recommendation)
+        for recommendation in recommendations
+    )
+
+
 def build_label_name_map(
     recommendations: Iterable[CounterRecommendation],
 ) -> tuple[list[str], dict[str, str]]:
