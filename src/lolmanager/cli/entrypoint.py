@@ -4,9 +4,10 @@ import argparse
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from enum import IntEnum, unique
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 if __package__ in (None, ""):
     try:
@@ -24,6 +25,7 @@ from lolmanager.platform.external_apps import (
 from lolmanager.core.match_timing import append_match_duration, format_duration_mmss
 from lolmanager.core.lcu_client import (
     LcuClient,
+    LcuLoopAction,
     PHASE_CHAMP_SELECT,
     PHASE_END_OF_GAME,
     PHASE_IN_PROGRESS,
@@ -32,6 +34,7 @@ from lolmanager.core.lcu_client import (
     PHASE_PRE_END_OF_GAME,
     PHASE_READY_CHECK,
     PHASE_WAITING_FOR_STATS,
+    lcu_loop_action_for,
 )
 from lolmanager.core.runtime_logging import (
     configure_runtime_logging,
@@ -88,6 +91,17 @@ ANSI_RESET = "\033[0m"
 DEFAULT_PICK_COORD = (386, 163)
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
+LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
+    "ready_check": "lcu-first",
+    "matchmaking_start": "lcu-first",
+    "role_detection": "lcu-first",
+    "champ_select_prepick": "lcu-first",
+    "champ_select_ban": "lcu-first",
+    "champ_select_pick": "lcu-first",
+    "reserve_pick": "lcu-first",
+    "pick_popups": "fallback-only",
+    "postgame_end_buttons": "unverified-candidate",
+}
 
 
 def display_ban_name_for_summary(value: object) -> str:
@@ -172,6 +186,13 @@ MY_PICK_TURN_CLEAR_MISS_STREAK = 3
 _MATCH_STARTED_AT_MONO: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class ChampSelectLcuAttempt:
+    completed: bool
+    loop_action: LcuLoopAction
+    outcome: str
+
+
 def _set_client_state(value: ClientState, now: float, logger: logging.Logger) -> None:
     prev = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
     if prev == value:
@@ -198,6 +219,86 @@ def _client_state_from_lcu_phase(phase: Optional[str]) -> Optional[ClientState]:
     return None
 
 
+def _apply_lcu_phase_state(
+    phase: Optional[str],
+    now: float,
+    logger: logging.Logger,
+) -> None:
+    state = _client_state_from_lcu_phase(phase)
+    if state is None:
+        return
+
+    current = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
+    if state == ClientState.PREPICK and current in {
+        ClientState.BANPICK,
+        ClientState.PICK,
+        ClientState.WAIT_GAME_START,
+    }:
+        return
+
+    _set_client_state(state, now, logger)
+
+
+def _lcu_local_action_in_progress(
+    lcu: Optional[LcuClient],
+    action_type: str,
+    *,
+    logger: logging.Logger,
+    stage: str,
+) -> bool:
+    if lcu is None:
+        return False
+    action_fn = getattr(lcu, "get_local_action_state", None)
+    if not callable(action_fn):
+        return False
+
+    try:
+        result = action_fn(action_type, require_in_progress=True)
+    except Exception as exc:  # noqa: BLE001 - action-state refinement must not break polling.
+        logger.debug(
+            "LCU 로컬 action 상태 확인 실패(%s,type=%s): %s",
+            stage,
+            action_type,
+            exc,
+        )
+        return False
+
+    return bool(getattr(result, "ok", False))
+
+
+def _apply_lcu_champ_select_action_state(
+    lcu: Optional[LcuClient],
+    now: float,
+    logger: logging.Logger,
+    stage: str,
+) -> Optional[str]:
+    current = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
+    if current in {
+        ClientState.WAIT_GAME_START,
+        ClientState.INGAME,
+        ClientState.POSTGAME_SCORE,
+    }:
+        return None
+
+    action_to_state: tuple[tuple[str, ClientState], ...] = (
+        ("ban", ClientState.BANPICK),
+        ("pick", ClientState.PICK),
+    )
+    for action_type, state in action_to_state:
+        if not _lcu_local_action_in_progress(
+            lcu, action_type, logger=logger, stage=stage
+        ):
+            continue
+
+        _set_client_state(state, now, logger)
+        if action_type == "pick":
+            _set_my_pick_turn(True, now, logger)
+        logger.debug("LCU 로컬 action 감지(%s,type=%s).", stage, action_type)
+        return action_type
+
+    return None
+
+
 def _poll_lcu_phase(
     lcu: Optional[LcuClient],
     logger: logging.Logger,
@@ -214,9 +315,9 @@ def _poll_lcu_phase(
         prev, curr = transition
         logger.info("LCU 상태 전이(%s): %s -> %s", stage, prev or "UNKNOWN", curr)
 
-    state = _client_state_from_lcu_phase(phase)
-    if state is not None:
-        _set_client_state(state, time.monotonic(), logger)
+    _apply_lcu_phase_state(phase, time.monotonic(), logger)
+    if phase == PHASE_CHAMP_SELECT:
+        _apply_lcu_champ_select_action_state(lcu, time.monotonic(), logger, stage)
     return phase
 
 
@@ -241,6 +342,311 @@ def _accept_ready_check_via_lcu(
 
     logger.debug("LCU ReadyCheck 수락 요청 실패(%s). 이미지 fallback 진행.", stage)
     return False
+
+
+def _phase_blocks_matchmaking_start(phase: Optional[str]) -> bool:
+    if phase is None or phase == PHASE_LOBBY:
+        return False
+    return phase in {
+        PHASE_MATCHMAKING,
+        PHASE_READY_CHECK,
+        PHASE_CHAMP_SELECT,
+        PHASE_IN_PROGRESS,
+        PHASE_WAITING_FOR_STATS,
+        PHASE_PRE_END_OF_GAME,
+        PHASE_END_OF_GAME,
+    }
+
+
+def _matchmaking_start_blocked_by_lcu_phase(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+    *,
+    max_age_sec: float = 0.5,
+) -> bool:
+    if lcu is None:
+        return False
+    phase_fn = getattr(lcu, "get_gameflow_phase", None)
+    if not callable(phase_fn):
+        return False
+
+    try:
+        phase = _poll_lcu_phase(lcu, logger, stage, max_age_sec=max_age_sec)
+    except Exception as exc:  # noqa: BLE001 - preserve image fallback when phase check fails.
+        logger.debug("LCU 대전찾기 phase 확인 실패(%s): %s", stage, exc)
+        return False
+
+    if _phase_blocks_matchmaking_start(phase):
+        logger.debug("LCU phase=%s 이므로 대전찾기 시작을 보류합니다(%s).", phase, stage)
+        return True
+    return False
+
+
+def _start_matchmaking_via_lcu(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> bool:
+    if lcu is None:
+        return False
+    if _matchmaking_start_blocked_by_lcu_phase(lcu, stage, logger):
+        return False
+
+    try:
+        if lcu.start_matchmaking():
+            logger.info("LCU 대전 찾기 요청 완료(%s).", stage)
+            return True
+    except Exception as exc:  # noqa: BLE001 - LCU fallback must remain available.
+        logger.debug("LCU 대전 찾기 요청 실패(%s): %s", stage, exc)
+        return False
+
+    logger.debug("LCU 대전 찾기 요청 실패(%s). 이미지 fallback 진행.", stage)
+    return False
+
+
+def _lcu_status_label(result: object) -> str:
+    status = getattr(result, "status", None)
+    return str(getattr(status, "value", status or "unknown"))
+
+
+def _champ_select_action_attempt_via_lcu(
+    lcu: Optional[LcuClient],
+    champion_name: object,
+    *,
+    action_type: str,
+    complete: bool,
+    stage: str,
+    logger: logging.Logger,
+) -> ChampSelectLcuAttempt:
+    fallback = ChampSelectLcuAttempt(
+        False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted"
+    )
+    if lcu is None:
+        return fallback
+    if not str(champion_name or "").strip():
+        return ChampSelectLcuAttempt(
+            False, LcuLoopAction.WAIT_AUTHORITATIVE, "missing_champion"
+        )
+
+    try:
+        decision_fn = getattr(lcu, "select_champ_select_champion_decision", None)
+        if callable(decision_fn):
+            result = decision_fn(
+                champion_name, action_type=action_type, complete=complete
+            )
+            outcome = _lcu_status_label(result)
+            if getattr(result, "ok", False):
+                mode = "완료" if complete else "선택"
+                logger.info(
+                    "LCU 챔피언 %s 요청 완료(%s,type=%s,outcome=%s): %s",
+                    mode,
+                    stage,
+                    action_type,
+                    outcome,
+                    champion_name,
+                )
+                return ChampSelectLcuAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+            loop_action = lcu_loop_action_for(result, context="write")
+            if loop_action == LcuLoopAction.FALLBACK_IMAGE:
+                loop_action = LcuLoopAction.WAIT_AUTHORITATIVE
+            if loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                logger.debug(
+                    "LCU 챔피언 action 대기(%s,type=%s,outcome=%s). "
+                    "LCU 대상 액션이므로 이미지/마우스 fallback을 스킵합니다.",
+                    stage,
+                    action_type,
+                    outcome,
+                )
+            else:
+                logger.debug(
+                    "LCU 챔피언 action 요청 실패(%s,type=%s,outcome=%s). "
+                    "LCU 대상 액션이므로 이미지/마우스 fallback을 스킵합니다.",
+                    stage,
+                    action_type,
+                    outcome,
+                )
+            return ChampSelectLcuAttempt(False, loop_action, outcome)
+
+        if lcu.select_champ_select_champion(
+            champion_name, action_type=action_type, complete=complete
+        ):
+            mode = "완료" if complete else "선택"
+            logger.info(
+                "LCU 챔피언 %s 요청 완료(%s,type=%s): %s",
+                mode,
+                stage,
+                action_type,
+                champion_name,
+            )
+            return ChampSelectLcuAttempt(True, LcuLoopAction.ACT_LCU, "success")
+    except Exception as exc:  # noqa: BLE001 - ChampSelect writes stay LCU-authoritative.
+        logger.debug(
+            "LCU 챔피언 action 요청 실패(%s,type=%s): %s",
+            stage,
+            action_type,
+            exc,
+        )
+        return ChampSelectLcuAttempt(
+            False, LcuLoopAction.WAIT_AUTHORITATIVE, "exception"
+        )
+
+    logger.debug(
+        "LCU 챔피언 action 요청 실패(%s,type=%s). LCU 대상 액션이므로 이미지/마우스 fallback을 스킵합니다.",
+        stage,
+        action_type,
+    )
+    return ChampSelectLcuAttempt(False, LcuLoopAction.WAIT_AUTHORITATIVE, "unknown")
+
+
+def _wait_champ_select_action_via_lcu(
+    lcu: Optional[LcuClient],
+    champion_name: object,
+    *,
+    action_type: str,
+    complete: bool,
+    stage: str,
+    logger: logging.Logger,
+    interval_sec: float,
+    timeout_sec: float,
+    stop_when_action_type_in_progress: str | None = None,
+) -> ChampSelectLcuAttempt:
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    wait_count = 0
+
+    while True:
+        attempt = _champ_select_action_attempt_via_lcu(
+            lcu,
+            champion_name,
+            action_type=action_type,
+            complete=complete,
+            stage=stage,
+            logger=logger,
+        )
+        if attempt.completed or attempt.loop_action != LcuLoopAction.WAIT_AUTHORITATIVE:
+            return attempt
+
+        wait_count += 1
+        now = time.monotonic()
+        _apply_lcu_champ_select_action_state(lcu, now, logger, f"{stage} 대기")
+
+        if stop_when_action_type_in_progress and _lcu_local_action_in_progress(
+            lcu,
+            stop_when_action_type_in_progress,
+            logger=logger,
+            stage=f"{stage} 대기",
+        ):
+            logger.info(
+                "LCU %s action 대기 중 %s action이 시작되어 다음 단계로 전환합니다(outcome=%s).",
+                stage,
+                stop_when_action_type_in_progress,
+                attempt.outcome,
+            )
+            return ChampSelectLcuAttempt(
+                False,
+                LcuLoopAction.WAIT_AUTHORITATIVE,
+                f"superseded_by_{stop_when_action_type_in_progress}",
+            )
+
+        if now >= deadline:
+            logger.warning(
+                "LCU %s action 대기 시간 초과(type=%s,outcome=%s,%.1fs).",
+                stage,
+                action_type,
+                attempt.outcome,
+                timeout_sec,
+            )
+            return attempt
+
+        if wait_count == 1 or wait_count % 5 == 0:
+            logger.info(
+                "LCU %s action 대기 중(type=%s,outcome=%s,%d회).",
+                stage,
+                action_type,
+                attempt.outcome,
+                wait_count,
+            )
+        time.sleep(min(max(0.0, interval_sec), max(0.0, deadline - now)))
+
+
+def _champ_select_action_via_lcu(
+    lcu: Optional[LcuClient],
+    champion_name: object,
+    *,
+    action_type: str,
+    complete: bool,
+    stage: str,
+    logger: logging.Logger,
+) -> bool:
+    result = _champ_select_action_attempt_via_lcu(
+        lcu,
+        champion_name,
+        action_type=action_type,
+        complete=complete,
+        stage=stage,
+        logger=logger,
+    )
+    return result.completed
+
+
+def _detect_role_via_lcu(
+    lcu: Optional[LcuClient],
+    *,
+    stage: str,
+    logger: logging.Logger,
+) -> Optional[str]:
+    if lcu is None:
+        return None
+
+    try:
+        result = lcu.get_local_player_position()
+    except Exception as exc:  # noqa: BLE001 - image fallback must remain available.
+        logger.debug("LCU 포지션 감지 실패(%s): %s. 이미지 fallback 진행.", stage, exc)
+        return None
+
+    if getattr(result, "ok", False):
+        role = str(getattr(result, "value", "") or "").strip()
+        if role in ROLE_ORDER:
+            logger.info("LCU 포지션 감지(%s): %s", stage, role)
+            return role
+        logger.debug(
+            "LCU 포지션 감지 결과가 지원되지 않는 role입니다(%s,outcome=%s,role=%s). "
+            "이미지 fallback 진행.",
+            stage,
+            _lcu_status_label(result),
+            role,
+        )
+        return None
+
+    loop_action = lcu_loop_action_for(result, context="role")
+    if loop_action == LcuLoopAction.FALLBACK_IMAGE:
+        logger.debug(
+            "LCU 포지션 감지 실패(%s,outcome=%s). 이미지 fallback 진행.",
+            stage,
+            _lcu_status_label(result),
+        )
+    else:
+        logger.debug(
+            "LCU 포지션 감지 보류(%s,outcome=%s,action=%s).",
+            stage,
+            _lcu_status_label(result),
+            loop_action.value,
+        )
+    return None
+
+
+def _detect_role_lcu_first(
+    lcu: Optional[LcuClient],
+    *,
+    stage: str,
+    logger: logging.Logger,
+    image_detector: Callable[[], Optional[str]],
+) -> Optional[str]:
+    role = _detect_role_via_lcu(lcu, stage=stage, logger=logger)
+    if role:
+        return role
+    return image_detector()
 
 
 def _on_client_state_changed_for_timing(
@@ -324,6 +730,18 @@ def _popup_button_search_roi(rect) -> tuple[int, int, int, int]:
     if x2 <= x1 or y2 <= y1:
         return (0, 0, w, h)
     return (x1, y1, x2, y2)
+
+
+def _should_scan_popup_confirm_during_match_poll(phase: Optional[str]) -> bool:
+    if phase == PHASE_LOBBY:
+        return False
+
+    state = RUNTIME_STATE.get("client_state")
+    return state not in {
+        ClientState.LOBBY,
+        ClientState.MATCH_FINDING,
+        ClientState.MATCH_ACCEPT_WAIT,
+    }
 
 
 def ensure_active_rect(logger: logging.Logger, poll: float = 0.5):
@@ -652,7 +1070,7 @@ def poll_match_state(
     confirm_name_to_path: dict[str, Path] = {}
 
     rois: dict[str, tuple[int, int, int, int]] = {}
-    if tpl_confirm_templates:
+    if tpl_confirm_templates and _should_scan_popup_confirm_during_match_poll(phase):
         popup_roi = _popup_button_search_roi(rect)
         for idx, tpl_confirm in enumerate(tpl_confirm_templates):
             if tpl_confirm is None or not tpl_confirm.exists():
@@ -999,6 +1417,9 @@ def process_postgame(
             tpl_confirm_templates=tpl_confirm_templates,
             lcu=lcu,
         )
+
+        if _start_matchmaking_via_lcu(lcu, "엔드 이후", logger):
+            return
 
         found_find_match = search_and_act(
             rect, tpl_find_match, threshold=threshold, click=True
@@ -1361,6 +1782,12 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 finding_early = True
                 break
 
+            success = _start_matchmaking_via_lcu(lcu, "사이클 진입", logger)
+            if success:
+                now = time.monotonic()
+                _reset_match_timer_by_find_match_click(now, logger)
+                break
+
             success = search_and_act(
                 rect, tpl_find_match, threshold=threshold, click=True
             )
@@ -1423,6 +1850,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 ):
                     break
+                clicked = _start_matchmaking_via_lcu(lcu, "매칭 단계", logger)
+                if clicked:
+                    now = time.monotonic()
+                    _reset_match_timer_by_find_match_click(now, logger)
+                    logger.info("LCU 대전 찾기 재요청 완료.")
+                    time.sleep(interval_sec)
+                    continue
+
                 clicked = search_and_act(
                     rect, tpl_find_match, threshold=threshold, click=True
                 )
@@ -1436,67 +1871,77 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     )
                 time.sleep(interval_sec)
 
+        role_found = None
         if available_roles:
             _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
-            logger.info("포지션 텍스트 탐색 시작.")
-            role_found = None
-            last_role = None
-            stable_hits = 0
-            while not role_found:
-                rect = ensure_active_rect(logger)
-                try_pick_popups(
-                    rect,
-                    tpl_confirm_templates,
-                    tpl_pick_decline_opt,
-                    threshold,
-                    logger,
-                    tpl_pick_myturn=tpl_pick_myturn_opt,
-                )
-                accepted, finding = poll_match_state(
-                    rect,
-                    "포지션 탐색 중",
-                    tpl_finding_match,
-                    tpl_accept,
-                    threshold,
-                    confirm_check_interval,
-                    logger,
-                    lcu=lcu,
-                )
-                if accepted:
-                    time.sleep(confirm_check_interval)
-                    continue
-                if finding:
-                    continue
 
-                best = find_best_template(rect, available_roles, threshold=threshold)
-                if best:
-                    detected_role, best_score, second_score = best
-                    if detected_role == last_role:
-                        stable_hits += 1
-                    else:
-                        last_role = detected_role
-                        stable_hits = 1
-
-                    logger.debug(
-                        "포지션 후보: %s (score=%.3f, second=%.3f, hit=%d)",
-                        detected_role,
-                        best_score,
-                        second_score,
-                        stable_hits,
+            def detect_role_by_image() -> Optional[str]:
+                logger.info("포지션 텍스트 탐색 시작.")
+                last_role = None
+                stable_hits = 0
+                while True:
+                    rect = ensure_active_rect(logger)
+                    try_pick_popups(
+                        rect,
+                        tpl_confirm_templates,
+                        tpl_pick_decline_opt,
+                        threshold,
+                        logger,
+                        tpl_pick_myturn=tpl_pick_myturn_opt,
                     )
+                    accepted, finding = poll_match_state(
+                        rect,
+                        "포지션 탐색 중",
+                        tpl_finding_match,
+                        tpl_accept,
+                        threshold,
+                        confirm_check_interval,
+                        logger,
+                        lcu=lcu,
+                    )
+                    if accepted:
+                        time.sleep(confirm_check_interval)
+                        continue
+                    if finding:
+                        continue
 
-                    if stable_hits >= 2:
-                        role_found = detected_role
-                        logger.info(
-                            "포지션 감지: %s (score=%.3f)", role_found, best_score
+                    best = find_best_template(rect, available_roles, threshold=threshold)
+                    if best:
+                        detected_role, best_score, second_score = best
+                        if detected_role == last_role:
+                            stable_hits += 1
+                        else:
+                            last_role = detected_role
+                            stable_hits = 1
+
+                        logger.debug(
+                            "포지션 후보: %s (score=%.3f, second=%.3f, hit=%d)",
+                            detected_role,
+                            best_score,
+                            second_score,
+                            stable_hits,
                         )
-                        break
-                else:
-                    last_role = None
-                    stable_hits = 0
 
-                logger.debug("포지션 미검출. %.1fs 후 재시도...", interval_sec)
-                time.sleep(interval_sec)
+                        if stable_hits >= 2:
+                            logger.info(
+                                "포지션 감지: %s (score=%.3f)",
+                                detected_role,
+                                best_score,
+                            )
+                            return detected_role
+                    else:
+                        last_role = None
+                        stable_hits = 0
+
+                    logger.debug("포지션 미검출. %.1fs 후 재시도...", interval_sec)
+                    time.sleep(interval_sec)
+
+            role_found = _detect_role_lcu_first(
+                lcu,
+                stage="포지션 탐색",
+                logger=logger,
+                image_detector=detect_role_by_image,
+            )
 
         if available_roles and role_found:
             role = role_found
@@ -1533,78 +1978,99 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
             restart_cycle = False
 
-            while True:
-                rect = ensure_active_rect(logger)
-                try_pick_popups(
-                    rect,
-                    tpl_confirm_templates,
-                    tpl_pick_decline_opt,
-                    threshold,
-                    logger,
-                    tpl_pick_myturn=tpl_pick_myturn_opt,
-                )
-                if detect_match_reset(
-                    rect,
-                    "챔피언 선택",
-                    tpl_find_match,
-                    tpl_finding_match,
-                    tpl_accept,
-                    threshold,
-                    confirm_check_interval,
-                    logger,
-                    lcu=lcu,
-                ):
-                    restart_cycle = True
-                    break
-                clicked = search_and_act(
-                    rect, tpl_prepick, threshold=threshold, click=True
-                )
-                if clicked:
-                    _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
-                    logger.info("프리픽 검색창 클릭 완료.")
-                    break
-                logger.debug("프리픽 검색창 미검출. %.1fs 후 재시도...", interval_sec)
-                time.sleep(interval_sec)
-
-            if restart_cycle:
-                continue
-
-            rect = ensure_active_rect(logger)
-            typed = search_and_act(
-                rect,
-                tpl_prepick,
-                threshold=threshold,
-                click=False,
-                keys=champion_name,
-                post_input_sleep=0.2,
+            prepick_lcu_attempt = _wait_champ_select_action_via_lcu(
+                lcu,
+                champion_name,
+                action_type="pick",
+                complete=False,
+                stage="프리픽",
+                logger=logger,
+                interval_sec=interval_sec,
+                timeout_sec=max(3.0, interval_sec * 3.0),
             )
-            if not typed:
-                logger.warning(
-                    "챔피언 검색 입력 실패(검색창/입력 문제). 사이클을 재시도합니다."
+            if prepick_lcu_attempt.completed:
+                _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
+            elif (
+                prepick_lcu_attempt.loop_action
+                == LcuLoopAction.WAIT_AUTHORITATIVE
+            ):
+                logger.info(
+                    "LCU 프리픽 미완료(outcome=%s). 외부 매칭 사이클로 돌아가지 않고 ChampSelect 흐름을 유지합니다.",
+                    prepick_lcu_attempt.outcome,
                 )
-                continue
-            _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
-            logger.info("챔피언 검색 입력: %s", champion_name)
-
-            if pick_coord:
-                time.sleep(0.1)
-                try:
-                    if RUNTIME_STATE.get("client_state") != ClientState.PREPICK:
-                        logger.warning(
-                            "프리픽 상태가 아니므로 좌표 클릭을 스킵합니다: client_state=%s",
-                            RUNTIME_STATE.get("client_state"),
-                        )
+            else:
+                while True:
+                    rect = ensure_active_rect(logger)
+                    try_pick_popups(
+                        rect,
+                        tpl_confirm_templates,
+                        tpl_pick_decline_opt,
+                        threshold,
+                        logger,
+                        tpl_pick_myturn=tpl_pick_myturn_opt,
+                    )
+                    if detect_match_reset(
+                        rect,
+                        "챔피언 선택",
+                        tpl_find_match,
+                        tpl_finding_match,
+                        tpl_accept,
+                        threshold,
+                        confirm_check_interval,
+                        logger,
+                        lcu=lcu,
+                    ):
                         restart_cycle = True
-                    else:
-                        click_relative(rect, (pick_coord[0], pick_coord[1]))
-                except Exception as exc:
-                    logger.warning("챔피언 선택 좌표 클릭 실패: %s", exc)
-                    continue
+                        break
+                    clicked = search_and_act(
+                        rect, tpl_prepick, threshold=threshold, click=True
+                    )
+                    if clicked:
+                        _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
+                        logger.info("프리픽 검색창 클릭 완료.")
+                        break
+                    logger.debug("프리픽 검색창 미검출. %.1fs 후 재시도...", interval_sec)
+                    time.sleep(interval_sec)
+
                 if restart_cycle:
                     continue
-                logger.info("챔피언 선택 좌표 클릭: %s", pick_coord)
-            else:
-                logger.info("좌표가 설정되지 않았습니다. 수동으로 챔피언을 선택하세요.")
+
+                rect = ensure_active_rect(logger)
+                typed = search_and_act(
+                    rect,
+                    tpl_prepick,
+                    threshold=threshold,
+                    click=False,
+                    keys=champion_name,
+                    post_input_sleep=0.2,
+                )
+                if not typed:
+                    logger.warning(
+                        "챔피언 검색 입력 실패(검색창/입력 문제). 사이클을 재시도합니다."
+                    )
+                    continue
+                _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
+                logger.info("챔피언 검색 입력: %s", champion_name)
+
+                if pick_coord:
+                    time.sleep(0.1)
+                    try:
+                        if RUNTIME_STATE.get("client_state") != ClientState.PREPICK:
+                            logger.warning(
+                                "프리픽 상태가 아니므로 좌표 클릭을 스킵합니다: client_state=%s",
+                                RUNTIME_STATE.get("client_state"),
+                            )
+                            restart_cycle = True
+                        else:
+                            click_relative(rect, (pick_coord[0], pick_coord[1]))
+                    except Exception as exc:
+                        logger.warning("챔피언 선택 좌표 클릭 실패: %s", exc)
+                        continue
+                    if restart_cycle:
+                        continue
+                    logger.info("챔피언 선택 좌표 클릭: %s", pick_coord)
+                else:
+                    logger.info("좌표가 설정되지 않았습니다. 수동으로 챔피언을 선택하세요.")
 
             tpl_banpick_search = selected / "banpick_search-text.png"
             tpl_ban_button = selected / "banpick_ban-button.png"
@@ -1625,120 +2091,139 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger.warning("밴 챔피언이 설정되지 않았습니다. 밴 단계 건너뜀.")
                 return
 
-            logger.info("밴 챔피언 검색 시작: %s", ban_name)
-            ban_search_misses = 0
-            while True:
-                rect = ensure_active_rect(logger)
-                try_pick_popups(
-                    rect,
-                    tpl_confirm_templates,
-                    tpl_pick_decline_opt,
-                    threshold,
-                    logger,
-                    tpl_pick_myturn=tpl_pick_myturn_opt,
-                )
-                if detect_match_reset(
-                    rect,
-                    "밴 검색",
-                    tpl_find_match,
-                    tpl_finding_match,
-                    tpl_accept,
-                    threshold,
-                    confirm_check_interval,
-                    logger,
-                    lcu=lcu,
-                ):
-                    restart_cycle = True
-                    break
-                found = search_and_act(
-                    rect, tpl_banpick_search, threshold=threshold, click=True
-                )
-                if found:
-                    _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
-                    logger.info("밴 검색창 클릭 완료.")
-                    break
-                ban_search_misses += 1
-                if ban_search_misses == 1 or ban_search_misses % 5 == 0:
-                    logger.info(
-                        "밴 검색창 미검출(%d회). %.1fs 후 재시도...",
-                        ban_search_misses,
-                        interval_sec,
-                    )
-                else:
-                    logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
-                time.sleep(interval_sec)
-
-            if restart_cycle:
-                continue
-
-            rect = ensure_active_rect(logger)
-            typed = search_and_act(
-                rect,
-                tpl_banpick_search,
-                threshold=threshold,
-                click=False,
-                keys=ban_name,
-                post_input_sleep=0.2,
+            ban_lcu_attempt = _wait_champ_select_action_via_lcu(
+                lcu,
+                ban_name,
+                action_type="ban",
+                complete=True,
+                stage="밴",
+                logger=logger,
+                interval_sec=interval_sec,
+                timeout_sec=max(20.0, interval_sec * 20.0),
+                stop_when_action_type_in_progress="pick",
             )
-            if not typed:
+            if ban_lcu_attempt.completed:
+                _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
+            elif ban_lcu_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 logger.warning(
-                    "밴 챔피언 입력 실패(검색창/입력 문제). 사이클을 재시도합니다."
+                    "LCU 밴 완료 미확정(outcome=%s). 외부 매칭 사이클 재시작 없이 픽 단계 감지를 계속합니다.",
+                    ban_lcu_attempt.outcome,
                 )
-                continue
-            _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
-            logger.info("밴 챔피언 입력: %s", ban_name)
-
-            time.sleep(0.1)
-            try:
-                if RUNTIME_STATE.get("client_state") != ClientState.BANPICK:
-                    logger.warning(
-                        "밴픽 상태가 아니므로 좌표 클릭을 스킵합니다: client_state=%s",
-                        RUNTIME_STATE.get("client_state"),
+            else:
+                logger.info("밴 챔피언 검색 시작: %s", ban_name)
+                ban_search_misses = 0
+                while True:
+                    rect = ensure_active_rect(logger)
+                    try_pick_popups(
+                        rect,
+                        tpl_confirm_templates,
+                        tpl_pick_decline_opt,
+                        threshold,
+                        logger,
+                        tpl_pick_myturn=tpl_pick_myturn_opt,
                     )
-                    restart_cycle = True
-                else:
-                    click_relative(rect, (pick_coord[0], pick_coord[1]))
-            except Exception as exc:
-                logger.warning("밴 챔피언 선택 좌표 클릭 실패: %s", exc)
-                continue
-            if restart_cycle:
-                continue
-            logger.info("밴 챔피언 선택 좌표 클릭: %s", pick_coord)
+                    if detect_match_reset(
+                        rect,
+                        "밴 검색",
+                        tpl_find_match,
+                        tpl_finding_match,
+                        tpl_accept,
+                        threshold,
+                        confirm_check_interval,
+                        logger,
+                        lcu=lcu,
+                    ):
+                        restart_cycle = True
+                        break
+                    found = search_and_act(
+                        rect, tpl_banpick_search, threshold=threshold, click=True
+                    )
+                    if found:
+                        _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
+                        logger.info("밴 검색창 클릭 완료.")
+                        break
+                    ban_search_misses += 1
+                    if ban_search_misses == 1 or ban_search_misses % 5 == 0:
+                        logger.info(
+                            "밴 검색창 미검출(%d회). %.1fs 후 재시도...",
+                            ban_search_misses,
+                            interval_sec,
+                        )
+                    else:
+                        logger.debug("밴 검색창 미검출. %.1fs 후 재시도...", interval_sec)
+                    time.sleep(interval_sec)
 
-            while tpl_ban_button.exists():
+                if restart_cycle:
+                    continue
+
                 rect = ensure_active_rect(logger)
-                try_pick_popups(
+                typed = search_and_act(
                     rect,
-                    tpl_confirm_templates,
-                    tpl_pick_decline_opt,
-                    threshold,
-                    logger,
-                    tpl_pick_myturn=tpl_pick_myturn_opt,
+                    tpl_banpick_search,
+                    threshold=threshold,
+                    click=False,
+                    keys=ban_name,
+                    post_input_sleep=0.2,
                 )
-                if detect_match_reset(
-                    rect,
-                    "밴 버튼 대기",
-                    tpl_find_match,
-                    tpl_finding_match,
-                    tpl_accept,
-                    threshold,
-                    confirm_check_interval,
-                    logger,
-                    lcu=lcu,
-                ):
-                    restart_cycle = True
-                    break
-                clicked = search_and_act(
-                    rect, tpl_ban_button, threshold=threshold, click=True
-                )
-                if clicked:
-                    logger.info("밴 버튼 클릭 완료.")
-                    break
-                logger.debug("밴 버튼 미검출. %.1fs 후 재시도...", interval_sec)
-                time.sleep(interval_sec)
+                if not typed:
+                    logger.warning(
+                        "밴 챔피언 입력 실패(검색창/입력 문제). 사이클을 재시도합니다."
+                    )
+                    continue
+                _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
+                logger.info("밴 챔피언 입력: %s", ban_name)
 
-            if restart_cycle:
-                continue
+                time.sleep(0.1)
+                try:
+                    if RUNTIME_STATE.get("client_state") != ClientState.BANPICK:
+                        logger.warning(
+                            "밴픽 상태가 아니므로 좌표 클릭을 스킵합니다: client_state=%s",
+                            RUNTIME_STATE.get("client_state"),
+                        )
+                        restart_cycle = True
+                    else:
+                        click_relative(rect, (pick_coord[0], pick_coord[1]))
+                except Exception as exc:
+                    logger.warning("밴 챔피언 선택 좌표 클릭 실패: %s", exc)
+                    continue
+                if restart_cycle:
+                    continue
+                logger.info("밴 챔피언 선택 좌표 클릭: %s", pick_coord)
+
+                while tpl_ban_button.exists():
+                    rect = ensure_active_rect(logger)
+                    try_pick_popups(
+                        rect,
+                        tpl_confirm_templates,
+                        tpl_pick_decline_opt,
+                        threshold,
+                        logger,
+                        tpl_pick_myturn=tpl_pick_myturn_opt,
+                    )
+                    if detect_match_reset(
+                        rect,
+                        "밴 버튼 대기",
+                        tpl_find_match,
+                        tpl_finding_match,
+                        tpl_accept,
+                        threshold,
+                        confirm_check_interval,
+                        logger,
+                        lcu=lcu,
+                    ):
+                        restart_cycle = True
+                        break
+                    clicked = search_and_act(
+                        rect, tpl_ban_button, threshold=threshold, click=True
+                    )
+                    if clicked:
+                        logger.info("밴 버튼 클릭 완료.")
+                        break
+                    logger.debug("밴 버튼 미검출. %.1fs 후 재시도...", interval_sec)
+                    time.sleep(interval_sec)
+
+                if restart_cycle:
+                    continue
 
             if tpl_banpick_wait_opt is None:
                 _set_client_state(ClientState.PICK, time.monotonic(), logger)
@@ -1767,6 +2252,27 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 ):
                     restart_cycle = True
                     break
+
+                lcu_pick_attempt = _champ_select_action_attempt_via_lcu(
+                    lcu,
+                    champion_name,
+                    action_type="pick",
+                    complete=True,
+                    stage="픽 준비",
+                    logger=logger,
+                )
+                if lcu_pick_attempt.completed:
+                    _set_my_pick_turn(False, time.monotonic(), logger)
+                    break
+                if lcu_pick_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                    now = time.monotonic()
+                    action_type = _apply_lcu_champ_select_action_state(
+                        lcu, now, logger, "픽 준비 대기"
+                    )
+                    if action_type != "pick":
+                        _set_my_pick_turn(False, now, logger)
+                    time.sleep(interval_sec)
+                    continue
 
                 is_my_turn = bool(RUNTIME_STATE.get("is_my_pick_turn", False))
                 now = time.monotonic()
@@ -1893,11 +2399,46 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         )
 
                     switched = False
+                    reserve_wait_authoritative = False
                     for next_idx in range(pick_index + 1, len(pick_pool)):
                         next_champ, next_ban = pick_pool[next_idx]
                         logger.info(
                             "예비 챔피언 전환 시도: #%d %s", next_idx + 1, next_champ
                         )
+
+                        reserve_lcu_attempt = _champ_select_action_attempt_via_lcu(
+                            lcu,
+                            next_champ,
+                            action_type="pick",
+                            complete=True,
+                            stage="예비 픽 준비",
+                            logger=logger,
+                        )
+                        if reserve_lcu_attempt.completed:
+                            pick_index = next_idx
+                            champion_name = next_champ
+                            ban_name = resolve_ban_name_for_runtime(
+                                counter_cache_path,
+                                role=role or "",
+                                champion_name=champion_name,
+                                configured_ban=next_ban,
+                                logger=logger,
+                            )
+                            logger.info("LCU 예비 픽 준비 완료: %s", champion_name)
+                            _set_my_pick_turn(False, time.monotonic(), logger)
+                            switched = True
+                            break
+                        if (
+                            reserve_lcu_attempt.loop_action
+                            == LcuLoopAction.WAIT_AUTHORITATIVE
+                        ):
+                            logger.debug(
+                                "LCU 예비 픽 대기(outcome=%s). "
+                                "같은 루프에서 예비 이미지 전환을 스킵합니다.",
+                                reserve_lcu_attempt.outcome,
+                            )
+                            reserve_wait_authoritative = True
+                            break
 
                         rect2 = ensure_active_rect(logger)
                         try_pick_popups(
@@ -2013,6 +2554,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
                     if switched:
                         break
+                    if reserve_wait_authoritative:
+                        time.sleep(interval_sec)
+                        continue
 
                     logger.warning(
                         "예비 챔피언 전환에 실패했습니다. 수동 픽이 필요합니다."

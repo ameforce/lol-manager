@@ -19,6 +19,7 @@ from lolmanager.core.opgg_counter_recommendations import (
     AUTO_BAN_LABEL,
     AUTO_BAN_VALUE,
     DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+    build_auto_ban_label as _build_auto_ban_label,
     build_label_name_map,
     default_counter_cache_path,
     display_value_to_champion_name as _display_value_to_champion_name,
@@ -72,23 +73,7 @@ def display_value_to_champion_name(
 
 
 def build_auto_ban_label(labels: List[str]) -> str:
-    top_label = next(
-        (str(label or "").strip() for label in labels if str(label or "").strip()),
-        "",
-    )
-    if not top_label:
-        return AUTO_BAN_LABEL
-
-    top_name = display_value_to_champion_name(top_label)
-    if not top_name:
-        return AUTO_BAN_LABEL
-
-    prefix = f"{top_name} ("
-    if top_label.startswith(prefix) and top_label.endswith(")"):
-        detail = top_label[len(prefix) : -1].strip()
-        if detail:
-            return f"자동 추천 (현재 최고: {top_name}, {detail})"
-    return f"자동 추천 (현재 최고: {top_name})"
+    return _build_auto_ban_label(labels)
 
 
 def build_ban_candidate_values(
