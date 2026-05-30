@@ -22,6 +22,24 @@ PHASE_WAITING_FOR_STATS = "WaitingForStats"
 PHASE_PRE_END_OF_GAME = "PreEndOfGame"
 PHASE_END_OF_GAME = "EndOfGame"
 PHASE_LOBBY = "Lobby"
+PHASE_NONE = "None"
+PHASE_RECONNECT = "Reconnect"
+PHASE_WATCH_IN_PROGRESS = "WatchInProgress"
+KNOWN_GAMEFLOW_PHASES = frozenset(
+    {
+        PHASE_NONE,
+        PHASE_LOBBY,
+        PHASE_MATCHMAKING,
+        PHASE_READY_CHECK,
+        PHASE_CHAMP_SELECT,
+        PHASE_IN_PROGRESS,
+        PHASE_WAITING_FOR_STATS,
+        PHASE_PRE_END_OF_GAME,
+        PHASE_END_OF_GAME,
+        PHASE_RECONNECT,
+        PHASE_WATCH_IN_PROGRESS,
+    }
+)
 
 
 def _normalize_lookup_key(value: object) -> str:
@@ -43,6 +61,38 @@ def _connection_outcome_for_error(error: Optional[str]) -> "LcuOutcome":
     return LcuOutcome.REQUEST_FAILED
 
 
+def _write_result_decision(
+    result: "LcuResult",
+    *,
+    success_reason: str,
+    rejected_reason: str,
+) -> "LcuDecision":
+    if result.error:
+        return LcuDecision(
+            _connection_outcome_for_error(result.error),
+            reason=result.error,
+            status_code=result.status_code,
+            error=result.error,
+        )
+    if result.ok or result.status_code == 204:
+        return LcuDecision(
+            LcuOutcome.SUCCESS,
+            reason=success_reason,
+            status_code=result.status_code,
+        )
+    if result.status_code is None or result.status_code >= 500:
+        return LcuDecision(
+            LcuOutcome.REQUEST_FAILED,
+            reason="LCU request failed",
+            status_code=result.status_code,
+        )
+    return LcuDecision(
+        LcuOutcome.ACTION_REJECTED,
+        reason=rejected_reason,
+        status_code=result.status_code,
+    )
+
+
 _POSITION_ALIASES = {
     "top": "top",
     "jungle": "jungle",
@@ -58,6 +108,10 @@ _POSITION_ALIASES = {
 
 def _canonical_position(value: object) -> Optional[str]:
     return _POSITION_ALIASES.get(_normalize_lookup_key(value))
+
+
+def is_known_gameflow_phase(value: object) -> bool:
+    return isinstance(value, str) and value.strip() in KNOWN_GAMEFLOW_PHASES
 
 
 @dataclass(frozen=True)
@@ -91,8 +145,10 @@ class LcuResult:
 class LcuOutcome(str, Enum):
     SUCCESS = "success"
     UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
     NO_SESSION = "no_session"
     MALFORMED_SESSION = "malformed_session"
+    MALFORMED_RESPONSE = "malformed_response"
     NO_LOCAL_PLAYER = "no_local_player"
     NO_POSITION = "no_position"
     NO_CURRENT_ACTION = "no_current_action"
@@ -148,20 +204,17 @@ def _coerce_lcu_outcome(outcome: object) -> LcuOutcome:
     try:
         return LcuOutcome(str(outcome))
     except ValueError:
-        return LcuOutcome.REQUEST_FAILED
+        return LcuOutcome.UNKNOWN
 
 
 def lcu_loop_action_for(outcome: object, *, context: str) -> LcuLoopAction:
     status = _coerce_lcu_outcome(outcome)
-    context_key = _normalize_lookup_key(context)
 
     if status == LcuOutcome.SUCCESS:
         return LcuLoopAction.ACT_LCU
-    if status == LcuOutcome.NO_CURRENT_ACTION:
-        if context_key in {"write", "pick", "ban", "reserve", "champselect"}:
-            return LcuLoopAction.WAIT_AUTHORITATIVE
+    if status in {LcuOutcome.UNAVAILABLE, LcuOutcome.REQUEST_FAILED}:
         return LcuLoopAction.FALLBACK_IMAGE
-    return LcuLoopAction.FALLBACK_IMAGE
+    return LcuLoopAction.WAIT_AUTHORITATIVE
 
 
 class LcuClient:
@@ -176,7 +229,7 @@ class LcuClient:
         self.lockfile = Path(env_lockfile) if env_lockfile else (lockfile or DEFAULT_LOCKFILE)
         self.session = session or requests.Session()
         self.timeout_sec = float(timeout_sec)
-        self._phase_cache: tuple[float, Optional[str]] = (0.0, None)
+        self._phase_cache: tuple[float, Optional[LcuDecision]] = (0.0, None)
         self._last_logged_phase: Optional[str] = None
 
     def read_connection(self) -> Optional[LcuConnection]:
@@ -229,7 +282,7 @@ class LcuClient:
                     conn.base_url + endpoint,
                     **kwargs,
                 )
-        except Exception as exc:  # noqa: BLE001 - LCU is an optional local integration.
+        except requests.RequestException as exc:
             return LcuResult(status_code=None, error=f"{type(exc).__name__}: {exc}")
 
         data: Any = None
@@ -241,15 +294,49 @@ class LcuClient:
         return LcuResult(status_code=int(response.status_code), data=data)
 
     def get_gameflow_phase(self, *, max_age_sec: float = 0.25) -> Optional[str]:
+        result = self.get_gameflow_phase_decision(max_age_sec=max_age_sec)
+        return str(result.value) if result.ok else None
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
         now = time.monotonic()
         cached_at, cached = self._phase_cache
-        if cached_at and (now - cached_at) <= max(0.0, float(max_age_sec)):
+        if (
+            cached_at
+            and cached is not None
+            and (now - cached_at) <= max(0.0, float(max_age_sec))
+        ):
             return cached
 
         result = self.request("GET", "/lol-gameflow/v1/gameflow-phase")
-        phase = result.data if result.ok and isinstance(result.data, str) else None
-        self._phase_cache = (now, phase)
-        return phase
+        if result.error:
+            decision = LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        elif not result.ok:
+            decision = LcuDecision(
+                LcuOutcome.REQUEST_FAILED,
+                reason="gameflow phase request failed",
+                status_code=result.status_code,
+            )
+        elif not is_known_gameflow_phase(result.data):
+            decision = LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="gameflow phase response is unknown or malformed",
+                status_code=result.status_code,
+            )
+        else:
+            decision = LcuDecision(
+                LcuOutcome.SUCCESS,
+                value=result.data.strip(),
+                status_code=result.status_code,
+            )
+        self._phase_cache = (now, decision)
+        return decision
 
     def consume_phase_transition(self, phase: Optional[str]) -> Optional[tuple[Optional[str], str]]:
         if not phase:
@@ -261,12 +348,26 @@ class LcuClient:
         return (previous, phase)
 
     def accept_ready_check(self) -> bool:
+        return self.accept_ready_check_decision().ok
+
+    def accept_ready_check_decision(self) -> LcuDecision:
         result = self.request("POST", "/lol-matchmaking/v1/ready-check/accept")
-        return result.ok or result.status_code == 204
+        return _write_result_decision(
+            result,
+            success_reason="ready check accept accepted",
+            rejected_reason="ready check accept rejected",
+        )
 
     def start_matchmaking(self) -> bool:
+        return self.start_matchmaking_decision().ok
+
+    def start_matchmaking_decision(self) -> LcuDecision:
         result = self.request("POST", "/lol-lobby/v2/lobby/matchmaking/search")
-        return result.ok or result.status_code == 204
+        return _write_result_decision(
+            result,
+            success_reason="matchmaking search accepted",
+            rejected_reason="matchmaking search rejected",
+        )
 
     def is_end_of_game_stats_available(self) -> bool:
         return self.request("GET", "/lol-end-of-game/v1/eog-stats-block").ok
@@ -529,23 +630,31 @@ class LcuClient:
             "POST",
             f"/lol-champ-select/v1/session/actions/{action_id}/complete",
         )
-        if completed.ok or completed.status_code == 204:
-            return LcuDecision(
-                LcuOutcome.SUCCESS,
-                reason="champ-select action complete post accepted",
-                status_code=completed.status_code,
-            )
+        completed_decision = _write_result_decision(
+            completed,
+            success_reason="champ-select action complete post accepted",
+            rejected_reason="champ-select action complete post rejected",
+        )
+        if completed_decision.ok:
+            return completed_decision
 
         fallback = self._patch_completed_champ_select_action(action_id, champion_id)
         if fallback.ok:
             return fallback
-
-        return LcuDecision(
-            LcuOutcome.ACTION_REJECTED,
-            reason="champ-select action complete rejected",
-            status_code=completed.status_code,
-            error=completed.error or fallback.error,
-        )
+        if completed_decision.status in {
+            LcuOutcome.UNAVAILABLE,
+            LcuOutcome.REQUEST_FAILED,
+        }:
+            return LcuDecision(
+                completed_decision.status,
+                reason=(
+                    f"{completed_decision.reason}; "
+                    f"fallback patch failed: {fallback.reason}"
+                ),
+                status_code=completed_decision.status_code,
+                error=completed_decision.error or fallback.error,
+            )
+        return fallback
 
     def _patch_completed_champ_select_action(
         self,
@@ -557,18 +666,10 @@ class LcuClient:
             f"/lol-champ-select/v1/session/actions/{action_id}",
             json_body={"championId": champion_id, "completed": True},
         )
-        if fallback.ok or fallback.status_code == 204:
-            return LcuDecision(
-                LcuOutcome.SUCCESS,
-                reason="champ-select action complete fallback patch accepted",
-                status_code=fallback.status_code,
-            )
-
-        return LcuDecision(
-            LcuOutcome.ACTION_REJECTED,
-            reason="champ-select action complete fallback patch rejected",
-            status_code=fallback.status_code,
-            error=fallback.error,
+        return _write_result_decision(
+            fallback,
+            success_reason="champ-select action complete fallback patch accepted",
+            rejected_reason="champ-select action complete fallback patch rejected",
         )
 
     def get_champ_select_grid_champions(self) -> list[dict[str, Any]]:
@@ -586,10 +687,16 @@ class LcuClient:
                 status_code=result.status_code,
                 error=result.error,
             )
-        if not result.ok or not isinstance(result.data, list):
+        if not result.ok:
             return LcuDecision(
                 LcuOutcome.REQUEST_FAILED,
                 reason="champion grid unavailable",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="champion grid response is not a list",
                 status_code=result.status_code,
             )
         return LcuDecision(
@@ -712,13 +819,13 @@ class LcuClient:
             f"/lol-champ-select/v1/session/actions/{action.value.id}",
             json_body={"championId": champion.value},
         )
-        if not (patch.ok or patch.status_code == 204):
-            return LcuDecision(
-                LcuOutcome.ACTION_REJECTED,
-                reason="champ-select action patch rejected",
-                status_code=patch.status_code,
-                error=patch.error,
-            )
+        patch_decision = _write_result_decision(
+            patch,
+            success_reason="champ-select action patch accepted",
+            rejected_reason="champ-select action patch rejected",
+        )
+        if not patch_decision.ok:
+            return patch_decision
 
         if complete:
             self._wait_for_action_champion(action.value.id, int(champion.value))
@@ -738,6 +845,20 @@ class LcuClient:
                         action.value.id, int(champion.value)
                     )
                     if not fallback_completed.ok:
+                        if completed_action.status in {
+                            LcuOutcome.UNAVAILABLE,
+                            LcuOutcome.REQUEST_FAILED,
+                        }:
+                            return LcuDecision(
+                                completed_action.status,
+                                reason=(
+                                    f"{completed_action.reason}; "
+                                    f"fallback patch failed: {fallback_completed.reason}"
+                                ),
+                                status_code=completed_action.status_code,
+                                error=completed_action.error
+                                or fallback_completed.error,
+                            )
                         return fallback_completed
                     completed_action = self._wait_for_action_completed(
                         action.value.id
