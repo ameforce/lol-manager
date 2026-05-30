@@ -6,6 +6,8 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
+from requests import Timeout
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -79,6 +81,49 @@ class LcuClientTests(unittest.TestCase):
         self.assertTrue(
             str(session.calls[0]["url"]).endswith("/lol-gameflow/v1/gameflow-phase")
         )
+
+    def test_gameflow_phase_decision_reports_malformed_response(self) -> None:
+        session = _FakeSession([_FakeResponse(200, {"phase": "Matchmaking"})])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_gameflow_phase_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
+        self.assertEqual(
+            lcu_loop_action_for(result, context="phase"),
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+        )
+
+    def test_gameflow_phase_decision_rejects_unknown_phase(self) -> None:
+        session = _FakeSession([_FakeResponse(200, "FuturePhase")])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_gameflow_phase_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
+        self.assertEqual(
+            lcu_loop_action_for(result, context="phase"),
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+        )
+
+    def test_request_converts_requests_exception_to_transport_failure(self) -> None:
+        session = mock.Mock()
+        session.request.side_effect = Timeout("LCU down")
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.request("GET", "/lol-gameflow/v1/gameflow-phase")
+
+        self.assertIn("Timeout", result.error or "")
+
+    def test_request_does_not_convert_unexpected_exception_to_transport_failure(
+        self,
+    ) -> None:
+        session = mock.Mock()
+        session.request.side_effect = RuntimeError("programmer fault")
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        with self.assertRaisesRegex(RuntimeError, "programmer fault"):
+            client.request("GET", "/lol-gameflow/v1/gameflow-phase")
 
     def test_accept_ready_check_posts_to_lcu_endpoint(self) -> None:
         session = _FakeSession([_FakeResponse(204)])
@@ -250,6 +295,86 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.ACTION_REJECTED)
         self.assertEqual(result.status_code, 400)
 
+    def test_select_champ_select_champion_decision_preserves_request_failure(self) -> None:
+        champ_select_session = {
+            "localPlayerCellId": 7,
+            "myTeam": [{"cellId": 7, "assignedPosition": "middle"}],
+            "actions": [
+                [
+                    {
+                        "id": 31,
+                        "actorCellId": 7,
+                        "type": "pick",
+                        "isInProgress": True,
+                        "completed": False,
+                    }
+                ]
+            ],
+        }
+        session = _FakeSession(
+            [
+                _FakeResponse(200, champ_select_session),
+                _FakeResponse(200, [{"id": 103, "name": "아리", "alias": "Ahri"}]),
+                _FakeResponse(500, {"message": "unavailable"}),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.select_champ_select_champion_decision(
+            "아리", action_type="pick", complete=True
+        )
+
+        self.assertEqual(result.status, LcuOutcome.REQUEST_FAILED)
+        self.assertEqual(
+            lcu_loop_action_for(result, context="write"),
+            LcuLoopAction.FALLBACK_IMAGE,
+        )
+
+    def test_complete_champ_select_action_preserves_fallback_patch_request_failure(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(400, {"message": "complete rejected"}),
+                _FakeResponse(500, {"message": "patch unavailable"}),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client._complete_champ_select_action(31, 103)
+
+        self.assertEqual(result.status, LcuOutcome.REQUEST_FAILED)
+        self.assertEqual(result.status_code, 500)
+
+    def test_complete_champ_select_action_preserves_primary_request_failure(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(500, {"message": "complete unavailable"}),
+                _FakeResponse(400, {"message": "patch rejected"}),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client._complete_champ_select_action(31, 103)
+
+        self.assertEqual(result.status, LcuOutcome.REQUEST_FAILED)
+        self.assertEqual(result.status_code, 500)
+        self.assertIn("fallback patch failed", result.reason)
+
+    def test_champion_grid_malformed_response_waits_authoritatively(self) -> None:
+        session = _FakeSession([_FakeResponse(200, {"champions": []})])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client._champ_select_grid_champions_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
+        self.assertEqual(
+            lcu_loop_action_for(result, context="write"),
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+        )
+
     def test_lcu_loop_action_policy_distinguishes_semantic_wait_from_fallback(
         self,
     ) -> None:
@@ -266,9 +391,28 @@ class LcuClientTests(unittest.TestCase):
             LcuLoopAction.FALLBACK_IMAGE,
         )
         self.assertEqual(
-            lcu_loop_action_for(LcuOutcome.MALFORMED_SESSION, context="role"),
+            lcu_loop_action_for(LcuOutcome.REQUEST_FAILED, context="write"),
             LcuLoopAction.FALLBACK_IMAGE,
         )
+        self.assertEqual(
+            lcu_loop_action_for("not-a-real-lcu-outcome", context="write"),
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+        )
+        for semantic_outcome in (
+            LcuOutcome.UNKNOWN,
+            LcuOutcome.NO_CURRENT_ACTION,
+            LcuOutcome.NO_POSITION,
+            LcuOutcome.CHAMPION_NOT_FOUND,
+            LcuOutcome.ACTION_REJECTED,
+            LcuOutcome.NO_SESSION,
+            LcuOutcome.MALFORMED_SESSION,
+            LcuOutcome.MALFORMED_RESPONSE,
+        ):
+            with self.subTest(outcome=semantic_outcome):
+                self.assertEqual(
+                    lcu_loop_action_for(semantic_outcome, context="role"),
+                    LcuLoopAction.WAIT_AUTHORITATIVE,
+                )
 
     def test_select_champ_select_champion_patches_and_completes_action(self) -> None:
         champ_select_session = {
@@ -729,6 +873,67 @@ class LcuClientTests(unittest.TestCase):
             session.calls[4]["kwargs"]["json"],
             {"championId": 103, "completed": True},
         )
+
+    def test_select_champ_select_champion_preserves_completion_check_request_failure(
+        self,
+    ) -> None:
+        before_patch_session = {
+            "localPlayerCellId": 7,
+            "actions": [
+                [
+                    {
+                        "id": 31,
+                        "actorCellId": 7,
+                        "type": "pick",
+                        "isInProgress": True,
+                        "completed": False,
+                        "championId": 0,
+                    }
+                ]
+            ],
+        }
+        session = _FakeSession(
+            [
+                _FakeResponse(200, before_patch_session),
+                _FakeResponse(200, [{"id": 103, "name": "아리", "alias": "Ahri"}]),
+                _FakeResponse(204),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        with (
+            mock.patch.object(
+                client,
+                "_wait_for_action_champion",
+                return_value=LcuDecision(LcuOutcome.SUCCESS),
+            ),
+            mock.patch.object(
+                client,
+                "_wait_for_action_completed",
+                return_value=LcuDecision(
+                    LcuOutcome.REQUEST_FAILED,
+                    reason="ReadTimeout",
+                    error="ReadTimeout",
+                ),
+            ),
+            mock.patch.object(
+                client,
+                "_patch_completed_champ_select_action",
+                return_value=LcuDecision(
+                    LcuOutcome.ACTION_REJECTED,
+                    reason="fallback patch rejected",
+                    status_code=400,
+                ),
+            ),
+        ):
+            result = client.select_champ_select_champion_decision(
+                "아리", action_type="pick", complete=True
+            )
+
+        self.assertEqual(result.status, LcuOutcome.REQUEST_FAILED)
+        self.assertEqual(result.error, "ReadTimeout")
+        self.assertIn("fallback patch failed", result.reason)
 
     def test_select_champ_select_champion_can_patch_future_action_without_complete(self) -> None:
         champ_select_session = {
