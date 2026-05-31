@@ -711,6 +711,46 @@ def _dismiss_blocking_modal_lcu_attempt(
         raise
 
 
+def _show_lcu_ux_attempt(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> LcuActionAttempt:
+    if lcu is None:
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
+
+    try:
+        decision_fn = getattr(lcu, "show_ux_decision", None)
+        if not callable(decision_fn):
+            logger.debug("LCU 클라이언트 전면 표시 API가 없습니다(%s).", stage)
+            return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_supported")
+
+        result = decision_fn()
+        outcome = _lcu_status_label(result)
+        if getattr(result, "ok", False):
+            logger.debug("LCU 클라이언트 전면 표시 요청 완료(%s,outcome=%s).", stage, outcome)
+            return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+        logger.debug(
+            "LCU 클라이언트 전면 표시 요청 실패(%s,outcome=%s,reason=%s). "
+            "현재 화면 기준 UI fallback을 계속합니다.",
+            stage,
+            outcome,
+            getattr(result, "reason", ""),
+        )
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, outcome)
+    except RequestException as exc:
+        logger.debug(
+            "LCU 클라이언트 전면 표시 요청 실패(%s): %s. UI fallback을 계속합니다.",
+            stage,
+            exc,
+        )
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "request_exception")
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 클라이언트 전면 표시 중 예상하지 못한 오류(%s).", stage)
+        raise
+
+
 def _dismiss_end_of_game_stats_lcu_attempt(
     lcu: Optional[LcuClient],
     stage: str,
@@ -1199,6 +1239,14 @@ _last_popup_click_at: dict[str, float] = {}
 POPUP_CLICK_COOLDOWN_SEC = 0.6
 
 
+def _client_confirm_template_candidates(selected: Path) -> tuple[Path, ...]:
+    return (
+        selected / "client_confirm-button.png",
+        selected / "client_confirm-button-2.png",
+        selected / "client_thanks-button.png",
+    )
+
+
 def _popup_button_search_roi(rect) -> tuple[int, int, int, int]:
     left, top, right, bottom = rect
     w = int(right) - int(left)
@@ -1214,6 +1262,74 @@ def _popup_button_search_roi(rect) -> tuple[int, int, int, int]:
     if x2 <= x1 or y2 <= y1:
         return (0, 0, w, h)
     return (x1, y1, x2, y2)
+
+
+def _dismiss_blocking_modal_ui_fallback(
+    rect,
+    tpl_confirm_templates: Sequence[Path],
+    threshold: float,
+    stage: str,
+    logger: logging.Logger,
+    *,
+    lcu: Optional[LcuClient] = None,
+) -> bool:
+    if rect is None or not tpl_confirm_templates:
+        return False
+
+    _show_lcu_ux_attempt(lcu, stage, logger)
+
+    popup_roi = _popup_button_search_roi(rect)
+    templates: list[tuple[str, Path]] = []
+    name_to_path: dict[str, Path] = {}
+    rois: dict[str, tuple[int, int, int, int]] = {}
+    for idx, tpl_confirm in enumerate(tpl_confirm_templates):
+        if tpl_confirm is None or not tpl_confirm.exists():
+            continue
+        name = f"confirm#{idx}"
+        templates.append((name, tpl_confirm))
+        name_to_path[name] = tpl_confirm
+        rois[name] = popup_roi
+
+    if not templates:
+        return False
+
+    matches = find_template_matches_once(
+        rect, templates, threshold=threshold, search_rois=rois
+    )
+    best_name: Optional[str] = None
+    best_hit: Optional[tuple[tuple[int, int], object, float]] = None
+    best_score = -1.0
+    for name, hit in matches.items():
+        score = float(hit[2])
+        if score > best_score:
+            best_score = score
+            best_name = name
+            best_hit = hit
+
+    if best_hit is None:
+        return False
+
+    now = time.monotonic()
+    key = f"blocking_modal_ui:{stage}"
+    last = _last_popup_click_at.get(key, 0.0)
+    if now - last < POPUP_CLICK_COOLDOWN_SEC:
+        return False
+
+    center, _roi_bgr, _score = best_hit
+    try:
+        click_screen(center)
+    except Exception as exc:
+        logger.warning("클라이언트 모달 UI fallback 클릭 실패(%s): %s", stage, exc)
+        return False
+
+    _last_popup_click_at[key] = now
+    tpl = name_to_path.get(best_name) if best_name else None
+    logger.info(
+        "LCU 미노출 클라이언트 모달 UI fallback 클릭 처리(%s,tpl=%s).",
+        stage,
+        (tpl.name if tpl else "unknown"),
+    )
+    return True
 
 
 def _should_scan_popup_confirm_during_match_poll(phase: Optional[str]) -> bool:
@@ -2044,6 +2160,21 @@ def process_postgame(
             logger.info("LCU ReadyCheck 감지로 postgame 처리를 종료합니다.")
             return
         if phase == PHASE_NONE:
+            modal_attempt = _dismiss_blocking_modal_lcu_attempt(
+                lcu, "엔드 이후", logger
+            )
+            if not modal_attempt.completed and tpl_confirm_templates:
+                rect = ensure_active_rect(logger)
+                if _dismiss_blocking_modal_ui_fallback(
+                    rect,
+                    tpl_confirm_templates,
+                    threshold,
+                    "엔드 이후",
+                    logger,
+                    lcu=lcu,
+                ):
+                    time.sleep(interval_sec)
+                    continue
             logger.debug("LCU phase=None 상태입니다. 엔드 버튼 이미지를 탐색하지 않습니다.")
             time.sleep(interval_sec)
             continue
@@ -2074,8 +2205,22 @@ def process_postgame(
             if lcu is not None and lcu.is_end_of_game_stats_available():
                 logger.debug("LCU 엔드 통계 사용 가능(%s). 엔드 버튼 탐색을 계속합니다.", phase)
 
-        _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
+        modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
         rect = ensure_active_rect(logger)
+        if (
+            not modal_attempt.completed
+            and tpl_confirm_templates
+            and _dismiss_blocking_modal_ui_fallback(
+                rect,
+                tpl_confirm_templates,
+                threshold,
+                "엔드 이후",
+                logger,
+                lcu=lcu,
+            )
+        ):
+            time.sleep(interval_sec)
+            continue
         if detect_champion_select(
             rect, "엔드 이후", tpl_prepick, available_roles, threshold, logger, lcu=lcu
         ):
@@ -2313,16 +2458,12 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     tpl_find_match = selected / "lobby_find-match-button.png"
     tpl_finding_match = selected / "lobby_finding-match-text.png"
     tpl_accept = selected / "lobby_accept-button.png"
-    tpl_confirm_candidates = (
-        selected / "client_confirm-button.png",
-        selected / "client_confirm-button-2.png",
-    )
+    tpl_confirm_candidates = _client_confirm_template_candidates(selected)
     tpl_confirm_templates = [p for p in tpl_confirm_candidates if p.exists()]
     if not tpl_confirm_templates:
         logger.error(
-            "확인 버튼 템플릿 파일이 없습니다: %s, %s",
-            tpl_confirm_candidates[0],
-            tpl_confirm_candidates[1],
+            "확인 버튼 템플릿 파일이 없습니다: %s",
+            ", ".join(str(p) for p in tpl_confirm_candidates),
         )
         return
     logger.info(
@@ -2433,7 +2574,32 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             time.sleep(interval_sec)
             continue
 
-        _dismiss_blocking_modal_lcu_attempt(lcu, "사이클 시작", logger)
+        cycle_ingame_active = phase_at_cycle in {
+            PHASE_IN_PROGRESS,
+            PHASE_RECONNECT,
+            PHASE_WATCH_IN_PROGRESS,
+        } or (
+            phase_attempt_at_cycle.loop_action == LcuLoopAction.FALLBACK_IMAGE
+            and is_game_client_active()
+        )
+
+        modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "사이클 시작", logger)
+        if (
+            not modal_attempt.completed
+            and not cycle_ingame_active
+            and tpl_confirm_templates
+        ):
+            rect_for_modal = ensure_active_rect(logger)
+            if _dismiss_blocking_modal_ui_fallback(
+                rect_for_modal,
+                tpl_confirm_templates,
+                threshold,
+                "사이클 시작",
+                logger,
+                lcu=lcu,
+            ):
+                time.sleep(confirm_check_interval)
+                continue
 
         if _should_process_postgame_at_cycle(phase_at_cycle):
             logger.info(
@@ -2458,14 +2624,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             logger.info("다음 매칭 사이클을 시작합니다.")
             continue
 
-        if phase_at_cycle in {
-            PHASE_IN_PROGRESS,
-            PHASE_RECONNECT,
-            PHASE_WATCH_IN_PROGRESS,
-        } or (
-            phase_attempt_at_cycle.loop_action == LcuLoopAction.FALLBACK_IMAGE
-            and is_game_client_active()
-        ):
+        if cycle_ingame_active:
             logger.info(
                 "이미 인게임 상태 감지(사이클 시작). 게임 종료 감시로 전환합니다."
             )
