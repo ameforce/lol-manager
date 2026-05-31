@@ -2015,6 +2015,7 @@ def process_postgame(
     lcu: Optional[LcuClient] = None,
 ) -> None:
     _set_client_state(ClientState.POSTGAME_SCORE, time.monotonic(), logger)
+    end_stats_dismissed = False
     while True:
         phase_attempt = _poll_lcu_phase_attempt(
             lcu, logger, "엔드 이후", max_age_sec=0.5
@@ -2028,7 +2029,6 @@ def process_postgame(
             time.sleep(interval_sec)
             continue
         if phase in {
-            PHASE_LOBBY,
             PHASE_MATCHMAKING,
             PHASE_CHAMP_SELECT,
             PHASE_IN_PROGRESS,
@@ -2037,6 +2037,8 @@ def process_postgame(
         }:
             logger.info("LCU postgame 종료 감지: phase=%s", phase)
             return
+        if phase == PHASE_LOBBY:
+            logger.info("LCU postgame 이후 로비 감지. 대전 찾기 재시작을 시도합니다.")
         if phase == PHASE_READY_CHECK:
             _accept_ready_check_via_lcu(lcu, "엔드 이후", logger)
             logger.info("LCU ReadyCheck 감지로 postgame 처리를 종료합니다.")
@@ -2053,18 +2055,21 @@ def process_postgame(
             )
             return
         if phase == PHASE_END_OF_GAME:
-            continue_attempt = _dismiss_end_of_game_stats_lcu_attempt(
-                lcu, "엔드 이후", logger
-            )
-            if continue_attempt.completed:
-                logger.info(
-                    "LCU 엔드 계속하기 처리 완료(outcome=%s). 다음 자동화 사이클로 복귀합니다.",
-                    continue_attempt.outcome,
+            if not end_stats_dismissed:
+                continue_attempt = _dismiss_end_of_game_stats_lcu_attempt(
+                    lcu, "엔드 이후", logger
                 )
-                return
-            if continue_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
-                time.sleep(interval_sec)
-                continue
+                if continue_attempt.completed:
+                    end_stats_dismissed = True
+                    logger.info(
+                        "LCU 엔드 계속하기 처리 완료(outcome=%s). 로비/큐 상태를 계속 확인합니다.",
+                        continue_attempt.outcome,
+                    )
+                    time.sleep(interval_sec)
+                    continue
+                if continue_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                    time.sleep(interval_sec)
+                    continue
         if phase in {PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME}:
             if lcu is not None and lcu.is_end_of_game_stats_available():
                 logger.debug("LCU 엔드 통계 사용 가능(%s). 엔드 버튼 탐색을 계속합니다.", phase)
