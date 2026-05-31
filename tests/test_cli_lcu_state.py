@@ -270,6 +270,29 @@ class _FakePostgameHonorLcu:
         return self.result
 
 
+class _FakePostgameContinueLcu:
+    def __init__(self, result: LcuDecision) -> None:
+        self.result = result
+        self.phase_calls = 0
+        self.dismiss_stats_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return True
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return self.result
+
+
 class _FakeBlockingModalLcu:
     def __init__(self, result: LcuDecision) -> None:
         self.result = result
@@ -1083,6 +1106,40 @@ class CliLcuStateTests(unittest.TestCase):
             click=True,
         )
 
+    def test_postgame_end_of_game_dismisses_stats_via_lcu_without_image_scan(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameContinueLcu(
+            LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
+        )
+
+        with (
+            mock.patch.object(entrypoint, "ensure_active_rect") as ensure_rect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        ensure_rect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
     def test_postgame_request_failure_keeps_ui_only_end_button_scan(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePhaseDecisionLcu(
@@ -1619,6 +1676,10 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["postgame_end_buttons"],
             "ui-only",
+        )
+        self.assertEqual(
+            entrypoint.LCU_UI_ACTION_CLASSIFICATION["postgame_continue"],
+            "lcu-first",
         )
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["postgame_honor_vote"],

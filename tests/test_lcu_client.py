@@ -151,6 +151,20 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_end_of_game_stats_posts_to_continue_endpoint(self) -> None:
+        session = _FakeSession([_FakeResponse(204)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_end_of_game_stats_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[0]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-end-of-game/v1/state/dismiss-stats"
+            )
+        )
+
     def test_honor_random_eligible_teammate_votes_random_ally_and_submits(
         self,
     ) -> None:

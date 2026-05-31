@@ -44,6 +44,7 @@ KNOWN_GAMEFLOW_PHASES = frozenset(
 HONOR_BALLOT_ENDPOINT = "/lol-honor-v2/v1/ballot"
 HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
+END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
 HONOR_VOTE_TYPE = "HEART"
 LCU_TERMINAL_CONTEXTS = frozenset(
     {
@@ -420,6 +421,18 @@ class LcuClient:
 
     def is_end_of_game_stats_available(self) -> bool:
         return self.request("GET", "/lol-end-of-game/v1/eog-stats-block").ok
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        result = self.request("POST", END_OF_GAME_DISMISS_STATS_ENDPOINT)
+        return _write_or_unsupported_decision(
+            result,
+            success_reason="end-of-game stats dismiss accepted",
+            rejected_reason="end-of-game stats dismiss rejected",
+            unsupported_reason="end-of-game stats dismiss endpoint is not available",
+        )
+
+    def dismiss_end_of_game_stats(self) -> bool:
+        return self.dismiss_end_of_game_stats_decision().ok
 
     def get_honor_ballot_decision(self) -> LcuDecision:
         result = self.request("GET", HONOR_BALLOT_ENDPOINT)

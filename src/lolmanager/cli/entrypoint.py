@@ -108,6 +108,7 @@ LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
     "pick_popups": "ui-only",
     "pick_myturn": "fallback-only",
     "postgame_end_buttons": "ui-only",
+    "postgame_continue": "lcu-first",
     "postgame_honor_vote": "lcu-only-terminal",
     "blocking_modals": "lcu-only-terminal",
 }
@@ -695,6 +696,58 @@ def _dismiss_blocking_modal_lcu_attempt(
         return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "request_exception")
     except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
         logger.exception("LCU 클라이언트 모달 닫기 중 예상하지 못한 오류(%s).", stage)
+        raise
+
+
+def _dismiss_end_of_game_stats_lcu_attempt(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> LcuActionAttempt:
+    if lcu is None:
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
+
+    try:
+        decision_fn = getattr(lcu, "dismiss_end_of_game_stats_decision", None)
+        if not callable(decision_fn):
+            logger.debug("LCU 엔드 계속하기 API가 없습니다(%s). 이미지 fallback 진행.", stage)
+            return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_supported")
+
+        result = decision_fn()
+        outcome = _lcu_status_label(result)
+        if getattr(result, "ok", False):
+            logger.info("LCU 엔드 계속하기 요청 완료(%s,outcome=%s).", stage, outcome)
+            return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+        loop_action = lcu_loop_action_for(result, context="postgame_continue")
+        if _lcu_status_label(result) == "unsupported":
+            loop_action = LcuLoopAction.FALLBACK_IMAGE
+
+        if loop_action == LcuLoopAction.FALLBACK_IMAGE:
+            logger.debug(
+                "LCU 엔드 계속하기 요청 실패(%s,outcome=%s). 이미지 fallback 진행.",
+                stage,
+                outcome,
+            )
+        else:
+            logger.debug(
+                "LCU 엔드 계속하기 요청 보류(%s,outcome=%s,action=%s).",
+                stage,
+                outcome,
+                loop_action.value,
+            )
+        return LcuActionAttempt(False, loop_action, outcome)
+    except RequestException as exc:
+        logger.debug(
+            "LCU 엔드 계속하기 요청 실패(%s): %s. 이미지 fallback 진행.",
+            stage,
+            exc,
+        )
+        return LcuActionAttempt(
+            False, LcuLoopAction.FALLBACK_IMAGE, "request_exception"
+        )
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 엔드 계속하기 중 예상하지 못한 오류(%s).", stage)
         raise
 
 
@@ -1976,6 +2029,19 @@ def process_postgame(
                 honor_attempt.outcome,
             )
             return
+        if phase == PHASE_END_OF_GAME:
+            continue_attempt = _dismiss_end_of_game_stats_lcu_attempt(
+                lcu, "엔드 이후", logger
+            )
+            if continue_attempt.completed:
+                logger.info(
+                    "LCU 엔드 계속하기 처리 완료(outcome=%s). 다음 자동화 사이클로 복귀합니다.",
+                    continue_attempt.outcome,
+                )
+                return
+            if continue_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                time.sleep(interval_sec)
+                continue
         if phase in {PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME}:
             if lcu is not None and lcu.is_end_of_game_stats_available():
                 logger.debug("LCU 엔드 통계 사용 가능(%s). 엔드 버튼 탐색을 계속합니다.", phase)
