@@ -105,13 +105,20 @@ LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
     "champ_select_ban": "lcu-first",
     "champ_select_pick": "lcu-first",
     "reserve_pick": "lcu-first",
-    "pick_popups": "ui-only",
+    "pick_popups": "lcu-first",
     "pick_myturn": "fallback-only",
     "postgame_end_buttons": "ui-only",
     "postgame_continue": "lcu-first",
     "postgame_honor_vote": "lcu-only-terminal",
-    "blocking_modals": "lcu-only-terminal",
+    "blocking_modals": "lcu-first",
 }
+POSTGAME_PHASES: frozenset[str] = frozenset(
+    {
+        PHASE_WAITING_FOR_STATS,
+        PHASE_PRE_END_OF_GAME,
+        PHASE_END_OF_GAME,
+    }
+)
 
 
 def display_ban_name_for_summary(value: object) -> str:
@@ -119,6 +126,10 @@ def display_ban_name_for_summary(value: object) -> str:
     if not raw:
         return ""
     return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
+
+
+def _should_process_postgame_at_cycle(phase: object) -> bool:
+    return phase in POSTGAME_PHASES
 
 
 def resolve_ban_name_for_runtime(
@@ -670,7 +681,9 @@ def _dismiss_blocking_modal_lcu_attempt(
         decision_fn = getattr(lcu, "dismiss_blocking_modal_decision", None)
         if not callable(decision_fn):
             logger.debug("LCU 클라이언트 모달 닫기 API가 없습니다(%s).", stage)
-            return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "not_supported")
+            return LcuActionAttempt(
+                False, LcuLoopAction.FALLBACK_IMAGE, "not_supported"
+            )
 
         result = decision_fn()
         outcome = _lcu_status_label(result)
@@ -678,22 +691,21 @@ def _dismiss_blocking_modal_lcu_attempt(
             logger.info("LCU 클라이언트 모달 닫기 완료(%s,outcome=%s).", stage, outcome)
             return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
 
-        loop_action = lcu_loop_action_for(result, context="blocking_modal")
         logger.debug(
             "LCU 클라이언트 모달 닫기 종료(%s,outcome=%s,reason=%s). "
-            "확인된 LCU 닫기 경로가 없으면 다음 자동화 사이클을 계속합니다.",
+            "LCU로 닫을 항목이 없으면 이미지 fallback을 허용합니다.",
             stage,
             outcome,
             getattr(result, "reason", ""),
         )
-        return LcuActionAttempt(True, loop_action, outcome)
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, outcome)
     except RequestException as exc:
         logger.debug(
-            "LCU 클라이언트 모달 닫기 요청 실패(%s): %s. 다음 자동화 사이클을 계속합니다.",
+            "LCU 클라이언트 모달 닫기 요청 실패(%s): %s. 이미지 fallback 진행.",
             stage,
             exc,
         )
-        return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "request_exception")
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "request_exception")
     except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
         logger.exception("LCU 클라이언트 모달 닫기 중 예상하지 못한 오류(%s).", stage)
         raise
@@ -1580,6 +1592,12 @@ def poll_match_state(
 
     rois: dict[str, tuple[int, int, int, int]] = {}
     if tpl_confirm_templates and _should_scan_popup_confirm_during_match_poll(phase):
+        modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, stage, logger)
+        if modal_attempt.completed:
+            time.sleep(confirm_check_interval)
+            return MatchPollAttempt(
+                False, False, LcuLoopAction.ACT_LCU, modal_attempt.outcome, phase
+            )
         popup_roi = _popup_button_search_roi(rect)
         for idx, tpl_confirm in enumerate(tpl_confirm_templates):
             if tpl_confirm is None or not tpl_confirm.exists():
@@ -1875,7 +1893,12 @@ def try_pick_popups(
     tpl_decline: Optional[Path],
     threshold: float,
     logger: logging.Logger,
+    lcu: Optional[LcuClient] = None,
 ) -> bool:
+    modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "픽 팝업", logger)
+    if modal_attempt.completed:
+        return True
+
     now = time.monotonic()
     templates: list[tuple[str, Path]] = []
     confirm_names: list[str] = []
@@ -2407,6 +2430,29 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
         _dismiss_blocking_modal_lcu_attempt(lcu, "사이클 시작", logger)
 
+        if _should_process_postgame_at_cycle(phase_at_cycle):
+            logger.info(
+                "LCU postgame 단계 감지(사이클 시작,phase=%s). 엔드 화면 처리로 전환합니다.",
+                phase_at_cycle,
+            )
+            process_postgame(
+                tpl_end_next,
+                tpl_end_one_more,
+                tpl_find_match,
+                tpl_finding_match,
+                tpl_accept,
+                tpl_confirm_templates,
+                tpl_prepick,
+                available_roles,
+                threshold,
+                confirm_check_interval,
+                interval_sec,
+                logger,
+                lcu=lcu,
+            )
+            logger.info("다음 매칭 사이클을 시작합니다.")
+            continue
+
         if phase_at_cycle in {
             PHASE_IN_PROGRESS,
             PHASE_RECONNECT,
@@ -2628,6 +2674,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     tpl_pick_decline_opt,
                     threshold,
                     logger,
+                    lcu=lcu,
                 )
                 poll_attempt = poll_match_state(
                     rect,
@@ -2774,6 +2821,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         tpl_pick_decline_opt,
                         threshold,
                         logger,
+                        lcu=lcu,
                     )
                     if detect_match_reset(
                         rect,
@@ -2890,6 +2938,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         tpl_pick_decline_opt,
                         threshold,
                         logger,
+                        lcu=lcu,
                     )
                     if detect_match_reset(
                         rect,
@@ -2967,6 +3016,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         tpl_pick_decline_opt,
                         threshold,
                         logger,
+                        lcu=lcu,
                     )
                     if detect_match_reset(
                         rect,
@@ -3005,6 +3055,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     tpl_pick_decline_opt,
                     threshold,
                     logger,
+                    lcu=lcu,
                 )
                 if detect_match_reset(
                     rect,
@@ -3231,6 +3282,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                             tpl_pick_decline_opt,
                             threshold,
                             logger,
+                            lcu=lcu,
                         )
                         typed_ok = search_and_act(
                             rect2,
@@ -3428,6 +3480,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         tpl_pick_decline_opt,
                         threshold,
                         logger,
+                        lcu=lcu,
                     )
 
                     wait_iter += 1
