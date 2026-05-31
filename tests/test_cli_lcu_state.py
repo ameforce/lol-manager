@@ -351,6 +351,16 @@ class _FakeBlockingModalLcu:
         return self.result
 
 
+class _FakeShowUxLcu:
+    def __init__(self, result: LcuDecision) -> None:
+        self.result = result
+        self.show_calls = 0
+
+    def show_ux_decision(self) -> LcuDecision:
+        self.show_calls += 1
+        return self.result
+
+
 class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
     def __init__(self, phase: str | None, result: LcuDecision) -> None:
         super().__init__(phase)
@@ -1398,6 +1408,15 @@ class CliLcuStateTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 self.assertFalse(entrypoint._should_process_postgame_at_cycle(phase))
 
+    def test_confirm_template_candidates_include_report_feedback_thanks_button(
+        self,
+    ) -> None:
+        selected = ROOT / "src" / "lolmanager" / "resources" / "images" / "1280"
+
+        candidates = entrypoint._client_confirm_template_candidates(selected)
+
+        self.assertIn(selected / "client_thanks-button.png", candidates)
+
     def test_blocking_modal_attempt_allows_image_fallback_when_lcu_has_no_route(
         self,
     ) -> None:
@@ -1428,6 +1447,39 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertFalse(result.completed)
         self.assertEqual(result.loop_action, LcuLoopAction.FALLBACK_IMAGE)
         self.assertEqual(result.outcome, "not_supported")
+
+    def test_stale_blocking_modal_ui_fallback_shows_ux_and_clicks_template(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        image_dir = ROOT / "src" / "lolmanager" / "resources" / "images" / "1280"
+        fake = _FakeShowUxLcu(LcuDecision(LcuOutcome.SUCCESS, reason="shown"))
+
+        with (
+            mock.patch.object(
+                entrypoint,
+                "find_template_matches_once",
+                return_value={"confirm#2": ((640, 432), object(), 0.99)},
+            ) as find_matches,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+        ):
+            handled = entrypoint._dismiss_blocking_modal_ui_fallback(
+                (0, 0, 1280, 720),
+                entrypoint._client_confirm_template_candidates(image_dir),
+                0.85,
+                "사이클 시작",
+                logger,
+                lcu=fake,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(fake.show_calls, 1)
+        click_screen.assert_called_once_with((640, 432))
+        find_matches.assert_called_once()
+        self.assertEqual(
+            find_matches.call_args.kwargs["search_rois"]["confirm#2"],
+            entrypoint._popup_button_search_roi((0, 0, 1280, 720)),
+        )
 
     def test_match_poll_dismisses_blocking_modal_via_lcu_before_image_confirm(
         self,
