@@ -47,6 +47,8 @@ HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
 END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
+REMEDY_NOTIFICATIONS_ENDPOINT = "/lol-remedy/v1/remedy-notifications"
+REMEDY_NOTIFICATION_ACK_ENDPOINT = "/lol-remedy/v1/ack-remedy-notification"
 PLAYER_BEHAVIOR_V2_REPORTER_FEEDBACK_ENDPOINT = (
     "/lol-player-behavior/v2/reporter-feedback"
 )
@@ -608,6 +610,7 @@ class LcuClient:
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
         handlers = (
             self._dismiss_simple_dialog_messages_decision,
+            self._dismiss_remedy_notifications_decision,
             self._dismiss_player_behavior_v2_reporter_feedback_decision,
             self._dismiss_player_behavior_v1_reporter_feedback_decision,
             self._dismiss_player_notifications_decision,
@@ -696,6 +699,67 @@ class LcuClient:
         return LcuDecision(
             LcuOutcome.NO_CURRENT_ACTION,
             reason="no simple dialog messages",
+            status_code=result.status_code,
+        )
+
+    def _dismiss_remedy_notifications_decision(self) -> LcuDecision:
+        result = self.request("GET", REMEDY_NOTIFICATIONS_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="remedy notifications endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="remedy notifications request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="remedy notifications response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for notification in result.data:
+            mail_id = _non_empty_identifier(notification, "mailId", "id")
+            if not mail_id:
+                continue
+            acknowledge = self.request(
+                "PUT",
+                f"{REMEDY_NOTIFICATION_ACK_ENDPOINT}/{quote(mail_id, safe='')}",
+            )
+            decision = _write_or_unsupported_decision(
+                acknowledge,
+                success_reason="remedy notification acknowledged",
+                rejected_reason="remedy notification acknowledge rejected",
+                unsupported_reason="remedy notification acknowledge endpoint is not available",
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="remedy notifications acknowledged",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no remedy notifications",
             status_code=result.status_code,
         )
 
