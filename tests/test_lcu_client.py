@@ -125,6 +125,19 @@ class LcuClientTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "programmer fault"):
             client.request("GET", "/lol-gameflow/v1/gameflow-phase")
 
+    def test_show_ux_decision_allows_foreground_then_shows_client(self) -> None:
+        session = _FakeSession([_FakeResponse(204), _FakeResponse(204)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.show_ux_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(
+            [str(call["url"]).split("2999", maxsplit=1)[1] for call in session.calls],
+            ["/riotclient/ux-allow-foreground", "/riotclient/ux-show"],
+        )
+        self.assertEqual([call["method"] for call in session.calls], ["POST", "POST"])
+
     def test_accept_ready_check_posts_to_lcu_endpoint(self) -> None:
         session = _FakeSession([_FakeResponse(204)])
         client = LcuClient(lockfile=self.lockfile, session=session)

@@ -57,6 +57,8 @@ PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT = (
 )
 PLAYER_NOTIFICATIONS_ENDPOINT = "/player-notifications/v1/notifications"
 PLAYER_MESSAGING_NOTIFICATION_ENDPOINT = "/lol-player-messaging/v1/notification"
+RIOTCLIENT_UX_ALLOW_FOREGROUND_ENDPOINT = "/riotclient/ux-allow-foreground"
+RIOTCLIENT_UX_SHOW_ENDPOINT = "/riotclient/ux-show"
 HONOR_VOTE_TYPE = "HEART"
 LCU_TERMINAL_CONTEXTS = frozenset(
     {
@@ -440,6 +442,32 @@ class LcuClient:
             result,
             success_reason="matchmaking search accepted",
             rejected_reason="matchmaking search rejected",
+        )
+
+    def show_ux_decision(self) -> LcuDecision:
+        allow = self.request("POST", RIOTCLIENT_UX_ALLOW_FOREGROUND_ENDPOINT)
+        if allow.error:
+            return LcuDecision(
+                _connection_outcome_for_error(allow.error),
+                reason=allow.error,
+                status_code=allow.status_code,
+                error=allow.error,
+            )
+        if allow.status_code not in {200, 204, 404, 405}:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if allow.status_code is None or allow.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="riotclient ux allow foreground rejected",
+                status_code=allow.status_code,
+            )
+
+        show = self.request("POST", RIOTCLIENT_UX_SHOW_ENDPOINT)
+        return _write_or_unsupported_decision(
+            show,
+            success_reason="riotclient ux show accepted",
+            rejected_reason="riotclient ux show rejected",
+            unsupported_reason="riotclient ux show endpoint is not available",
         )
 
     def is_end_of_game_stats_available(self) -> bool:
