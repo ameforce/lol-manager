@@ -151,6 +151,92 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_end_of_game_stats_posts_to_continue_endpoint(self) -> None:
+        session = _FakeSession([_FakeResponse(204)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_end_of_game_stats_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[0]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-end-of-game/v1/state/dismiss-stats"
+            )
+        )
+
+    def test_honor_random_eligible_teammate_votes_random_ally_and_submits(
+        self,
+    ) -> None:
+        ballot = {
+            "eligibleAllies": [
+                {"puuid": "ally-a", "summonerName": "A"},
+                {"puuid": "ally-b", "summonerName": "B"},
+            ],
+            "eligibleOpponents": [{"puuid": "enemy-a"}],
+            "honoredPlayers": [],
+            "votePool": {"votes": 1},
+        }
+        session = _FakeSession(
+            [_FakeResponse(200, ballot), _FakeResponse(204), _FakeResponse(204)]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.honor_random_eligible_teammate_decision(
+            choice=lambda candidates: candidates[1]
+        )
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(result.value.puuid, "ally-b")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith("/lol-honor-v2/v1/ballot")
+        )
+        self.assertEqual(session.calls[1]["method"], "POST")
+        self.assertTrue(str(session.calls[1]["url"]).endswith("/lol-honor/v1/honor"))
+        self.assertEqual(
+            session.calls[1]["kwargs"]["json"],
+            {"recipientPuuid": "ally-b", "honorType": "HEART"},
+        )
+        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith("/lol-honor/v1/ballot")
+        )
+
+    def test_honor_random_eligible_teammate_ignores_opponents(self) -> None:
+        ballot = {
+            "eligibleAllies": [],
+            "eligibleOpponents": [{"puuid": "enemy-a"}],
+            "honoredPlayers": [],
+            "votePool": {"votes": 1},
+        }
+        session = _FakeSession([_FakeResponse(200, ballot)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.honor_random_eligible_teammate_decision()
+
+        self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_honor_random_eligible_teammate_reports_unsupported_ballot(
+        self,
+    ) -> None:
+        session = _FakeSession([_FakeResponse(404, {"message": "not found"})])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.honor_random_eligible_teammate_decision()
+
+        self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
+
+    def test_dismiss_blocking_modal_reports_unsupported_without_confirmed_route(
+        self,
+    ) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
+        self.assertIn("no confirmed", result.reason)
+
     def test_get_local_player_position_reads_assigned_position_from_session(self) -> None:
         champ_select_session = {
             "localPlayerCellId": 7,
@@ -393,6 +479,20 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(
             lcu_loop_action_for(LcuOutcome.REQUEST_FAILED, context="write"),
             LcuLoopAction.FALLBACK_IMAGE,
+        )
+        self.assertEqual(
+            lcu_loop_action_for(LcuOutcome.UNSUPPORTED, context="write"),
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+        )
+        self.assertEqual(
+            lcu_loop_action_for(
+                LcuOutcome.REQUEST_FAILED, context="postgame_honor_vote"
+            ),
+            LcuLoopAction.ABORT_LOG,
+        )
+        self.assertEqual(
+            lcu_loop_action_for(LcuOutcome.ACTION_REJECTED, context="blocking_modal"),
+            LcuLoopAction.ABORT_LOG,
         )
         self.assertEqual(
             lcu_loop_action_for("not-a-real-lcu-outcome", context="write"),

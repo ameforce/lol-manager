@@ -94,6 +94,22 @@ def compact_role_ban_label_for_main_ui(value: object) -> str:
     return f"{match.group('champion').strip()} {tier} {match.group('winrate').strip()}"
 
 
+def role_key_from_log_line(line: object) -> Optional[str]:
+    text = str(line or "")
+    patterns = (
+        r"포지션 감지:\s*(?P<role>[A-Za-z_]+)",
+        r"LCU 포지션 감지\([^)]*\):\s*(?P<role>[A-Za-z_]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        role_key = match.group("role").strip()
+        if role_key in ROLE_LABEL_KO:
+            return role_key
+    return None
+
+
 class _GuiWarningLogger:
     def __init__(self, emit: Callable[[str], None]) -> None:
         self._emit = emit
@@ -1419,12 +1435,10 @@ class LolManagerGui:
                 self.my_turn_var.set(line.split("is_my_pick_turn=", 1)[1].strip())
             except Exception:
                 pass
-        if "포지션 감지:" in line:
+        role_key = role_key_from_log_line(line)
+        if role_key:
             try:
-                after = line.split("포지션 감지:", 1)[1].strip()
-                role_key = after.split()[0].strip()
-                if role_key:
-                    self._set_role(role_key)
+                self._set_role(role_key)
             except Exception:
                 pass
 
