@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from enum import Enum
 import os
 from pathlib import Path
+import random
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Sequence
 import warnings
 
 import requests
@@ -40,6 +41,19 @@ KNOWN_GAMEFLOW_PHASES = frozenset(
         PHASE_WATCH_IN_PROGRESS,
     }
 )
+HONOR_BALLOT_ENDPOINT = "/lol-honor-v2/v1/ballot"
+HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
+HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
+END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
+HONOR_VOTE_TYPE = "HEART"
+LCU_TERMINAL_CONTEXTS = frozenset(
+    {
+        "postgame_honor_vote",
+        "blocking_modal",
+    }
+)
+# Endpoint provenance: confirmed from the installed rcp-fe-lol-postgame WAD.
+# Keep modal dismissal unsupported unless a concrete LCU close route is proven.
 
 
 def _normalize_lookup_key(value: object) -> str:
@@ -90,6 +104,33 @@ def _write_result_decision(
         LcuOutcome.ACTION_REJECTED,
         reason=rejected_reason,
         status_code=result.status_code,
+    )
+
+
+def _write_or_unsupported_decision(
+    result: "LcuResult",
+    *,
+    success_reason: str,
+    rejected_reason: str,
+    unsupported_reason: str,
+) -> "LcuDecision":
+    if result.error:
+        return LcuDecision(
+            _connection_outcome_for_error(result.error),
+            reason=result.error,
+            status_code=result.status_code,
+            error=result.error,
+        )
+    if result.status_code in {404, 405}:
+        return LcuDecision(
+            LcuOutcome.UNSUPPORTED,
+            reason=unsupported_reason,
+            status_code=result.status_code,
+        )
+    return _write_result_decision(
+        result,
+        success_reason=success_reason,
+        rejected_reason=rejected_reason,
     )
 
 
@@ -145,6 +186,7 @@ class LcuResult:
 class LcuOutcome(str, Enum):
     SUCCESS = "success"
     UNAVAILABLE = "unavailable"
+    UNSUPPORTED = "unsupported"
     UNKNOWN = "unknown"
     NO_SESSION = "no_session"
     MALFORMED_SESSION = "malformed_session"
@@ -196,6 +238,12 @@ class ChampSelectSnapshot:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class HonorVoteCandidate:
+    puuid: str
+    raw: dict[str, Any]
+
+
 def _coerce_lcu_outcome(outcome: object) -> LcuOutcome:
     if isinstance(outcome, LcuDecision):
         return outcome.status
@@ -212,6 +260,8 @@ def lcu_loop_action_for(outcome: object, *, context: str) -> LcuLoopAction:
 
     if status == LcuOutcome.SUCCESS:
         return LcuLoopAction.ACT_LCU
+    if str(context or "") in LCU_TERMINAL_CONTEXTS:
+        return LcuLoopAction.ABORT_LOG
     if status in {LcuOutcome.UNAVAILABLE, LcuOutcome.REQUEST_FAILED}:
         return LcuLoopAction.FALLBACK_IMAGE
     return LcuLoopAction.WAIT_AUTHORITATIVE
@@ -371,6 +421,177 @@ class LcuClient:
 
     def is_end_of_game_stats_available(self) -> bool:
         return self.request("GET", "/lol-end-of-game/v1/eog-stats-block").ok
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        result = self.request("POST", END_OF_GAME_DISMISS_STATS_ENDPOINT)
+        return _write_or_unsupported_decision(
+            result,
+            success_reason="end-of-game stats dismiss accepted",
+            rejected_reason="end-of-game stats dismiss rejected",
+            unsupported_reason="end-of-game stats dismiss endpoint is not available",
+        )
+
+    def dismiss_end_of_game_stats(self) -> bool:
+        return self.dismiss_end_of_game_stats_decision().ok
+
+    def get_honor_ballot_decision(self) -> LcuDecision:
+        result = self.request("GET", HONOR_BALLOT_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="honor ballot endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="honor ballot request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, dict):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="honor ballot response is not an object",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=result.data,
+            status_code=result.status_code,
+        )
+
+    def _honor_vote_candidates(
+        self,
+        ballot: dict[str, Any],
+    ) -> LcuDecision:
+        eligible_allies = ballot.get("eligibleAllies", [])
+        if eligible_allies is None:
+            eligible_allies = []
+        if not isinstance(eligible_allies, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="honor ballot eligibleAllies is not a list",
+            )
+
+        honored_players = ballot.get("honoredPlayers", [])
+        if honored_players is None:
+            honored_players = []
+        if not isinstance(honored_players, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="honor ballot honoredPlayers is not a list",
+            )
+
+        honored_puuids = {
+            str(player.get("recipientPuuid") or player.get("puuid") or "").strip()
+            for player in honored_players
+            if isinstance(player, dict)
+        }
+        honored_puuids.discard("")
+
+        vote_pool = ballot.get("votePool")
+        if isinstance(vote_pool, dict):
+            votes = _parse_optional_int(vote_pool.get("votes"))
+            if votes is not None and votes <= len(honored_puuids):
+                return LcuDecision(
+                    LcuOutcome.NO_CURRENT_ACTION,
+                    reason="no honor votes remain",
+                )
+
+        candidates: list[HonorVoteCandidate] = []
+        for candidate in eligible_allies:
+            if not isinstance(candidate, dict):
+                continue
+            puuid = str(candidate.get("puuid") or "").strip()
+            if not puuid or puuid in honored_puuids:
+                continue
+            candidates.append(HonorVoteCandidate(puuid=puuid, raw=candidate))
+
+        if not candidates:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no eligible ally honor candidate",
+            )
+        return LcuDecision(LcuOutcome.SUCCESS, value=tuple(candidates))
+
+    def honor_random_eligible_teammate_decision(
+        self,
+        *,
+        choice: Optional[
+            Callable[[Sequence[HonorVoteCandidate]], HonorVoteCandidate]
+        ] = None,
+    ) -> LcuDecision:
+        ballot = self.get_honor_ballot_decision()
+        if not ballot.ok:
+            return ballot
+
+        candidates_result = self._honor_vote_candidates(ballot.value)
+        if not candidates_result.ok:
+            return candidates_result
+
+        candidates: Sequence[HonorVoteCandidate] = candidates_result.value
+        chooser = choice or random.choice
+        selected = chooser(candidates)
+        if not isinstance(selected, HonorVoteCandidate):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="honor vote choice did not return a candidate",
+            )
+
+        honor = self.request(
+            "POST",
+            HONOR_VOTE_ENDPOINT,
+            json_body={
+                "recipientPuuid": selected.puuid,
+                "honorType": HONOR_VOTE_TYPE,
+            },
+        )
+        honor_decision = _write_or_unsupported_decision(
+            honor,
+            success_reason="honor vote accepted",
+            rejected_reason="honor vote rejected",
+            unsupported_reason="honor vote endpoint is not available",
+        )
+        if not honor_decision.ok:
+            return honor_decision
+
+        submit = self.request("POST", HONOR_BALLOT_SUBMIT_ENDPOINT)
+        submit_decision = _write_or_unsupported_decision(
+            submit,
+            success_reason="honor ballot submit accepted",
+            rejected_reason="honor ballot submit rejected",
+            unsupported_reason="honor ballot submit endpoint is not available",
+        )
+        if not submit_decision.ok:
+            return submit_decision
+
+        return LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=selected,
+            reason="honor vote submitted",
+            status_code=submit_decision.status_code,
+        )
+
+    def honor_random_eligible_teammate(self) -> bool:
+        return self.honor_random_eligible_teammate_decision().ok
+
+    def dismiss_blocking_modal_decision(self) -> LcuDecision:
+        return LcuDecision(
+            LcuOutcome.UNSUPPORTED,
+            reason="no confirmed LCU route for blocking client modal dismissal",
+        )
+
+    def dismiss_blocking_modal(self) -> bool:
+        return self.dismiss_blocking_modal_decision().ok
 
     def get_champ_select_session(self) -> Optional[dict[str, Any]]:
         result = self.request("GET", "/lol-champ-select/v1/session")
