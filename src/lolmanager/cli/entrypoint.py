@@ -108,6 +108,8 @@ LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
     "pick_popups": "ui-only",
     "pick_myturn": "fallback-only",
     "postgame_end_buttons": "ui-only",
+    "postgame_honor_vote": "lcu-only-terminal",
+    "blocking_modals": "lcu-only-terminal",
 }
 
 
@@ -612,6 +614,88 @@ def _start_matchmaking_lcu_attempt(
 def _lcu_status_label(result: object) -> str:
     status = getattr(result, "status", None)
     return str(getattr(status, "value", status or "unknown"))
+
+
+def _honor_vote_lcu_attempt(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> LcuActionAttempt:
+    if lcu is None:
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
+
+    try:
+        decision_fn = getattr(lcu, "honor_random_eligible_teammate_decision", None)
+        if not callable(decision_fn):
+            logger.debug("LCU 명예 투표 API가 없습니다(%s).", stage)
+            return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "not_supported")
+
+        result = decision_fn()
+        outcome = _lcu_status_label(result)
+        if getattr(result, "ok", False):
+            logger.info("LCU 명예 투표 요청 완료(%s,outcome=%s).", stage, outcome)
+            return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+        loop_action = lcu_loop_action_for(result, context="postgame_honor_vote")
+        logger.debug(
+            "LCU 명예 투표 처리 종료(%s,outcome=%s,reason=%s). "
+            "이미지 fallback 없이 다음 자동화 사이클로 복귀합니다.",
+            stage,
+            outcome,
+            getattr(result, "reason", ""),
+        )
+        return LcuActionAttempt(True, loop_action, outcome)
+    except RequestException as exc:
+        logger.debug(
+            "LCU 명예 투표 요청 실패(%s): %s. 다음 자동화 사이클로 복귀합니다.",
+            stage,
+            exc,
+        )
+        return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "request_exception")
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 명예 투표 중 예상하지 못한 오류(%s).", stage)
+        raise
+
+
+def _dismiss_blocking_modal_lcu_attempt(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> LcuActionAttempt:
+    if lcu is None:
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
+
+    try:
+        decision_fn = getattr(lcu, "dismiss_blocking_modal_decision", None)
+        if not callable(decision_fn):
+            logger.debug("LCU 클라이언트 모달 닫기 API가 없습니다(%s).", stage)
+            return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "not_supported")
+
+        result = decision_fn()
+        outcome = _lcu_status_label(result)
+        if getattr(result, "ok", False):
+            logger.info("LCU 클라이언트 모달 닫기 완료(%s,outcome=%s).", stage, outcome)
+            return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+        loop_action = lcu_loop_action_for(result, context="blocking_modal")
+        logger.debug(
+            "LCU 클라이언트 모달 닫기 종료(%s,outcome=%s,reason=%s). "
+            "확인된 LCU 닫기 경로가 없으면 다음 자동화 사이클을 계속합니다.",
+            stage,
+            outcome,
+            getattr(result, "reason", ""),
+        )
+        return LcuActionAttempt(True, loop_action, outcome)
+    except RequestException as exc:
+        logger.debug(
+            "LCU 클라이언트 모달 닫기 요청 실패(%s): %s. 다음 자동화 사이클을 계속합니다.",
+            stage,
+            exc,
+        )
+        return LcuActionAttempt(True, LcuLoopAction.ABORT_LOG, "request_exception")
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 클라이언트 모달 닫기 중 예상하지 못한 오류(%s).", stage)
+        raise
 
 
 def _champ_select_action_attempt_via_lcu(
@@ -1885,10 +1969,18 @@ def process_postgame(
             logger.debug("LCU phase=None 상태입니다. 엔드 버튼 이미지를 탐색하지 않습니다.")
             time.sleep(interval_sec)
             continue
+        if phase == PHASE_PRE_END_OF_GAME:
+            honor_attempt = _honor_vote_lcu_attempt(lcu, "엔드 이후", logger)
+            logger.info(
+                "LCU 명예 투표 화면 처리 종료(outcome=%s). 다음 자동화 사이클로 복귀합니다.",
+                honor_attempt.outcome,
+            )
+            return
         if phase in {PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME}:
             if lcu is not None and lcu.is_end_of_game_stats_available():
                 logger.debug("LCU 엔드 통계 사용 가능(%s). 엔드 버튼 탐색을 계속합니다.", phase)
 
+        _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
         rect = ensure_active_rect(logger)
         if detect_champion_select(
             rect, "엔드 이후", tpl_prepick, available_roles, threshold, logger, lcu=lcu
@@ -2246,6 +2338,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             )
             time.sleep(interval_sec)
             continue
+
+        _dismiss_blocking_modal_lcu_attempt(lcu, "사이클 시작", logger)
 
         if phase_at_cycle in {
             PHASE_IN_PROGRESS,

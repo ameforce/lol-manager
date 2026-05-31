@@ -247,6 +247,39 @@ class _FakeLocalActionLcu:
         return LcuDecision(LcuOutcome.NO_CURRENT_ACTION)
 
 
+class _FakePostgameHonorLcu:
+    def __init__(self, result: LcuDecision) -> None:
+        self.result = result
+        self.phase_calls = 0
+        self.honor_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_PRE_END_OF_GAME)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return False
+
+    def honor_random_eligible_teammate_decision(self) -> LcuDecision:
+        self.honor_calls += 1
+        return self.result
+
+
+class _FakeBlockingModalLcu:
+    def __init__(self, result: LcuDecision) -> None:
+        self.result = result
+        self.dismiss_calls = 0
+
+    def dismiss_blocking_modal_decision(self) -> LcuDecision:
+        self.dismiss_calls += 1
+        return self.result
+
+
 class CliLcuStateTests(unittest.TestCase):
     def test_lcu_phase_maps_to_runtime_state(self) -> None:
         self.assertEqual(
@@ -1160,6 +1193,53 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(fake.start_calls, 0)
         search.assert_not_called()
 
+    def test_postgame_pre_end_honor_attempt_returns_without_image_fallback(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameHonorLcu(
+            LcuDecision(LcuOutcome.UNSUPPORTED, reason="no confirmed honor route")
+        )
+
+        with (
+            mock.patch.object(entrypoint, "ensure_active_rect") as ensure_rect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.honor_calls, 1)
+        ensure_rect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_blocking_modal_attempt_treats_unsupported_as_terminal(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeBlockingModalLcu(
+            LcuDecision(LcuOutcome.UNSUPPORTED, reason="no confirmed modal route")
+        )
+
+        result = entrypoint._dismiss_blocking_modal_lcu_attempt(
+            fake, "사이클 시작", logger
+        )
+
+        self.assertTrue(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.ABORT_LOG)
+        self.assertEqual(result.outcome, "unsupported")
+        self.assertEqual(fake.dismiss_calls, 1)
+
     def test_ready_check_semantic_rejection_skips_image_accept_scan(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeReadyDecisionLcu(
@@ -1539,6 +1619,14 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["postgame_end_buttons"],
             "ui-only",
+        )
+        self.assertEqual(
+            entrypoint.LCU_UI_ACTION_CLASSIFICATION["postgame_honor_vote"],
+            "lcu-only-terminal",
+        )
+        self.assertEqual(
+            entrypoint.LCU_UI_ACTION_CLASSIFICATION["blocking_modals"],
+            "lcu-only-terminal",
         )
 
     def test_pick_popup_scan_does_not_include_semantic_myturn_template(self) -> None:
