@@ -20,6 +20,7 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from lolmanager.core.auto_ban_refresh import AutoBanRefreshCoordinator
+from lolmanager.core.app_version import format_app_version_label, get_app_version
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_LABEL
 from lolmanager.core.role_setting_data import load_role_setting_data
@@ -488,6 +489,9 @@ class LolManagerGui:
         self.client_visible_var = tk.StringVar(value="Unknown")
         self.proc_usage_var = tk.StringVar(value="CPU -  MEM -")
         self.last_msg_var = tk.StringVar(value="")
+        self.app_version_var = tk.StringVar(
+            value=format_app_version_label(get_app_version())
+        )
         self.role_key: Optional[str] = None
         self.role_var = tk.StringVar(value="미감지")
 
@@ -837,6 +841,12 @@ class LolManagerGui:
 
         self.lbl_last = ttk.Label(last, textvariable=self.last_msg_var, anchor="w")
         self.lbl_last.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(
+            last,
+            textvariable=self.app_version_var,
+            foreground="#555555",
+            anchor="e",
+        ).pack(side=tk.RIGHT, padx=(8, 0))
         try:
             self.lbl_last.bind("<Configure>", self._on_last_label_configure)
         except Exception:
