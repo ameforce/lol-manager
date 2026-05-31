@@ -227,15 +227,51 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
 
-    def test_dismiss_blocking_modal_reports_unsupported_without_confirmed_route(
+    def test_dismiss_blocking_modal_deletes_simple_dialog_messages(
         self,
     ) -> None:
-        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        session = _FakeSession(
+            [
+                _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
 
         result = client.dismiss_blocking_modal_decision()
 
-        self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
-        self.assertIn("no confirmed", result.reason)
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[0]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-simple-dialog-messages/v1/messages"
+            )
+        )
+        self.assertEqual(session.calls[1]["method"], "DELETE")
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
+                "/lol-simple-dialog-messages/v1/messages/dialog-a"
+            )
+        )
+
+    def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
+                ),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
 
     def test_get_local_player_position_reads_assigned_position_from_session(self) -> None:
         champ_select_session = {
@@ -492,7 +528,7 @@ class LcuClientTests(unittest.TestCase):
         )
         self.assertEqual(
             lcu_loop_action_for(LcuOutcome.ACTION_REJECTED, context="blocking_modal"),
-            LcuLoopAction.ABORT_LOG,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
         )
         self.assertEqual(
             lcu_loop_action_for("not-a-real-lcu-outcome", context="write"),
