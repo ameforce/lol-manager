@@ -254,11 +254,70 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_blocking_modal_acknowledges_v2_reporter_feedback(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(200, [{"key": "feedback-a", "title": "신고 피드백"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[1]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
+                "/lol-player-behavior/v2/reporter-feedback"
+            )
+        )
+        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
+                "/lol-player-behavior/v2/reporter-feedback/feedback-a"
+            )
+        )
+
+    def test_dismiss_blocking_modal_deletes_v1_reporter_feedback(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(200, [{"id": 7, "title": "신고 피드백"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[2]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
+                "/lol-player-behavior/v1/reporter-feedback"
+            )
+        )
+        self.assertEqual(session.calls[3]["method"], "DELETE")
+        self.assertTrue(
+            str(session.calls[3]["url"]).endswith(
+                "/lol-player-behavior/v1/reporter-feedback/7"
+            )
+        )
+
     def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
         self,
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(

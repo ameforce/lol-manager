@@ -47,6 +47,12 @@ HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
 END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
+PLAYER_BEHAVIOR_V2_REPORTER_FEEDBACK_ENDPOINT = (
+    "/lol-player-behavior/v2/reporter-feedback"
+)
+PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT = (
+    "/lol-player-behavior/v1/reporter-feedback"
+)
 PLAYER_NOTIFICATIONS_ENDPOINT = "/player-notifications/v1/notifications"
 PLAYER_MESSAGING_NOTIFICATION_ENDPOINT = "/lol-player-messaging/v1/notification"
 HONOR_VOTE_TYPE = "HEART"
@@ -602,6 +608,8 @@ class LcuClient:
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
         handlers = (
             self._dismiss_simple_dialog_messages_decision,
+            self._dismiss_player_behavior_v2_reporter_feedback_decision,
+            self._dismiss_player_behavior_v1_reporter_feedback_decision,
             self._dismiss_player_notifications_decision,
             self._dismiss_player_messaging_notification_decision,
         )
@@ -688,6 +696,136 @@ class LcuClient:
         return LcuDecision(
             LcuOutcome.NO_CURRENT_ACTION,
             reason="no simple dialog messages",
+            status_code=result.status_code,
+        )
+
+    def _dismiss_player_behavior_v2_reporter_feedback_decision(self) -> LcuDecision:
+        result = self.request("GET", PLAYER_BEHAVIOR_V2_REPORTER_FEEDBACK_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="reporter feedback v2 endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="reporter feedback v2 request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="reporter feedback v2 response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for feedback in result.data:
+            feedback_key = _non_empty_identifier(feedback, "key", "id", "feedbackId")
+            if not feedback_key:
+                continue
+            acknowledge = self.request(
+                "POST",
+                (
+                    f"{PLAYER_BEHAVIOR_V2_REPORTER_FEEDBACK_ENDPOINT}/"
+                    f"{quote(feedback_key, safe='')}"
+                ),
+            )
+            decision = _write_or_unsupported_decision(
+                acknowledge,
+                success_reason="reporter feedback acknowledged",
+                rejected_reason="reporter feedback acknowledge rejected",
+                unsupported_reason=(
+                    "reporter feedback acknowledge endpoint is not available"
+                ),
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="reporter feedback acknowledged",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no reporter feedback v2 notification",
+            status_code=result.status_code,
+        )
+
+    def _dismiss_player_behavior_v1_reporter_feedback_decision(self) -> LcuDecision:
+        result = self.request("GET", PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="reporter feedback v1 endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="reporter feedback v1 request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="reporter feedback v1 response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for feedback in result.data:
+            feedback_id = _non_empty_identifier(feedback, "id", "feedbackId", "key")
+            if not feedback_id:
+                continue
+            delete = self.request(
+                "DELETE",
+                (
+                    f"{PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT}/"
+                    f"{quote(feedback_id, safe='')}"
+                ),
+            )
+            decision = _write_or_unsupported_decision(
+                delete,
+                success_reason="reporter feedback dismissed",
+                rejected_reason="reporter feedback dismiss rejected",
+                unsupported_reason="reporter feedback dismiss endpoint is not available",
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="reporter feedback dismissed",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no reporter feedback v1 notification",
             status_code=result.status_code,
         )
 
