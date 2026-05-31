@@ -8,6 +8,7 @@ from pathlib import Path
 import random
 import time
 from typing import Any, Callable, Optional, Sequence
+from urllib.parse import quote
 import warnings
 
 import requests
@@ -45,15 +46,16 @@ HONOR_BALLOT_ENDPOINT = "/lol-honor-v2/v1/ballot"
 HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
 END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
+SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
+PLAYER_NOTIFICATIONS_ENDPOINT = "/player-notifications/v1/notifications"
+PLAYER_MESSAGING_NOTIFICATION_ENDPOINT = "/lol-player-messaging/v1/notification"
 HONOR_VOTE_TYPE = "HEART"
 LCU_TERMINAL_CONTEXTS = frozenset(
     {
         "postgame_honor_vote",
-        "blocking_modal",
     }
 )
 # Endpoint provenance: confirmed from the installed rcp-fe-lol-postgame WAD.
-# Keep modal dismissal unsupported unless a concrete LCU close route is proven.
 
 
 def _normalize_lookup_key(value: object) -> str:
@@ -67,6 +69,19 @@ def _parse_optional_int(value: object) -> Optional[int]:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _non_empty_identifier(item: object, *keys: str) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    for key in keys:
+        raw = item.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text and text != "0":
+            return text
+    return None
 
 
 def _connection_outcome_for_error(error: Optional[str]) -> "LcuOutcome":
@@ -585,13 +600,206 @@ class LcuClient:
         return self.honor_random_eligible_teammate_decision().ok
 
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
+        handlers = (
+            self._dismiss_simple_dialog_messages_decision,
+            self._dismiss_player_notifications_decision,
+            self._dismiss_player_messaging_notification_decision,
+        )
+        saw_supported_empty = False
+        for handler in handlers:
+            result = handler()
+            if result.ok:
+                return result
+            if result.status == LcuOutcome.NO_CURRENT_ACTION:
+                saw_supported_empty = True
+                continue
+            if result.status == LcuOutcome.UNSUPPORTED:
+                continue
+            return result
+
+        if saw_supported_empty:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no blocking client modal notification",
+            )
         return LcuDecision(
             LcuOutcome.UNSUPPORTED,
-            reason="no confirmed LCU route for blocking client modal dismissal",
+            reason="no supported LCU route for blocking client modal dismissal",
         )
 
     def dismiss_blocking_modal(self) -> bool:
         return self.dismiss_blocking_modal_decision().ok
+
+    def _dismiss_simple_dialog_messages_decision(self) -> LcuDecision:
+        result = self.request("GET", SIMPLE_DIALOG_MESSAGES_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="simple dialog messages endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="simple dialog messages request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="simple dialog messages response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for message in result.data:
+            message_id = _non_empty_identifier(message, "messageId", "id", "msgId")
+            if not message_id:
+                continue
+            delete = self.request(
+                "DELETE",
+                f"{SIMPLE_DIALOG_MESSAGES_ENDPOINT}/{quote(message_id, safe='')}",
+            )
+            decision = _write_or_unsupported_decision(
+                delete,
+                success_reason="simple dialog message dismissed",
+                rejected_reason="simple dialog message dismiss rejected",
+                unsupported_reason="simple dialog message dismiss endpoint is not available",
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="simple dialog messages dismissed",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no simple dialog messages",
+            status_code=result.status_code,
+        )
+
+    def _dismiss_player_notifications_decision(self) -> LcuDecision:
+        result = self.request("GET", PLAYER_NOTIFICATIONS_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="player notifications endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="player notifications request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="player notifications response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for notification in result.data:
+            notification_id = _non_empty_identifier(notification, "id", "notificationId")
+            if not notification_id:
+                continue
+            delete = self.request(
+                "DELETE",
+                f"{PLAYER_NOTIFICATIONS_ENDPOINT}/{quote(notification_id, safe='')}",
+            )
+            decision = _write_or_unsupported_decision(
+                delete,
+                success_reason="player notification dismissed",
+                rejected_reason="player notification dismiss rejected",
+                unsupported_reason="player notification dismiss endpoint is not available",
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="player notifications dismissed",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no player notifications",
+            status_code=result.status_code,
+        )
+
+    def _dismiss_player_messaging_notification_decision(self) -> LcuDecision:
+        result = self.request("GET", PLAYER_MESSAGING_NOTIFICATION_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="player messaging notification endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="player messaging notification request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, dict):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="player messaging notification response is not an object",
+                status_code=result.status_code,
+            )
+
+        notification_id = _non_empty_identifier(result.data, "id", "notificationId")
+        if not notification_id:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no player messaging notification",
+                status_code=result.status_code,
+            )
+
+        ack = self.request(
+            "DELETE",
+            f"{PLAYER_MESSAGING_NOTIFICATION_ENDPOINT}/{quote(notification_id, safe='')}/acknowledge",
+        )
+        return _write_or_unsupported_decision(
+            ack,
+            success_reason="player messaging notification acknowledged",
+            rejected_reason="player messaging notification acknowledge rejected",
+            unsupported_reason="player messaging notification acknowledge endpoint is not available",
+        )
 
     def get_champ_select_session(self) -> Optional[dict[str, Any]]:
         result = self.request("GET", "/lol-champ-select/v1/session")

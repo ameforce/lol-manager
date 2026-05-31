@@ -303,6 +303,17 @@ class _FakeBlockingModalLcu:
         return self.result
 
 
+class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
+    def __init__(self, phase: str | None, result: LcuDecision) -> None:
+        super().__init__(phase)
+        self.result = result
+        self.dismiss_calls = 0
+
+    def dismiss_blocking_modal_decision(self) -> LcuDecision:
+        self.dismiss_calls += 1
+        return self.result
+
+
 class CliLcuStateTests(unittest.TestCase):
     def test_lcu_phase_maps_to_runtime_state(self) -> None:
         self.assertEqual(
@@ -1282,7 +1293,18 @@ class CliLcuStateTests(unittest.TestCase):
         search.assert_not_called()
         poll.assert_not_called()
 
-    def test_blocking_modal_attempt_treats_unsupported_as_terminal(self) -> None:
+    def test_cycle_start_postgame_phase_routes_to_postgame_handler(self) -> None:
+        for phase in (PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME):
+            with self.subTest(phase=phase):
+                self.assertTrue(entrypoint._should_process_postgame_at_cycle(phase))
+
+        for phase in (PHASE_NONE, PHASE_LOBBY, PHASE_MATCHMAKING):
+            with self.subTest(phase=phase):
+                self.assertFalse(entrypoint._should_process_postgame_at_cycle(phase))
+
+    def test_blocking_modal_attempt_allows_image_fallback_when_lcu_has_no_route(
+        self,
+    ) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeBlockingModalLcu(
             LcuDecision(LcuOutcome.UNSUPPORTED, reason="no confirmed modal route")
@@ -1292,10 +1314,52 @@ class CliLcuStateTests(unittest.TestCase):
             fake, "사이클 시작", logger
         )
 
-        self.assertTrue(result.completed)
-        self.assertEqual(result.loop_action, LcuLoopAction.ABORT_LOG)
+        self.assertFalse(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.FALLBACK_IMAGE)
         self.assertEqual(result.outcome, "unsupported")
         self.assertEqual(fake.dismiss_calls, 1)
+
+    def test_blocking_modal_attempt_allows_image_fallback_without_lcu_route(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseLcu(PHASE_END_OF_GAME)
+
+        result = entrypoint._dismiss_blocking_modal_lcu_attempt(
+            fake, "사이클 시작", logger
+        )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.FALLBACK_IMAGE)
+        self.assertEqual(result.outcome, "not_supported")
+
+    def test_match_poll_dismisses_blocking_modal_via_lcu_before_image_confirm(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.POSTGAME_SCORE
+        fake = _FakePhaseBlockingModalLcu(
+            PHASE_END_OF_GAME,
+            LcuDecision(LcuOutcome.SUCCESS, reason="modal dismissed"),
+        )
+
+        with mock.patch.object(entrypoint, "find_template_matches_once") as find_matches:
+            result = entrypoint.poll_match_state(
+                (0, 0, 1280, 720),
+                "사이클 진입",
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                0.85,
+                0.2,
+                logger,
+                tpl_confirm_templates=[Path("client_confirm-button-2.png")],
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.dismiss_calls, 1)
+        self.assertEqual(result.loop_action, LcuLoopAction.ACT_LCU)
+        self.assertEqual(result.outcome, "success")
+        find_matches.assert_not_called()
 
     def test_ready_check_semantic_rejection_skips_image_accept_scan(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
@@ -1667,7 +1731,7 @@ class CliLcuStateTests(unittest.TestCase):
         )
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["pick_popups"],
-            "ui-only",
+            "lcu-first",
         )
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["pick_myturn"],
@@ -1687,7 +1751,7 @@ class CliLcuStateTests(unittest.TestCase):
         )
         self.assertEqual(
             entrypoint.LCU_UI_ACTION_CLASSIFICATION["blocking_modals"],
-            "lcu-only-terminal",
+            "lcu-first",
         )
 
     def test_pick_popup_scan_does_not_include_semantic_myturn_template(self) -> None:
@@ -1702,6 +1766,27 @@ class CliLcuStateTests(unittest.TestCase):
         find_matches.assert_called_once_with(
             rect, [], threshold=0.85, search_rois={}
         )
+
+    def test_pick_popups_dismisses_confirm_via_lcu_before_image_scan(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        rect = (0, 0, 1280, 720)
+        fake = _FakeBlockingModalLcu(
+            LcuDecision(LcuOutcome.SUCCESS, reason="modal dismissed")
+        )
+
+        with mock.patch.object(entrypoint, "find_template_matches_once") as find_matches:
+            handled = entrypoint.try_pick_popups(
+                rect,
+                [Path("client_confirm-button-2.png")],
+                None,
+                0.85,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(fake.dismiss_calls, 1)
+        find_matches.assert_not_called()
 
     def test_myturn_image_fallback_helper_updates_pick_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
