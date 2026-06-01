@@ -85,6 +85,10 @@ OP.GG 추천 캐시:
 | 이름 | 기본값 | 설명 |
 | --- | --- | --- |
 | `LOLMANAGER_CHAMPSELECT_ACTION_CONFIRM_TIMEOUT_SEC` | `2.0` | LCU 픽/밴 선택 및 완료 확인 대기 시간(초) |
+| `LOLMANAGER_LEAGUE_CLIENT_EXE` | `C:\Riot Games\League of Legends\LeagueClient.exe` | LeagueClient 실행 파일 경로 |
+| `LOLMANAGER_RIOT_CLIENT_SERVICES_EXE` | 자동 탐지 | RiotClientServices 실행 파일 경로 |
+| `LOLMANAGER_OPGG_EXE` | 자동 탐지 | OP.GG 실행 파일 경로. `%LOCALAPPDATA%\Programs\OP.GG\OP.GG.exe` 등을 먼저 찾습니다. |
+| `LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS` | 비활성 | `LOLMANAGER_OPGG_EXE`가 표준 설치 위치 밖의 `OP.GG.exe`를 가리킬 때 `1`로 명시 허용 |
 
 ## EXE 빌드
 
