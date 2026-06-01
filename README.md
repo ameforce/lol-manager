@@ -49,6 +49,14 @@ CLI 도움말:
 uv run lolmanager-cli --help
 ```
 
+## 개발 검증
+
+테스트는 프로젝트 dev 의존성을 포함해 실행합니다.
+
+```bat
+uv run --group dev python -m pytest -q
+```
+
 ## 설정
 
 설정 GUI에서 포지션별로 아래 값을 고릅니다. 변경 내용은 사용자 액션마다 자동 저장됩니다.
