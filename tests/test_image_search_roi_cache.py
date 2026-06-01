@@ -195,6 +195,40 @@ class ImageSearchRoiCacheTests(unittest.TestCase):
                 image_search.find_template_center(rect, self.template_path, threshold=0.999)
             )
 
+    def test_roi_cache_evicts_oldest_entries_at_bound(self) -> None:
+        limit = image_search._TEMPLATE_ROI_CACHE_MAX
+
+        for idx in range(limit + 3):
+            image_search._set_cached_roi(f"roi-{idx}", (idx, idx, idx + 1, idx + 1))
+
+        self.assertLessEqual(len(image_search._TEMPLATE_ROI_CACHE), limit)
+        self.assertNotIn("roi-0", image_search._TEMPLATE_ROI_CACHE)
+        self.assertNotIn("roi-1", image_search._TEMPLATE_ROI_CACHE)
+        self.assertNotIn("roi-2", image_search._TEMPLATE_ROI_CACHE)
+        self.assertIn(f"roi-{limit + 2}", image_search._TEMPLATE_ROI_CACHE)
+
+    def test_miss_cache_purges_expired_entries_and_evicts_oldest(self) -> None:
+        limit = image_search._TEMPLATE_MISS_CACHE_MAX
+        now = 100.0
+        image_search._TEMPLATE_MISS_CACHE["expired"] = (
+            now - image_search._GRAB_CACHE_MAX_AGE_SEC - 1.0
+        )
+
+        with mock.patch.object(image_search.time, "monotonic", return_value=now):
+            image_search._set_recent_template_miss("fresh")
+
+        self.assertNotIn("expired", image_search._TEMPLATE_MISS_CACHE)
+        self.assertIn("fresh", image_search._TEMPLATE_MISS_CACHE)
+
+        with mock.patch.object(image_search.time, "monotonic", return_value=now):
+            for idx in range(limit + 2):
+                image_search._set_recent_template_miss(f"miss-{idx}")
+
+        self.assertLessEqual(len(image_search._TEMPLATE_MISS_CACHE), limit)
+        self.assertNotIn("fresh", image_search._TEMPLATE_MISS_CACHE)
+        self.assertNotIn("miss-0", image_search._TEMPLATE_MISS_CACHE)
+        self.assertIn(f"miss-{limit + 1}", image_search._TEMPLATE_MISS_CACHE)
+
     def test_multi_template_search_captures_once(self) -> None:
         template = _template()
         screen = _screen_with_template(template, x=80, y=40)

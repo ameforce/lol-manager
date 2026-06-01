@@ -183,6 +183,8 @@ _TEMPLATE_MATCH_RESULT_CACHE: dict[
     tuple[str, int, int, int, Tuple[int, int, int, int]],
     tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ] = {}
+_TEMPLATE_ROI_CACHE_MAX = 256
+_TEMPLATE_MISS_CACHE_MAX = 256
 _TEMPLATE_MATCH_RESULT_CACHE_MAX = 256
 
 
@@ -230,8 +232,19 @@ def _get_cached_roi(key: str) -> Optional[Tuple[int, int, int, int]]:
     return roi
 
 
+def _evict_oldest_cache_entries(cache: dict, max_size: int) -> None:
+    while len(cache) > max(0, int(max_size)):
+        try:
+            oldest_key = next(iter(cache))
+        except StopIteration:
+            return
+        cache.pop(oldest_key, None)
+
+
 def _set_cached_roi(key: str, roi: Tuple[int, int, int, int]) -> None:
+    _TEMPLATE_ROI_CACHE.pop(key, None)
     _TEMPLATE_ROI_CACHE[key] = (roi, float(time.monotonic()))
+    _evict_oldest_cache_entries(_TEMPLATE_ROI_CACHE, _TEMPLATE_ROI_CACHE_MAX)
 
 
 def _clear_cached_roi(key: str) -> None:
@@ -248,8 +261,18 @@ def _has_recent_template_miss(key: str) -> bool:
     return False
 
 
+def _purge_expired_template_misses(now: float) -> None:
+    for key, missed_at in list(_TEMPLATE_MISS_CACHE.items()):
+        if now - float(missed_at) > _GRAB_CACHE_MAX_AGE_SEC:
+            _TEMPLATE_MISS_CACHE.pop(key, None)
+
+
 def _set_recent_template_miss(key: str) -> None:
-    _TEMPLATE_MISS_CACHE[key] = float(time.monotonic())
+    now = float(time.monotonic())
+    _purge_expired_template_misses(now)
+    _TEMPLATE_MISS_CACHE.pop(key, None)
+    _TEMPLATE_MISS_CACHE[key] = now
+    _evict_oldest_cache_entries(_TEMPLATE_MISS_CACHE, _TEMPLATE_MISS_CACHE_MAX)
 
 
 def _clear_recent_template_miss(key: str) -> None:
@@ -266,13 +289,10 @@ def _set_cached_match_result(
     cache_key: tuple[str, int, int, int, Tuple[int, int, int, int]],
     result: tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ) -> None:
-    if len(_TEMPLATE_MATCH_RESULT_CACHE) >= _TEMPLATE_MATCH_RESULT_CACHE_MAX:
-        try:
-            oldest_key = next(iter(_TEMPLATE_MATCH_RESULT_CACHE))
-            _TEMPLATE_MATCH_RESULT_CACHE.pop(oldest_key, None)
-        except StopIteration:
-            pass
     _TEMPLATE_MATCH_RESULT_CACHE[cache_key] = result
+    _evict_oldest_cache_entries(
+        _TEMPLATE_MATCH_RESULT_CACHE, _TEMPLATE_MATCH_RESULT_CACHE_MAX
+    )
 
 
 _USER32 = ctypes.WinDLL("user32", use_last_error=True)
