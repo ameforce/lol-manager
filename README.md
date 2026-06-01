@@ -57,15 +57,6 @@ uv run lolmanager-cli --help
 uv run --group dev python -m pytest -q
 ```
 
-## 릴리즈 검증
-
-`hotfix/vX.Y.Z`, `release/vX.Y.Z`, 또는 `vX.Y.Z` 태그에서 빌드할 때는 `pyproject.toml`의 package version을 `X.Y.Z`와 일치시켜야 합니다. 테스트가 이 불일치를 차단하므로, 릴리즈 빌드 전에 아래 검증을 먼저 실행합니다.
-
-```bat
-uv run --group dev python -m pytest -q
-uv build
-```
-
 ## 설정
 
 설정 GUI에서 포지션별로 아래 값을 고릅니다. 변경 내용은 사용자 액션마다 자동 저장됩니다.
