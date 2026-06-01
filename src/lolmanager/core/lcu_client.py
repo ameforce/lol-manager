@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from enum import Enum
+import getpass
 import os
 from pathlib import Path
 import random
@@ -11,6 +12,7 @@ from typing import Any, Callable, Optional, Sequence
 from urllib.parse import quote
 import warnings
 
+import psutil
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -66,6 +68,14 @@ LCU_TERMINAL_CONTEXTS = frozenset(
     }
 )
 # Endpoint provenance: confirmed from the installed rcp-fe-lol-postgame WAD.
+_ALLOWED_LCU_PROCESS_NAMES = frozenset(
+    {
+        "leagueclient.exe",
+        "leagueclientux.exe",
+        "riotclientservices.exe",
+    }
+)
+_LOOPBACK_BIND_IPS = frozenset({"127.0.0.1", "::1", "0.0.0.0", "::"})
 
 
 def _normalize_lookup_key(value: object) -> str:
@@ -79,6 +89,85 @@ def _parse_optional_int(value: object) -> Optional[int]:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _current_account_name() -> str:
+    return str(getpass.getuser() or "").strip().casefold()
+
+
+def _process_account_name(process: psutil.Process) -> str:
+    raw = str(process.username() or "").strip().replace("/", "\\")
+    return raw.rsplit("\\", maxsplit=1)[-1].casefold()
+
+
+def _process_name(process: psutil.Process) -> str:
+    return str(process.name() or "").strip().casefold()
+
+
+def _is_allowed_lcu_process(process: psutil.Process) -> bool:
+    name = _process_name(process)
+    if name not in _ALLOWED_LCU_PROCESS_NAMES and not name.startswith("leagueclient"):
+        return False
+
+    identity_parts = [name]
+    try:
+        identity_parts.append(str(process.exe() or ""))
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+        return False
+    try:
+        identity_parts.extend(str(part or "") for part in process.cmdline())
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+        pass
+
+    identity = " ".join(identity_parts).casefold()
+    return any(
+        marker in identity
+        for marker in ("leagueclient", "riotclientservices", "riot games")
+    )
+
+
+def _connection_laddr_parts(connection: object) -> tuple[str, Optional[int]]:
+    laddr = getattr(connection, "laddr", None)
+    if isinstance(laddr, tuple) and len(laddr) >= 2:
+        return (str(laddr[0]), _parse_optional_int(laddr[1]))
+    return (
+        str(getattr(laddr, "ip", "") or ""),
+        _parse_optional_int(getattr(laddr, "port", None)),
+    )
+
+
+def _process_owns_loopback_port(pid: int, port: int) -> bool:
+    try:
+        connections = psutil.net_connections(kind="tcp")
+    except (psutil.AccessDenied, OSError):
+        return False
+
+    for connection in connections:
+        if getattr(connection, "pid", None) != pid:
+            continue
+        ip, local_port = _connection_laddr_parts(connection)
+        if local_port != port or ip not in _LOOPBACK_BIND_IPS:
+            continue
+        status = str(getattr(connection, "status", "") or "").upper()
+        if status and status != str(psutil.CONN_LISTEN).upper():
+            continue
+        return True
+    return False
+
+
+def _default_lcu_connection_validator(conn: "LcuConnection") -> bool:
+    if conn.pid <= 0 or conn.port <= 0 or conn.port > 65535:
+        return False
+    try:
+        process = psutil.Process(conn.pid)
+        if not _is_allowed_lcu_process(process):
+            return False
+        if _process_account_name(process) != _current_account_name():
+            return False
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+        return False
+
+    return _process_owns_loopback_port(conn.pid, conn.port)
 
 
 def _non_empty_identifier(item: object, *keys: str) -> Optional[str]:
@@ -299,11 +388,17 @@ class LcuClient:
         lockfile: Optional[Path] = None,
         session: Optional[requests.Session] = None,
         timeout_sec: float = 0.7,
+        connection_validator: Optional[Callable[[LcuConnection], bool]] = None,
     ) -> None:
         env_lockfile = os.environ.get("LOLMANAGER_LCU_LOCKFILE")
         self.lockfile = Path(env_lockfile) if env_lockfile else (lockfile or DEFAULT_LOCKFILE)
         self.session = session or requests.Session()
         self.timeout_sec = float(timeout_sec)
+        self._connection_validator = (
+            connection_validator
+            if connection_validator is not None
+            else (_default_lcu_connection_validator if session is None else None)
+        )
         self._phase_cache: tuple[float, Optional[LcuDecision]] = (0.0, None)
         self._last_logged_phase: Optional[str] = None
 
@@ -329,6 +424,14 @@ class LcuClient:
             return None
         return LcuConnection(pid=pid, port=port, password=password, protocol=protocol)
 
+    def _read_trusted_connection(self) -> tuple[Optional[LcuConnection], str]:
+        conn = self.read_connection()
+        if conn is None:
+            return (None, "lockfile unavailable")
+        if self._connection_validator is not None and not self._connection_validator(conn):
+            return (None, "lockfile rejected")
+        return (conn, "")
+
     def request(
         self,
         method: str,
@@ -337,9 +440,9 @@ class LcuClient:
         timeout_sec: Optional[float] = None,
         json_body: Any = None,
     ) -> LcuResult:
-        conn = self.read_connection()
+        conn, connection_error = self._read_trusted_connection()
         if conn is None:
-            return LcuResult(status_code=None, error="lockfile unavailable")
+            return LcuResult(status_code=None, error=connection_error)
 
         kwargs: dict[str, Any] = {
             "headers": {"Authorization": conn.authorization_header},
