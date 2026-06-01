@@ -27,6 +27,7 @@ from lolmanager.core.opgg_counter_recommendations import (
     is_auto_ban_value,
     load_recommendation_cache,
 )
+from lolmanager.gui.log_view_model import ROLE_LABEL_KO
 from lolmanager.platform.paths import champion_config_path, resource_path
 from lolmanager.platform.runtime import is_frozen
 
@@ -37,13 +38,6 @@ if TYPE_CHECKING:
 
 
 ROLE_ORDER: Tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
-ROLE_LABEL_KO: Dict[str, str] = {
-    "top": "탑",
-    "jungle": "정글",
-    "mid": "미드",
-    "adc": "원딜",
-    "support": "서폿",
-}
 APP_USER_MODEL_ID = "LOLManager"
 DISPLAY_SEPARATOR_PREFIX = "────────"
 BanCandidateValues = Tuple[List[str], Dict[str, str], str]
