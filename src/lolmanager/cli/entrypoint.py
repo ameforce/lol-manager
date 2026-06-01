@@ -995,6 +995,37 @@ def _wait_champ_select_action_via_lcu(
         time.sleep(min(max(0.0, interval_sec), max(0.0, deadline - now)))
 
 
+def _ban_champ_select_attempt_or_skip(
+    lcu: Optional[LcuClient],
+    ban_name: object,
+    *,
+    logger: logging.Logger,
+    interval_sec: float,
+) -> ChampSelectLcuAttempt:
+    resolved_ban = str(ban_name or "").strip()
+    if not resolved_ban:
+        logger.warning(
+            "밴 챔피언이 설정되지 않았습니다. 밴 단계만 건너뛰고 픽 단계 감지를 계속합니다."
+        )
+        return ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+            "missing_ban",
+        )
+
+    return _wait_champ_select_action_via_lcu(
+        lcu,
+        resolved_ban,
+        action_type="ban",
+        complete=True,
+        stage="밴",
+        logger=logger,
+        interval_sec=interval_sec,
+        timeout_sec=max(20.0, interval_sec * 20.0),
+        stop_when_action_type_in_progress="pick",
+    )
+
+
 def _handle_champ_select_phase_exit(
     attempt: ChampSelectLcuAttempt,
     lcu: Optional[LcuClient],
@@ -3085,30 +3116,22 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger=logger,
             )
 
-            if not ban_name:
-                logger.warning("밴 챔피언이 설정되지 않았습니다. 밴 단계 건너뜀.")
-                return
-
-            ban_lcu_attempt = _wait_champ_select_action_via_lcu(
+            ban_lcu_attempt = _ban_champ_select_attempt_or_skip(
                 lcu,
                 ban_name,
-                action_type="ban",
-                complete=True,
-                stage="밴",
                 logger=logger,
                 interval_sec=interval_sec,
-                timeout_sec=max(20.0, interval_sec * 20.0),
-                stop_when_action_type_in_progress="pick",
             )
             if _handle_champ_select_phase_exit(ban_lcu_attempt, lcu, "밴", logger):
                 continue
             if ban_lcu_attempt.completed:
                 _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
             elif ban_lcu_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
-                logger.warning(
-                    "LCU 밴 완료 미확정(outcome=%s). 외부 매칭 사이클 재시작 없이 픽 단계 감지를 계속합니다.",
-                    ban_lcu_attempt.outcome,
-                )
+                if ban_lcu_attempt.outcome != "missing_ban":
+                    logger.warning(
+                        "LCU 밴 완료 미확정(outcome=%s). 외부 매칭 사이클 재시작 없이 픽 단계 감지를 계속합니다.",
+                        ban_lcu_attempt.outcome,
+                    )
             else:
                 if not tpl_banpick_search.exists():
                     logger.warning(
