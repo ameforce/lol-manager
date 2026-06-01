@@ -16,6 +16,23 @@ import pyperclip
 
 logger = logging.getLogger(__name__)
 
+_PYWINAUTO_LITERAL_ESCAPES = {
+    "{": "{{}",
+    "}": "{}}",
+    "+": "{+}",
+    "^": "{^}",
+    "%": "{%}",
+    "~": "{~}",
+    "(": "{(}",
+    ")": "{)}",
+}
+
+
+def _escape_pywinauto_literal_text(value: object) -> str:
+    return "".join(
+        _PYWINAUTO_LITERAL_ESCAPES.get(ch, ch) for ch in str(value or "")
+    )
+
 _PROFILE_IMAGE = False
 try:
     _p = str(os.environ.get("LOLMANAGER_PROFILE_IMAGE", "") or "").strip().casefold()
@@ -911,7 +928,12 @@ def search_and_act(
             logger.warning("클립보드 붙여넣기 실패, 직접 타이핑 시도: %s", exc)
             try:
                 keyboard.send_keys("^a{BACKSPACE}")
-                keyboard.send_keys(keys)
+                keyboard.send_keys(
+                    _escape_pywinauto_literal_text(keys),
+                    with_spaces=True,
+                    with_tabs=True,
+                    with_newlines=True,
+                )
                 if post_input_sleep > 0:
                     time.sleep(post_input_sleep)
                 logger.info("키 입력(직접 타이핑) 완료: %s", keys)

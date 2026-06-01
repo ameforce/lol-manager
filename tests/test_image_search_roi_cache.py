@@ -264,6 +264,31 @@ class ImageSearchRoiCacheTests(unittest.TestCase):
         self.assertTrue(image_search.is_probably_disabled_gray_button(grayish))
         self.assertFalse(image_search.is_probably_disabled_gray_button(colorful))
 
+    def test_direct_typing_fallback_escapes_pywinauto_key_syntax(self) -> None:
+        send_calls: list[tuple[str, dict[str, object]]] = []
+
+        def fake_send_keys(keys: str, **kwargs: object) -> None:
+            send_calls.append((keys, kwargs))
+
+        with (
+            mock.patch.object(image_search, "find_template_center", return_value=(10, 20)),
+            mock.patch.object(image_search.pyperclip, "copy"),
+            mock.patch.object(image_search.pyperclip, "paste", return_value="not copied"),
+            mock.patch.object(image_search.keyboard, "send_keys", side_effect=fake_send_keys),
+        ):
+            ok = image_search.search_and_act(
+                (0, 0, 100, 100),
+                self.template_path,
+                keys="A B{TAB}+^%~()",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(send_calls[0][0], "^a{BACKSPACE}")
+        self.assertEqual(send_calls[1][0], "A B{{}TAB{}}{+}{^}{%}{~}{(}{)}")
+        self.assertTrue(send_calls[1][1]["with_spaces"])
+        self.assertTrue(send_calls[1][1]["with_tabs"])
+        self.assertTrue(send_calls[1][1]["with_newlines"])
+
 
 if __name__ == "__main__":
     unittest.main()
