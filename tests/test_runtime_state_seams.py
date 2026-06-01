@@ -20,7 +20,7 @@ from lolmanager.core.lcu_client import (
     PHASE_WAITING_FOR_STATS,
     PHASE_WATCH_IN_PROGRESS,
 )
-from lolmanager.gui import app_gui
+from lolmanager.gui import app_gui, config_gui
 from lolmanager.gui.log_view_model import (
     ROLE_CLEAR_STATES,
     ROLE_LABEL_KO,
@@ -92,3 +92,7 @@ def test_app_gui_reexports_log_view_model_seam() -> None:
     assert app_gui.ROLE_LABEL_KO is ROLE_LABEL_KO
     assert app_gui.ROLE_CLEAR_STATES is ROLE_CLEAR_STATES
     assert app_gui.role_key_from_log_line is role_key_from_log_line
+
+
+def test_config_gui_uses_shared_role_label_seam() -> None:
+    assert config_gui.ROLE_LABEL_KO is ROLE_LABEL_KO
