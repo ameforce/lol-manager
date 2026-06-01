@@ -31,6 +31,7 @@ from lolmanager.core.lcu_client import (
     PHASE_WATCH_IN_PROGRESS,
     LcuOutcome,
 )
+from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_VALUE
 
 
 class _FakeLcu:
@@ -1862,6 +1863,48 @@ class CliLcuStateTests(unittest.TestCase):
 
             self.assertTrue(handled)
             accept.assert_not_called()
+
+    def test_missing_ban_skips_ban_action_without_lcu_write(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with mock.patch.object(entrypoint, "_wait_champ_select_action_via_lcu") as wait:
+            result = entrypoint._ban_champ_select_attempt_or_skip(
+                object(),
+                "",
+                logger=logger,
+                interval_sec=0.1,
+            )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.WAIT_AUTHORITATIVE)
+        self.assertEqual(result.outcome, "missing_ban")
+        wait.assert_not_called()
+
+    def test_failed_auto_ban_resolution_skips_ban_action_without_lcu_write(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            resolved = entrypoint.resolve_ban_name_for_runtime(
+                Path(tmp) / "missing-counter-cache.json",
+                role="top",
+                champion_name="말파이트",
+                configured_ban=AUTO_BAN_VALUE,
+                logger=logger,
+                now=100.0,
+            )
+
+        self.assertEqual(resolved, "")
+
+        with mock.patch.object(entrypoint, "_wait_champ_select_action_via_lcu") as wait:
+            result = entrypoint._ban_champ_select_attempt_or_skip(
+                object(),
+                resolved,
+                logger=logger,
+                interval_sec=0.1,
+            )
+
+        self.assertEqual(result.outcome, "missing_ban")
+        wait.assert_not_called()
 
     def test_lcu_champ_select_action_state_marks_ban_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
