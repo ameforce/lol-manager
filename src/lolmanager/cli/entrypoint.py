@@ -3751,10 +3751,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         cli_main(cli_argv)
         return
 
+    logger = logging.getLogger("lolmanager")
     try:
-        ensure_external_apps_running_once(logger=logging.getLogger("lolmanager"))
-    except Exception:
-        pass
+        ensure_external_apps_running_once(logger=logger)
+    except Exception as exc:
+        logger.warning("외부 앱 자동 실행 점검 실패: %s", exc)
 
     from lolmanager.gui.app_gui import main as run_app_gui
 
