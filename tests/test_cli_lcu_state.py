@@ -374,6 +374,41 @@ class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
 
 
 class CliLcuStateTests(unittest.TestCase):
+    def test_ensure_active_rect_times_out_when_window_missing(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with (
+            mock.patch.object(entrypoint, "find_league_window_rect", return_value=None),
+            mock.patch.object(entrypoint.time, "monotonic", side_effect=[0.0, 0.0, 0.5, 1.0]),
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                entrypoint.LeagueWindowLookupTimeout,
+                "missing",
+            ),
+        ):
+            entrypoint.ensure_active_rect(logger, poll=0.5, timeout_sec=1.0)
+
+        sleep.assert_has_calls([mock.call(0.5), mock.call(0.5)])
+
+    def test_ensure_active_rect_times_out_when_window_minimized(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        with (
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=minimized_rect
+            ),
+            mock.patch.object(entrypoint.time, "monotonic", side_effect=[0.0, 0.0, 0.25, 0.5]),
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                entrypoint.LeagueWindowLookupTimeout,
+                "minimized",
+            ),
+        ):
+            entrypoint.ensure_active_rect(logger, poll=0.25, timeout_sec=0.5)
+
+        sleep.assert_has_calls([mock.call(0.25), mock.call(0.25)])
+
     def test_lcu_phase_maps_to_runtime_state(self) -> None:
         self.assertEqual(
             entrypoint._client_state_from_lcu_phase(PHASE_LOBBY),

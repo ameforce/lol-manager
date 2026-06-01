@@ -95,6 +95,7 @@ ANSI_COLORS = {
 ANSI_RESET = "\033[0m"
 
 DEFAULT_PICK_COORD = (386, 163)
+DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
@@ -119,6 +120,16 @@ POSTGAME_PHASES: frozenset[str] = frozenset(
         PHASE_END_OF_GAME,
     }
 )
+
+
+class LeagueWindowLookupTimeout(RuntimeError):
+    def __init__(self, state: str, timeout_sec: float) -> None:
+        self.state = state
+        self.timeout_sec = timeout_sec
+        super().__init__(
+            "League window lookup timed out "
+            f"after {timeout_sec:.1f}s while window was {state}"
+        )
 
 
 def display_ban_name_for_summary(value: object) -> str:
@@ -1344,7 +1355,14 @@ def _should_scan_popup_confirm_during_match_poll(phase: Optional[str]) -> bool:
     }
 
 
-def ensure_active_rect(logger: logging.Logger, poll: float = 0.5):
+def ensure_active_rect(
+    logger: logging.Logger,
+    poll: float = 0.5,
+    timeout_sec: float = DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC,
+):
+    timeout_sec = max(0.0, float(timeout_sec))
+    poll = max(0.0, float(poll))
+    deadline = time.monotonic() + timeout_sec
     last_state = None
     while True:
         if _LEAGUE_EXIT_GUARD is not None and _LEAGUE_EXIT_GUARD.should_exit():
@@ -1357,13 +1375,21 @@ def ensure_active_rect(logger: logging.Logger, poll: float = 0.5):
                 if last_state != "minimized":
                     logger.info("LoL 창이 최소화/비가시 상태입니다. 복원 대기 중...")
                     last_state = "minimized"
-                time.sleep(poll)
+                now = time.monotonic()
+                if now >= deadline:
+                    logger.warning("LoL 창 대기 시간 초과: state=minimized %.1fs", timeout_sec)
+                    raise LeagueWindowLookupTimeout("minimized", timeout_sec)
+                time.sleep(min(poll, deadline - now))
                 continue
             return rect
         if last_state != "missing":
             logger.info("LoL 창 좌표를 찾지 못했습니다. 재시도...")
             last_state = "missing"
-        time.sleep(poll)
+        now = time.monotonic()
+        if now >= deadline:
+            logger.warning("LoL 창 대기 시간 초과: state=missing %.1fs", timeout_sec)
+            raise LeagueWindowLookupTimeout("missing", timeout_sec)
+        time.sleep(min(poll, deadline - now))
 
 
 def prompt_ban_selection(
