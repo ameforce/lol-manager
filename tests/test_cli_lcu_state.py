@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import tempfile
+import types
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -30,6 +32,7 @@ from lolmanager.core.lcu_client import (
     PHASE_WATCH_IN_PROGRESS,
     LcuOutcome,
 )
+from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_VALUE
 
 
 class _FakeLcu:
@@ -373,6 +376,59 @@ class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
 
 
 class CliLcuStateTests(unittest.TestCase):
+    def test_cli_main_rejects_unknown_option_before_runtime_setup(self) -> None:
+        fake_gui = types.ModuleType("lolmanager.gui.config_gui")
+        fake_gui.run_config_gui = mock.Mock()
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ) as configure_logging,
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.dict(sys.modules, {"lolmanager.gui.config_gui": fake_gui}),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            entrypoint.cli_main(["--config-gui", "--debgu"])
+
+        self.assertEqual(raised.exception.code, 2)
+        configure_logging.assert_not_called()
+        fake_gui.run_config_gui.assert_not_called()
+
+    def test_ensure_active_rect_times_out_when_window_missing(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with (
+            mock.patch.object(entrypoint, "find_league_window_rect", return_value=None),
+            mock.patch.object(entrypoint.time, "monotonic", side_effect=[0.0, 0.0, 0.5, 1.0]),
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                entrypoint.LeagueWindowLookupTimeout,
+                "missing",
+            ),
+        ):
+            entrypoint.ensure_active_rect(logger, poll=0.5, timeout_sec=1.0)
+
+        sleep.assert_has_calls([mock.call(0.5), mock.call(0.5)])
+
+    def test_ensure_active_rect_times_out_when_window_minimized(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        with (
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=minimized_rect
+            ),
+            mock.patch.object(entrypoint.time, "monotonic", side_effect=[0.0, 0.0, 0.25, 0.5]),
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                entrypoint.LeagueWindowLookupTimeout,
+                "minimized",
+            ),
+        ):
+            entrypoint.ensure_active_rect(logger, poll=0.25, timeout_sec=0.5)
+
+        sleep.assert_has_calls([mock.call(0.25), mock.call(0.25)])
+
     def test_lcu_phase_maps_to_runtime_state(self) -> None:
         self.assertEqual(
             entrypoint._client_state_from_lcu_phase(PHASE_LOBBY),
@@ -1827,6 +1883,48 @@ class CliLcuStateTests(unittest.TestCase):
             self.assertTrue(handled)
             accept.assert_not_called()
 
+    def test_missing_ban_skips_ban_action_without_lcu_write(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with mock.patch.object(entrypoint, "_wait_champ_select_action_via_lcu") as wait:
+            result = entrypoint._ban_champ_select_attempt_or_skip(
+                object(),
+                "",
+                logger=logger,
+                interval_sec=0.1,
+            )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.WAIT_AUTHORITATIVE)
+        self.assertEqual(result.outcome, "missing_ban")
+        wait.assert_not_called()
+
+    def test_failed_auto_ban_resolution_skips_ban_action_without_lcu_write(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            resolved = entrypoint.resolve_ban_name_for_runtime(
+                Path(tmp) / "missing-counter-cache.json",
+                role="top",
+                champion_name="말파이트",
+                configured_ban=AUTO_BAN_VALUE,
+                logger=logger,
+                now=100.0,
+            )
+
+        self.assertEqual(resolved, "")
+
+        with mock.patch.object(entrypoint, "_wait_champ_select_action_via_lcu") as wait:
+            result = entrypoint._ban_champ_select_attempt_or_skip(
+                object(),
+                resolved,
+                logger=logger,
+                interval_sec=0.1,
+            )
+
+        self.assertEqual(result.outcome, "missing_ban")
+        wait.assert_not_called()
+
     def test_lcu_champ_select_action_state_marks_ban_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeLocalActionLcu("ban")
@@ -1935,6 +2033,36 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(fake.dismiss_calls, 1)
         find_matches.assert_not_called()
+
+    def test_pick_popups_clicks_only_decline_when_both_actions_match(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        rect = (0, 0, 1280, 720)
+        entrypoint._last_popup_click_at.clear()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tpl_confirm = root / "client_confirm-button-2.png"
+            tpl_decline = root / "pick_decline-button.png"
+            tpl_confirm.write_bytes(b"placeholder")
+            tpl_decline.write_bytes(b"placeholder")
+
+            matches = {
+                "decline": ((320, 420), object(), 0.90),
+                "confirm#0": ((640, 420), object(), 0.99),
+            }
+            with (
+                mock.patch.object(
+                    entrypoint, "find_template_matches_once", return_value=matches
+                ),
+                mock.patch.object(entrypoint, "click_screen") as click_screen,
+                mock.patch.object(entrypoint.time, "monotonic", return_value=100.0),
+            ):
+                handled = entrypoint.try_pick_popups(
+                    rect, [tpl_confirm], tpl_decline, 0.85, logger
+                )
+
+        self.assertTrue(handled)
+        click_screen.assert_called_once_with((320, 420))
 
     def test_myturn_image_fallback_helper_updates_pick_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
