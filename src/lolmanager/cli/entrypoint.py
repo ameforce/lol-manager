@@ -5,7 +5,6 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from enum import IntEnum, unique
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional, Sequence, cast
 
@@ -71,6 +70,13 @@ from lolmanager.core.opgg_counter_recommendations import (
     is_auto_ban_value,
     load_recommendation_cache,
 )
+from lolmanager.cli.runtime_state import (
+    ClientState,
+    LCU_UI_ACTION_CLASSIFICATION,
+    POSTGAME_PHASES,
+    client_state_from_lcu_phase,
+    should_preserve_champ_select_state,
+)
 from lolmanager.platform.resolution_detector import (
     select_image_set,
     window_size_from_rect,
@@ -98,28 +104,6 @@ DEFAULT_PICK_COORD = (386, 163)
 DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
-LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
-    "ready_check": "lcu-first",
-    "matchmaking_start": "lcu-first",
-    "role_detection": "lcu-first",
-    "champ_select_prepick": "lcu-first",
-    "champ_select_ban": "lcu-first",
-    "champ_select_pick": "lcu-first",
-    "reserve_pick": "lcu-first",
-    "pick_popups": "lcu-first",
-    "pick_myturn": "fallback-only",
-    "postgame_end_buttons": "ui-only",
-    "postgame_continue": "lcu-first",
-    "postgame_honor_vote": "lcu-only-terminal",
-    "blocking_modals": "lcu-first",
-}
-POSTGAME_PHASES: frozenset[str] = frozenset(
-    {
-        PHASE_WAITING_FOR_STATS,
-        PHASE_PRE_END_OF_GAME,
-        PHASE_END_OF_GAME,
-    }
-)
 
 
 class LeagueWindowLookupTimeout(RuntimeError):
@@ -182,20 +166,6 @@ def resolve_ban_name_for_runtime(
         result.status,
     )
     return ""
-
-
-@unique
-class ClientState(IntEnum):
-    UNKNOWN = 0
-    LOBBY = 10
-    MATCH_FINDING = 20
-    MATCH_ACCEPT_WAIT = 30
-    PREPICK = 40
-    BANPICK = 50
-    PICK = 60
-    WAIT_GAME_START = 70
-    INGAME = 80
-    POSTGAME_SCORE = 90
 
 
 _last_finding_logged: dict[str, bool] = {}
@@ -270,19 +240,7 @@ def _set_client_state(value: ClientState, now: float, logger: logging.Logger) ->
 
 
 def _client_state_from_lcu_phase(phase: Optional[str]) -> Optional[ClientState]:
-    if phase == PHASE_LOBBY:
-        return ClientState.LOBBY
-    if phase == PHASE_MATCHMAKING:
-        return ClientState.MATCH_FINDING
-    if phase == PHASE_READY_CHECK:
-        return ClientState.MATCH_ACCEPT_WAIT
-    if phase == PHASE_CHAMP_SELECT:
-        return ClientState.PREPICK
-    if phase in {PHASE_IN_PROGRESS, PHASE_RECONNECT, PHASE_WATCH_IN_PROGRESS}:
-        return ClientState.INGAME
-    if phase in {PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME}:
-        return ClientState.POSTGAME_SCORE
-    return None
+    return client_state_from_lcu_phase(phase)
 
 
 def _apply_lcu_phase_state(
@@ -295,11 +253,7 @@ def _apply_lcu_phase_state(
         return
 
     current = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
-    if state == ClientState.PREPICK and current in {
-        ClientState.BANPICK,
-        ClientState.PICK,
-        ClientState.WAIT_GAME_START,
-    }:
+    if should_preserve_champ_select_state(state, current):
         return
 
     _set_client_state(state, now, logger)
