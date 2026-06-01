@@ -289,6 +289,24 @@ class ImageSearchRoiCacheTests(unittest.TestCase):
         self.assertTrue(send_calls[1][1]["with_tabs"])
         self.assertTrue(send_calls[1][1]["with_newlines"])
 
+    def test_click_relative_rejects_points_outside_window_rect(self) -> None:
+        rect = (100, 200, 740, 680)
+        invalid_points = ((-1, 0), (0, -1), (640, 0), (0, 480))
+
+        for point in invalid_points:
+            with self.subTest(point=point):
+                with mock.patch.object(image_search, "click_screen") as click_screen:
+                    with self.assertRaisesRegex(ValueError, "outside League window"):
+                        image_search.click_relative(rect, point)
+
+                click_screen.assert_not_called()
+
+    def test_click_relative_accepts_last_point_inside_window_rect(self) -> None:
+        with mock.patch.object(image_search, "click_screen") as click_screen:
+            image_search.click_relative((100, 200, 740, 680), (639, 479))
+
+        click_screen.assert_called_once_with((739, 679))
+
 
 if __name__ == "__main__":
     unittest.main()

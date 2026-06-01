@@ -877,8 +877,20 @@ def click_screen(point: Tuple[int, int]) -> None:
 def click_relative(
     window_rect: Tuple[int, int, int, int], relative: Tuple[int, int]
 ) -> None:
-    left, top, _, _ = window_rect
-    abs_point = (left + int(relative[0]), top + int(relative[1]))
+    left, top, right, bottom = (int(value) for value in window_rect)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid League window rectangle: {window_rect}")
+
+    rel_x, rel_y = _normalize_point(relative)
+    if rel_x < 0 or rel_y < 0 or rel_x >= width or rel_y >= height:
+        raise ValueError(
+            "relative click point outside League window: "
+            f"point=({rel_x}, {rel_y}), size=({width}, {height})"
+        )
+
+    abs_point = (left + rel_x, top + rel_y)
     click_screen(abs_point)
 
 
