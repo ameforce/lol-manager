@@ -15,6 +15,7 @@ from lolmanager.core.opgg_http import (
     MAX_OPGG_COUNTER_LINK_SCAN,
     read_limited_text_response,
 )
+from lolmanager.core.opgg_champion_list import parse_position_entries_from_opgg_html
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,14 @@ def _tier_from_fill(fill: Optional[str]) -> Tuple[str, str]:
     return TIER_COLORS.get(key, ("unknown", "none"))
 
 
+def _tier_from_label(tier_label: str) -> Tuple[str, str]:
+    label = str(tier_label or "").strip() or "unknown"
+    for known_label, color in TIER_COLORS.values():
+        if label == known_label:
+            return (known_label, color)
+    return (label, "none")
+
+
 def _scrape(
     position: str, limit: int, headless: bool
 ) -> List[Tuple[str, Tuple[str, str], Optional[str]]]:
@@ -139,7 +148,17 @@ def _scrape(
                 "table tbody tr td:nth-child(2) div a strong", timeout=8000
             )
         except TimeoutError:
-            logger.warning("기본 셀렉터 대기 실패, XPath fallback 시도: %s", position)
+            logger.warning("기본 셀렉터 대기 실패, 구조화 파서 fallback 시도: %s", position)
+
+        parsed_entries = parse_position_entries_from_opgg_html(
+            page.content(), position, max_entries=limit
+        )
+        if parsed_entries:
+            browser.close()
+            return [
+                (name, _tier_from_label(tier_label), href)
+                for name, tier_label, href in parsed_entries
+            ]
 
         champs: List[Tuple[str, Tuple[str, str], Optional[str]]] = []
         rows = page.query_selector_all("table tbody tr")
@@ -187,23 +206,16 @@ def fetch_top_champions(
         resp = requests.get(url, headers=headers, timeout=10, stream=True)
         if resp.status_code != 200:
             return []
-        soup = BeautifulSoup(read_limited_text_response(resp), "lxml")
         row_budget = MAX_OPGG_CHAMPION_ROWS if limit is None else min(
             int(limit), MAX_OPGG_CHAMPION_ROWS
         )
-        rows = soup.select("table tbody tr", limit=row_budget)
-        champs_http: List[Tuple[str, Tuple[str, str], Optional[str]]] = []
-        for row in rows:
-            strong = row.select_one("td:nth-of-type(2) div a strong")
-            tier_path = row.select_one("td:nth-of-type(3) svg g path")
-            link = row.select_one("td:nth-of-type(2) div a")
-            href = link.get("href") if link else None
-            if strong and strong.text:
-                fill_val = tier_path.get("fill") if tier_path else None
-                champs_http.append(
-                    (strong.text.strip(), _tier_from_fill(fill_val), href)
-                )
-        return champs_http
+        entries = parse_position_entries_from_opgg_html(
+            read_limited_text_response(resp), position, max_entries=row_budget
+        )
+        return [
+            (name, _tier_from_label(tier_label), href)
+            for name, tier_label, href in entries
+        ]
 
     champs: List[Tuple[str, Tuple[str, str], Optional[str]]] = []
 
