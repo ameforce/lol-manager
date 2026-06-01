@@ -17,6 +17,21 @@ DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 5
 
 _RUNTIME_HANDLER_MARKER = "_lolmanager_runtime_log_handler"
+_SECRET_FIELD_NAME = (
+    r"[A-Za-z0-9_.-]*"
+    r"(?:secret|token|password|jwt|authorization[-_]?key|auth[-_]?key)"
+    r"[A-Za-z0-9_.-]*"
+)
+_QUOTED_SECRET_FIELD_VALUE = re.compile(
+    rf"((?:\\?\"|')\s*{_SECRET_FIELD_NAME}\s*(?:\\?\"|')\s*[:=]\s*(?:\\?\"|'))"
+    r"([^\\\"'\r\n]*)"
+    r"((?:\\?\"|'))",
+    re.IGNORECASE,
+)
+_UNQUOTED_SECRET_FIELD_VALUE = re.compile(
+    rf"(\b{_SECRET_FIELD_NAME}\b\s*[:=]\s*)(?!\\?\"|')([^\s,;&\]\}}]+)",
+    re.IGNORECASE,
+)
 _SENSITIVE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(--(?:riotclient-|remoting-)?auth-token=)[^\s\"]+"), r"\1<redacted>"),
     (re.compile(r"(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]+", re.IGNORECASE), r"\1<redacted>"),
@@ -32,6 +47,8 @@ class RedactingFormatter(logging.Formatter):
 
 def redact_sensitive(value: object) -> str:
     text = str(value)
+    text = _QUOTED_SECRET_FIELD_VALUE.sub(r"\1<redacted>\3", text)
+    text = _UNQUOTED_SECRET_FIELD_VALUE.sub(r"\1<redacted>", text)
     for pattern, repl in _SENSITIVE_PATTERNS:
         text = pattern.sub(repl, text)
     return text

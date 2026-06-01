@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from lolmanager.core.champion_fetcher import (
+    fetch_counter_matchups_from_detail,
     fetch_counters_from_detail,
     parse_counter_matchups_from_html,
 )
@@ -54,7 +55,24 @@ COUNTER_HTML = """
 
 class _Response:
     status_code = 200
+    headers: dict[str, str] = {}
     text = COUNTER_HTML
+
+
+class _OversizedResponse:
+    status_code = 200
+    headers = {"Content-Length": "999999999"}
+    encoding = "utf-8"
+
+    @property
+    def text(self) -> str:
+        raise AssertionError("oversized response body should not be materialized")
+
+    def iter_content(self, *_args: object, **_kwargs: object) -> list[bytes]:
+        raise AssertionError("oversized response body should not be streamed")
+
+    def close(self) -> None:
+        pass
 
 
 def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None:
@@ -145,6 +163,100 @@ def test_parser_reads_difficult_matchups_and_name_only_fetch_stays_compatible(
         "퀸",
         "신지드",
     ]
+
+
+def test_detail_fetch_rejects_absolute_non_opgg_url_before_request(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> _Response:
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    assert (
+        fetch_counter_matchups_from_detail(
+            "http://127.0.0.1:65535/internal-metadata"
+        )
+        == []
+    )
+    assert fetch_counters_from_detail("https://example.invalid/not-opgg") == []
+    assert calls == []
+
+
+def test_detail_fetch_disables_redirects_for_allowed_opgg_url(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get(url: str, **kwargs: object) -> _Response:
+        calls.append((url, kwargs))
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    matchups = fetch_counter_matchups_from_detail(
+        "https://op.gg/ko/lol/champions/malphite/build/top"
+    )
+
+    assert [matchup.champion for matchup in matchups] == ["퀸", "신지드"]
+    assert calls[0][0] == "https://op.gg/ko/lol/champions/malphite/build/top"
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_detail_fetch_rejects_oversized_response_before_text_read(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_get(_url: str, **kwargs: object) -> _OversizedResponse:
+        calls.append(kwargs)
+        return _OversizedResponse()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    assert (
+        fetch_counter_matchups_from_detail(
+            "https://op.gg/ko/lol/champions/malphite/build/top"
+        )
+        == []
+    )
+    assert calls[0]["stream"] is True
+
+
+def test_counter_parser_caps_link_scan_before_far_late_matches() -> None:
+    noisy_links = "\n".join("<li><a><span></span></a></li>" for _ in range(150))
+    html = f"""
+    <section>
+      <h3>상대하기 어려운 챔피언</h3>
+      <ul>
+        {noisy_links}
+        <li><a><img alt="퀸" /><span>42.82%</span></a></li>
+      </ul>
+    </section>
+    """
+
+    assert parse_counter_matchups_from_html(html, source_url="/malphite", limit=1) == []
+
+
+def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> _Response:
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    result = get_counter_recommendations(
+        default_counter_cache_path(tmp_path / "champion_config.json"),
+        role="top",
+        configured_pick="말파이트",
+        ranked_entries=[("퀸", ("1티어", "blue"), "/ko/lol/champions/quinn/build/top")],
+        detail_href="http://127.0.0.1:65535/internal-metadata",
+        max_age_sec=0.0,
+    )
+
+    assert result.status == "cache_miss"
+    assert calls == []
 
 
 def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
