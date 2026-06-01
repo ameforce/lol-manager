@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from lolmanager.core.client_state import ClientState
 from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_LABEL
 
 
@@ -14,7 +15,15 @@ ROLE_LABEL_KO: dict[str, str] = {
     "support": "서폿",
 }
 
-ROLE_CLEAR_STATES: set[str] = {"UNKNOWN", "LOBBY", "MATCH_FINDING", "MATCH_ACCEPT_WAIT"}
+ROLE_CLEAR_STATES: frozenset[str] = frozenset(
+    state.name
+    for state in (
+        ClientState.UNKNOWN,
+        ClientState.LOBBY,
+        ClientState.MATCH_FINDING,
+        ClientState.MATCH_ACCEPT_WAIT,
+    )
+)
 
 
 def compact_role_ban_label_for_main_ui(value: object) -> str:

@@ -8,6 +8,7 @@ from lolmanager.cli.runtime_state import (
     client_state_from_lcu_phase,
     should_preserve_champ_select_state,
 )
+from lolmanager.core.client_state import ClientState as CoreClientState
 from lolmanager.core.lcu_client import (
     PHASE_CHAMP_SELECT,
     PHASE_END_OF_GAME,
@@ -72,13 +73,22 @@ def test_cli_runtime_state_seam_preserves_champ_select_guard() -> None:
 
 
 def test_entrypoint_reexports_runtime_state_seam() -> None:
+    assert ClientState is CoreClientState
     assert entrypoint.ClientState is ClientState
     assert entrypoint.LCU_UI_ACTION_CLASSIFICATION is LCU_UI_ACTION_CLASSIFICATION
 
 
 def test_gui_log_view_model_seam_preserves_role_helpers() -> None:
     assert ROLE_LABEL_KO["mid"] == "미드"
-    assert ROLE_CLEAR_STATES == {"UNKNOWN", "LOBBY", "MATCH_FINDING", "MATCH_ACCEPT_WAIT"}
+    assert ROLE_CLEAR_STATES == frozenset(
+        state.name
+        for state in (
+            CoreClientState.UNKNOWN,
+            CoreClientState.LOBBY,
+            CoreClientState.MATCH_FINDING,
+            CoreClientState.MATCH_ACCEPT_WAIT,
+        )
+    )
     assert (
         compact_role_ban_label_for_main_ui(
             "자동 추천 (현재 최고: 블라디미르, 2티어, 45.8%, score 61.0)"
