@@ -11,6 +11,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+from lolmanager.core.opgg_http import (
+    MAX_OPGG_CHAMPION_ROWS,
+    read_limited_text_response,
+)
+
 OPGG_CHAMPIONS_URL_KO = "https://op.gg/ko/lol/champions"
 OPGG_CHAMPIONS_BY_POSITION_URLS_KO: Tuple[str, ...] = (
     "https://op.gg/ko/lol/champions?position=top",
@@ -94,7 +99,10 @@ def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
 
 
 def parse_position_entries_from_opgg_html(
-    html_text: str, position: str
+    html_text: str,
+    position: str,
+    *,
+    max_entries: int = MAX_OPGG_CHAMPION_ROWS,
 ) -> List[Tuple[str, str, str]]:
     text = html_text or ""
     needle = 'href="/ko/lol/champions/'
@@ -105,7 +113,7 @@ def parse_position_entries_from_opgg_html(
     href_prefix_len = len('href="')
     build_suffix = f"/build/{position}"
 
-    while True:
+    while len(entries) < max(0, int(max_entries)):
         idx = text.find(needle, i)
         if idx == -1:
             break
@@ -180,9 +188,11 @@ def fetch_opgg_champion_dataset(
     by_position: Dict[str, List[Tuple[str, str, str]]] = {}
     all_names: List[str] = []
     for role, url in role_urls.items():
-        resp = requests.get(url, headers=headers, timeout=timeout_sec)
+        resp = requests.get(url, headers=headers, timeout=timeout_sec, stream=True)
         resp.raise_for_status()
-        entries = parse_position_entries_from_opgg_html(resp.text, role)
+        entries = parse_position_entries_from_opgg_html(
+            read_limited_text_response(resp), role
+        )
         by_position[role] = entries
         all_names.extend([name for (name, _tier, _href) in entries])
 
