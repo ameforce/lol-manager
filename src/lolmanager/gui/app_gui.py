@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import queue
-import re
 import subprocess
 import sys
 import threading
@@ -22,9 +21,14 @@ from tkinter.scrolledtext import ScrolledText
 from lolmanager.core.auto_ban_refresh import AutoBanRefreshCoordinator
 from lolmanager.core.app_version import format_app_version_label, get_app_version
 from lolmanager.core.champion_config import ChampionConfig
-from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_LABEL
 from lolmanager.core.role_setting_data import load_role_setting_data
 from lolmanager.core.match_timing import format_duration_mmss, load_match_timing_stats
+from lolmanager.gui.log_view_model import (
+    ROLE_CLEAR_STATES,
+    ROLE_LABEL_KO,
+    compact_role_ban_label_for_main_ui,
+    role_key_from_log_line,
+)
 from lolmanager.platform.paths import (
     champion_config_path,
     match_timing_stats_path,
@@ -63,52 +67,6 @@ LAST_MSG_MAX_CHARS = 2048
 MATCH_TIMER_TICK_MS = 250
 MATCH_STATS_POLL_MIN_SEC = 1.0
 PROC_USAGE_POLL_MS = 1000
-
-
-ROLE_LABEL_KO: dict[str, str] = {
-    "top": "탑",
-    "jungle": "정글",
-    "mid": "미드",
-    "adc": "원딜",
-    "support": "서폿",
-}
-
-
-ROLE_CLEAR_STATES: set[str] = {"UNKNOWN", "LOBBY", "MATCH_FINDING", "MATCH_ACCEPT_WAIT"}
-
-
-def compact_role_ban_label_for_main_ui(value: object) -> str:
-    text = str(value or "").strip()
-    if text == AUTO_BAN_LABEL:
-        return "자동 추천"
-
-    match = re.fullmatch(
-        r"자동 추천 \(현재 최고: (?P<champion>.+?), (?P<tier>.+?), "
-        r"(?P<winrate>[^,]+), score (?P<score>[-+]?\d+(?:\.\d+)?)\)",
-        text,
-    )
-    if not match:
-        return text
-
-    tier = match.group("tier").strip()
-    tier = re.sub(r"^(\d+)티어$", r"\1T", tier)
-    return f"{match.group('champion').strip()} {tier} {match.group('winrate').strip()}"
-
-
-def role_key_from_log_line(line: object) -> Optional[str]:
-    text = str(line or "")
-    patterns = (
-        r"포지션 감지:\s*(?P<role>[A-Za-z_]+)",
-        r"LCU 포지션 감지\([^)]*\):\s*(?P<role>[A-Za-z_]+)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        role_key = match.group("role").strip()
-        if role_key in ROLE_LABEL_KO:
-            return role_key
-    return None
 
 
 class _GuiWarningLogger:
