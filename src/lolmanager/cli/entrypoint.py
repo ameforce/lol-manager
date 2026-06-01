@@ -5,7 +5,6 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from enum import IntEnum, unique
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional, Sequence, cast
 
@@ -71,6 +70,13 @@ from lolmanager.core.opgg_counter_recommendations import (
     is_auto_ban_value,
     load_recommendation_cache,
 )
+from lolmanager.cli.runtime_state import (
+    ClientState,
+    LCU_UI_ACTION_CLASSIFICATION as LCU_UI_ACTION_CLASSIFICATION,
+    POSTGAME_PHASES,
+    client_state_from_lcu_phase,
+    should_preserve_champ_select_state,
+)
 from lolmanager.platform.resolution_detector import (
     select_image_set,
     window_size_from_rect,
@@ -95,30 +101,19 @@ ANSI_COLORS = {
 ANSI_RESET = "\033[0m"
 
 DEFAULT_PICK_COORD = (386, 163)
+DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
-LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
-    "ready_check": "lcu-first",
-    "matchmaking_start": "lcu-first",
-    "role_detection": "lcu-first",
-    "champ_select_prepick": "lcu-first",
-    "champ_select_ban": "lcu-first",
-    "champ_select_pick": "lcu-first",
-    "reserve_pick": "lcu-first",
-    "pick_popups": "lcu-first",
-    "pick_myturn": "fallback-only",
-    "postgame_end_buttons": "ui-only",
-    "postgame_continue": "lcu-first",
-    "postgame_honor_vote": "lcu-only-terminal",
-    "blocking_modals": "lcu-first",
-}
-POSTGAME_PHASES: frozenset[str] = frozenset(
-    {
-        PHASE_WAITING_FOR_STATS,
-        PHASE_PRE_END_OF_GAME,
-        PHASE_END_OF_GAME,
-    }
-)
+
+
+class LeagueWindowLookupTimeout(RuntimeError):
+    def __init__(self, state: str, timeout_sec: float) -> None:
+        self.state = state
+        self.timeout_sec = timeout_sec
+        super().__init__(
+            "League window lookup timed out "
+            f"after {timeout_sec:.1f}s while window was {state}"
+        )
 
 
 def display_ban_name_for_summary(value: object) -> str:
@@ -171,20 +166,6 @@ def resolve_ban_name_for_runtime(
         result.status,
     )
     return ""
-
-
-@unique
-class ClientState(IntEnum):
-    UNKNOWN = 0
-    LOBBY = 10
-    MATCH_FINDING = 20
-    MATCH_ACCEPT_WAIT = 30
-    PREPICK = 40
-    BANPICK = 50
-    PICK = 60
-    WAIT_GAME_START = 70
-    INGAME = 80
-    POSTGAME_SCORE = 90
 
 
 _last_finding_logged: dict[str, bool] = {}
@@ -259,19 +240,7 @@ def _set_client_state(value: ClientState, now: float, logger: logging.Logger) ->
 
 
 def _client_state_from_lcu_phase(phase: Optional[str]) -> Optional[ClientState]:
-    if phase == PHASE_LOBBY:
-        return ClientState.LOBBY
-    if phase == PHASE_MATCHMAKING:
-        return ClientState.MATCH_FINDING
-    if phase == PHASE_READY_CHECK:
-        return ClientState.MATCH_ACCEPT_WAIT
-    if phase == PHASE_CHAMP_SELECT:
-        return ClientState.PREPICK
-    if phase in {PHASE_IN_PROGRESS, PHASE_RECONNECT, PHASE_WATCH_IN_PROGRESS}:
-        return ClientState.INGAME
-    if phase in {PHASE_WAITING_FOR_STATS, PHASE_PRE_END_OF_GAME, PHASE_END_OF_GAME}:
-        return ClientState.POSTGAME_SCORE
-    return None
+    return client_state_from_lcu_phase(phase)
 
 
 def _apply_lcu_phase_state(
@@ -284,11 +253,7 @@ def _apply_lcu_phase_state(
         return
 
     current = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
-    if state == ClientState.PREPICK and current in {
-        ClientState.BANPICK,
-        ClientState.PICK,
-        ClientState.WAIT_GAME_START,
-    }:
+    if should_preserve_champ_select_state(state, current):
         return
 
     _set_client_state(state, now, logger)
@@ -984,6 +949,37 @@ def _wait_champ_select_action_via_lcu(
         time.sleep(min(max(0.0, interval_sec), max(0.0, deadline - now)))
 
 
+def _ban_champ_select_attempt_or_skip(
+    lcu: Optional[LcuClient],
+    ban_name: object,
+    *,
+    logger: logging.Logger,
+    interval_sec: float,
+) -> ChampSelectLcuAttempt:
+    resolved_ban = str(ban_name or "").strip()
+    if not resolved_ban:
+        logger.warning(
+            "밴 챔피언이 설정되지 않았습니다. 밴 단계만 건너뛰고 픽 단계 감지를 계속합니다."
+        )
+        return ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+            "missing_ban",
+        )
+
+    return _wait_champ_select_action_via_lcu(
+        lcu,
+        resolved_ban,
+        action_type="ban",
+        complete=True,
+        stage="밴",
+        logger=logger,
+        interval_sec=interval_sec,
+        timeout_sec=max(20.0, interval_sec * 20.0),
+        stop_when_action_type_in_progress="pick",
+    )
+
+
 def _handle_champ_select_phase_exit(
     attempt: ChampSelectLcuAttempt,
     lcu: Optional[LcuClient],
@@ -1344,7 +1340,14 @@ def _should_scan_popup_confirm_during_match_poll(phase: Optional[str]) -> bool:
     }
 
 
-def ensure_active_rect(logger: logging.Logger, poll: float = 0.5):
+def ensure_active_rect(
+    logger: logging.Logger,
+    poll: float = 0.5,
+    timeout_sec: float = DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC,
+):
+    timeout_sec = max(0.0, float(timeout_sec))
+    poll = max(0.0, float(poll))
+    deadline = time.monotonic() + timeout_sec
     last_state = None
     while True:
         if _LEAGUE_EXIT_GUARD is not None and _LEAGUE_EXIT_GUARD.should_exit():
@@ -1357,13 +1360,21 @@ def ensure_active_rect(logger: logging.Logger, poll: float = 0.5):
                 if last_state != "minimized":
                     logger.info("LoL 창이 최소화/비가시 상태입니다. 복원 대기 중...")
                     last_state = "minimized"
-                time.sleep(poll)
+                now = time.monotonic()
+                if now >= deadline:
+                    logger.warning("LoL 창 대기 시간 초과: state=minimized %.1fs", timeout_sec)
+                    raise LeagueWindowLookupTimeout("minimized", timeout_sec)
+                time.sleep(min(poll, deadline - now))
                 continue
             return rect
         if last_state != "missing":
             logger.info("LoL 창 좌표를 찾지 못했습니다. 재시도...")
             last_state = "missing"
-        time.sleep(poll)
+        now = time.monotonic()
+        if now >= deadline:
+            logger.warning("LoL 창 대기 시간 초과: state=missing %.1fs", timeout_sec)
+            raise LeagueWindowLookupTimeout("missing", timeout_sec)
+        time.sleep(min(poll, deadline - now))
 
 
 def prompt_ban_selection(
@@ -2044,8 +2055,6 @@ def try_pick_popups(
     if not matches:
         return False
 
-    clicked_any = False
-
     best_confirm_name: Optional[str] = None
     best_confirm_hit: Optional[tuple[tuple[int, int], object, float]] = None
     best_confirm_score = -1.0
@@ -2067,23 +2076,23 @@ def try_pick_popups(
         key = f"pick_popup:{name}"
         last = _last_popup_click_at.get(key, 0.0)
         if now - last < POPUP_CLICK_COOLDOWN_SEC:
-            continue
+            return False
 
         try:
             click_screen(center)
         except Exception as exc:
             logger.warning("팝업 버튼 클릭 실패(%s): %s", name, exc)
-            continue
+            return False
 
         _last_popup_click_at[key] = now
-        clicked_any = True
         if name == "confirm":
             tpl = confirm_name_to_path.get(best_confirm_name) if best_confirm_name else None
             logger.info("확인 팝업 클릭 처리(tpl=%s).", (tpl.name if tpl else "unknown"))
         else:
             logger.info("거절 버튼 클릭 처리.")
+        return True
 
-    return clicked_any
+    return False
 
 
 def _update_my_pick_turn_from_image(
@@ -2375,9 +2384,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         action="store_true",
         help="설정(champion/ban/pick_coord/reserve_picks)을 GUI로 편집하고 종료합니다.",
     )
-    args, _unknown = parser.parse_known_args(
-        (argv if argv is not None else sys.argv[1:])
-    )
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     log_path = configure_runtime_logging(debug=bool(args.debug))
     install_exception_logger()
     logger = logging.getLogger("lolmanager")
@@ -3061,30 +3068,22 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger=logger,
             )
 
-            if not ban_name:
-                logger.warning("밴 챔피언이 설정되지 않았습니다. 밴 단계 건너뜀.")
-                return
-
-            ban_lcu_attempt = _wait_champ_select_action_via_lcu(
+            ban_lcu_attempt = _ban_champ_select_attempt_or_skip(
                 lcu,
                 ban_name,
-                action_type="ban",
-                complete=True,
-                stage="밴",
                 logger=logger,
                 interval_sec=interval_sec,
-                timeout_sec=max(20.0, interval_sec * 20.0),
-                stop_when_action_type_in_progress="pick",
             )
             if _handle_champ_select_phase_exit(ban_lcu_attempt, lcu, "밴", logger):
                 continue
             if ban_lcu_attempt.completed:
                 _set_client_state(ClientState.BANPICK, time.monotonic(), logger)
             elif ban_lcu_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
-                logger.warning(
-                    "LCU 밴 완료 미확정(outcome=%s). 외부 매칭 사이클 재시작 없이 픽 단계 감지를 계속합니다.",
-                    ban_lcu_attempt.outcome,
-                )
+                if ban_lcu_attempt.outcome != "missing_ban":
+                    logger.warning(
+                        "LCU 밴 완료 미확정(outcome=%s). 외부 매칭 사이클 재시작 없이 픽 단계 감지를 계속합니다.",
+                        ban_lcu_attempt.outcome,
+                    )
             else:
                 if not tpl_banpick_search.exists():
                     logger.warning(
@@ -3704,10 +3703,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         cli_main(cli_argv)
         return
 
+    logger = logging.getLogger("lolmanager")
     try:
-        ensure_external_apps_running_once(logger=logging.getLogger("lolmanager"))
-    except Exception:
-        pass
+        ensure_external_apps_running_once(logger=logger)
+    except Exception as exc:
+        logger.warning("외부 앱 자동 실행 점검 실패: %s", exc)
 
     from lolmanager.gui.app_gui import main as run_app_gui
 

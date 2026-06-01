@@ -2,14 +2,29 @@
 setlocal EnableExtensions
 
 set "LM_NAME=LOLManager"
+set "LM_SCRIPT_DIR=%~dp0"
+set "LM_DRY_RUN=0"
+if /i "%~1"=="--dry-run" (
+    set "LM_DRY_RUN=1"
+    shift
+)
+if not "%~1"=="" (
+    echo [ERROR] scripts\uninstall_shortcuts.bat does not accept arguments except --dry-run.
+    exit /b 1
+)
 
-set "LM_DESKTOP=%USERPROFILE%\Desktop"
-set "LM_DESKTOP_LNK=%LM_DESKTOP%\%LM_NAME%.lnk"
+call "%LM_SCRIPT_DIR%shortcut_paths.bat"
+if errorlevel 1 exit /b %ERRORLEVEL%
+
+if "%LM_DRY_RUN%"=="1" (
+    echo [DRY-RUN] LM_DESKTOP_LNK=%LM_DESKTOP_LNK%
+    echo [DRY-RUN] LM_START_DIR=%LM_START_DIR%
+    echo [DRY-RUN] LM_START_LNK=%LM_START_LNK%
+    exit /b 0
+)
+
 if exist "%LM_DESKTOP_LNK%" del /f /q "%LM_DESKTOP_LNK%" >nul 2>&1
 
-set "LM_PROGRAMS=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
-set "LM_START_DIR=%LM_PROGRAMS%\%LM_NAME%"
-set "LM_START_LNK=%LM_START_DIR%\%LM_NAME%.lnk"
 if exist "%LM_START_LNK%" del /f /q "%LM_START_LNK%" >nul 2>&1
 
 if exist "%LM_START_DIR%" (
@@ -18,7 +33,7 @@ if exist "%LM_START_DIR%" (
     if not defined LM_HAS_ITEMS rmdir /q "%LM_START_DIR%" >nul 2>&1
 )
 
-set "LM_ROOT=%~dp0.."
+set "LM_ROOT=%LM_SCRIPT_DIR%.."
 for %%I in ("%LM_ROOT%") do set "LM_ROOT=%%~fI"
 
 if exist "%LM_ROOT%\scripts\run_lolmanager_gui.vbs" del /f /q "%LM_ROOT%\scripts\run_lolmanager_gui.vbs" >nul 2>&1

@@ -16,6 +16,23 @@ import pyperclip
 
 logger = logging.getLogger(__name__)
 
+_PYWINAUTO_LITERAL_ESCAPES = {
+    "{": "{{}",
+    "}": "{}}",
+    "+": "{+}",
+    "^": "{^}",
+    "%": "{%}",
+    "~": "{~}",
+    "(": "{(}",
+    ")": "{)}",
+}
+
+
+def _escape_pywinauto_literal_text(value: object) -> str:
+    return "".join(
+        _PYWINAUTO_LITERAL_ESCAPES.get(ch, ch) for ch in str(value or "")
+    )
+
 _PROFILE_IMAGE = False
 try:
     _p = str(os.environ.get("LOLMANAGER_PROFILE_IMAGE", "") or "").strip().casefold()
@@ -166,6 +183,8 @@ _TEMPLATE_MATCH_RESULT_CACHE: dict[
     tuple[str, int, int, int, Tuple[int, int, int, int]],
     tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ] = {}
+_TEMPLATE_ROI_CACHE_MAX = 256
+_TEMPLATE_MISS_CACHE_MAX = 256
 _TEMPLATE_MATCH_RESULT_CACHE_MAX = 256
 
 
@@ -213,8 +232,19 @@ def _get_cached_roi(key: str) -> Optional[Tuple[int, int, int, int]]:
     return roi
 
 
+def _evict_oldest_cache_entries(cache: dict, max_size: int) -> None:
+    while len(cache) > max(0, int(max_size)):
+        try:
+            oldest_key = next(iter(cache))
+        except StopIteration:
+            return
+        cache.pop(oldest_key, None)
+
+
 def _set_cached_roi(key: str, roi: Tuple[int, int, int, int]) -> None:
+    _TEMPLATE_ROI_CACHE.pop(key, None)
     _TEMPLATE_ROI_CACHE[key] = (roi, float(time.monotonic()))
+    _evict_oldest_cache_entries(_TEMPLATE_ROI_CACHE, _TEMPLATE_ROI_CACHE_MAX)
 
 
 def _clear_cached_roi(key: str) -> None:
@@ -231,8 +261,18 @@ def _has_recent_template_miss(key: str) -> bool:
     return False
 
 
+def _purge_expired_template_misses(now: float) -> None:
+    for key, missed_at in list(_TEMPLATE_MISS_CACHE.items()):
+        if now - float(missed_at) > _GRAB_CACHE_MAX_AGE_SEC:
+            _TEMPLATE_MISS_CACHE.pop(key, None)
+
+
 def _set_recent_template_miss(key: str) -> None:
-    _TEMPLATE_MISS_CACHE[key] = float(time.monotonic())
+    now = float(time.monotonic())
+    _purge_expired_template_misses(now)
+    _TEMPLATE_MISS_CACHE.pop(key, None)
+    _TEMPLATE_MISS_CACHE[key] = now
+    _evict_oldest_cache_entries(_TEMPLATE_MISS_CACHE, _TEMPLATE_MISS_CACHE_MAX)
 
 
 def _clear_recent_template_miss(key: str) -> None:
@@ -249,13 +289,10 @@ def _set_cached_match_result(
     cache_key: tuple[str, int, int, int, Tuple[int, int, int, int]],
     result: tuple[float, Tuple[int, int], Tuple[int, int, int, int]],
 ) -> None:
-    if len(_TEMPLATE_MATCH_RESULT_CACHE) >= _TEMPLATE_MATCH_RESULT_CACHE_MAX:
-        try:
-            oldest_key = next(iter(_TEMPLATE_MATCH_RESULT_CACHE))
-            _TEMPLATE_MATCH_RESULT_CACHE.pop(oldest_key, None)
-        except StopIteration:
-            pass
     _TEMPLATE_MATCH_RESULT_CACHE[cache_key] = result
+    _evict_oldest_cache_entries(
+        _TEMPLATE_MATCH_RESULT_CACHE, _TEMPLATE_MATCH_RESULT_CACHE_MAX
+    )
 
 
 _USER32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -860,8 +897,20 @@ def click_screen(point: Tuple[int, int]) -> None:
 def click_relative(
     window_rect: Tuple[int, int, int, int], relative: Tuple[int, int]
 ) -> None:
-    left, top, _, _ = window_rect
-    abs_point = (left + int(relative[0]), top + int(relative[1]))
+    left, top, right, bottom = (int(value) for value in window_rect)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid League window rectangle: {window_rect}")
+
+    rel_x, rel_y = _normalize_point(relative)
+    if rel_x < 0 or rel_y < 0 or rel_x >= width or rel_y >= height:
+        raise ValueError(
+            "relative click point outside League window: "
+            f"point=({rel_x}, {rel_y}), size=({width}, {height})"
+        )
+
+    abs_point = (left + rel_x, top + rel_y)
     click_screen(abs_point)
 
 
@@ -911,7 +960,12 @@ def search_and_act(
             logger.warning("클립보드 붙여넣기 실패, 직접 타이핑 시도: %s", exc)
             try:
                 keyboard.send_keys("^a{BACKSPACE}")
-                keyboard.send_keys(keys)
+                keyboard.send_keys(
+                    _escape_pywinauto_literal_text(keys),
+                    with_spaces=True,
+                    with_tabs=True,
+                    with_newlines=True,
+                )
                 if post_input_sleep > 0:
                     time.sleep(post_input_sleep)
                 logger.info("키 입력(직접 타이핑) 완료: %s", keys)

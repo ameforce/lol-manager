@@ -8,8 +8,15 @@ from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
+from bs4 import BeautifulSoup
+
+from lolmanager.core.opgg_http import (
+    MAX_OPGG_CHAMPION_ROWS,
+    read_limited_text_response,
+)
 
 OPGG_CHAMPIONS_URL_KO = "https://op.gg/ko/lol/champions"
 OPGG_CHAMPIONS_BY_POSITION_URLS_KO: Tuple[str, ...] = (
@@ -50,12 +57,28 @@ _TIER_COLORS: Dict[str, Tuple[str, str]] = {
     "#a88a67": ("5티어", "brown"),
 }
 
+_CHAMPION_LINK_SELECTOR = 'a[href*="/ko/lol/champions/"]'
+_CHAMPION_NAME_SELECTORS: Tuple[str, ...] = (
+    "strong",
+    '[data-testid*="champion-name"]',
+    '[class*="champion-name"]',
+    '[class*="champion"][class*="name"]',
+)
+_CHAMPION_ENTRY_CONTAINERS: Tuple[str, ...] = ("tr", "li", "article")
+
 
 def _tier_from_fill(fill: Optional[str]) -> Tuple[str, str]:
     if not fill:
         return ("unknown", "none")
     key = str(fill).strip().lower()
     return _TIER_COLORS.get(key, ("unknown", "none"))
+
+
+def opgg_position_selector_summary(position: str) -> str:
+    return (
+        f'{_CHAMPION_LINK_SELECTOR}[href*="/build/{position}"] with '
+        "champion name from strong, img[alt], or champion-name text"
+    )
 
 
 def default_cache_path(config_path: Path) -> Path:
@@ -93,63 +116,95 @@ def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
     return out
 
 
+def _compact_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _href_matches_position(href: str, position: str) -> bool:
+    raw = str(href or "").strip()
+    if not raw:
+        return False
+    parts = urlsplit(raw)
+    path = parts.path if (parts.scheme or parts.netloc) else raw.split("?", 1)[0]
+    return path.startswith("/ko/lol/champions/") and f"/build/{position}" in path
+
+
+def _anchor_champion_name(anchor: object) -> str:
+    select_one = getattr(anchor, "select_one", None)
+    if callable(select_one):
+        for selector in _CHAMPION_NAME_SELECTORS:
+            node = select_one(selector)
+            if node is not None:
+                text = _compact_text(node.get_text(" ", strip=True))
+                if text:
+                    return text
+
+        image = select_one("img[alt]")
+        if image is not None:
+            alt = str(image.get("alt") or "").strip()
+            if alt:
+                return alt
+
+    get_text = getattr(anchor, "get_text", None)
+    if callable(get_text):
+        return _compact_text(get_text(" ", strip=True))
+    return ""
+
+
+def _entry_container(anchor: object) -> object:
+    find_parent = getattr(anchor, "find_parent", None)
+    if callable(find_parent):
+        for tag_name in _CHAMPION_ENTRY_CONTAINERS:
+            parent = find_parent(tag_name)
+            if parent is not None:
+                return parent
+    return getattr(anchor, "parent", None) or anchor
+
+
+def _tier_fill_from_container(container: object) -> Optional[str]:
+    select = getattr(container, "select", None)
+    if not callable(select):
+        return None
+
+    first_fill: Optional[str] = None
+    for path in select("svg path[fill]"):
+        fill = str(path.get("fill") or "").strip()
+        if not fill:
+            continue
+        if first_fill is None:
+            first_fill = fill
+        if _tier_from_fill(fill)[0] != "unknown":
+            return fill
+    return first_fill
+
+
 def parse_position_entries_from_opgg_html(
-    html_text: str, position: str
+    html_text: str,
+    position: str,
+    *,
+    max_entries: int = MAX_OPGG_CHAMPION_ROWS,
 ) -> List[Tuple[str, str, str]]:
     text = html_text or ""
-    needle = 'href="/ko/lol/champions/'
-    i = 0
     entries: List[Tuple[str, str, str]] = []
+    limit = max(0, int(max_entries))
+    if limit <= 0:
+        return []
 
-    max_anchor_scan = 4000
-    href_prefix_len = len('href="')
-    build_suffix = f"/build/{position}"
-
-    while True:
-        idx = text.find(needle, i)
-        if idx == -1:
-            break
-
-        url_start = idx + href_prefix_len
-        url_end = text.find('"', url_start)
-        if url_end == -1:
-            break
-        url = text[url_start:url_end]
-
-        if build_suffix not in url:
-            i = idx + len(needle)
+    soup = BeautifulSoup(text, "lxml")
+    for anchor in soup.select(_CHAMPION_LINK_SELECTOR):
+        href = str(anchor.get("href") or "").strip()
+        if not _href_matches_position(href, position):
             continue
 
-        anchor_end = text.find("</a>", url_end, url_end + max_anchor_scan)
-        if anchor_end == -1:
-            i = url_end
+        name = unescape(_anchor_champion_name(anchor)).strip()
+        if not name:
             continue
 
-        anchor = text[url_end:anchor_end]
-        strong_idx = anchor.find("<strong")
-        if strong_idx != -1:
-            gt = anchor.find(">", strong_idx)
-            end = anchor.find("</strong>", gt + 1 if gt != -1 else 0)
-            if gt != -1 and end != -1 and end > gt:
-                raw = anchor[gt + 1 : end]
-                name = unescape(raw).strip()
-                if name:
-                    tr_start = text.rfind("<tr", 0, idx)
-                    tr_end = text.find("</tr>", idx)
-                    fill_val: Optional[str] = None
-                    if tr_start != -1 and tr_end != -1 and tr_end > tr_start:
-                        row = text[tr_start:tr_end]
-                        badge_pos = row.find("M2 0h20v18.056L12 23 2 18.056z")
-                        if badge_pos != -1:
-                            fpos = row.rfind('fill="', 0, badge_pos)
-                            if fpos != -1:
-                                vend = row.find('"', fpos + 6)
-                                if vend != -1:
-                                    fill_val = row[fpos + 6 : vend].strip()
-                    tier_label, _color = _tier_from_fill(fill_val)
-                    entries.append((name, tier_label, url))
-
-        i = anchor_end + 4
+        fill_val = _tier_fill_from_container(_entry_container(anchor))
+        tier_label, _color = _tier_from_fill(fill_val)
+        entries.append((name, tier_label, href))
+        if len(entries) >= limit:
+            break
 
     out: List[Tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -180,9 +235,16 @@ def fetch_opgg_champion_dataset(
     by_position: Dict[str, List[Tuple[str, str, str]]] = {}
     all_names: List[str] = []
     for role, url in role_urls.items():
-        resp = requests.get(url, headers=headers, timeout=timeout_sec)
+        resp = requests.get(url, headers=headers, timeout=timeout_sec, stream=True)
         resp.raise_for_status()
-        entries = parse_position_entries_from_opgg_html(resp.text, role)
+        entries = parse_position_entries_from_opgg_html(
+            read_limited_text_response(resp), role
+        )
+        if not entries:
+            raise RuntimeError(
+                "OP.GG champion parser found no entries for "
+                f"{role}; supported selectors: {opgg_position_selector_summary(role)}"
+            )
         by_position[role] = entries
         all_names.extend([name for (name, _tier, _href) in entries])
 

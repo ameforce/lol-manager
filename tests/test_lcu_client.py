@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -13,12 +14,18 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from lolmanager.core import lcu_client as lcu_client_module
 from lolmanager.core.lcu_client import (
+    CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV,
     ChampSelectAction,
+    DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC,
+    LcuConnection,
     LcuClient,
     LcuDecision,
     LcuLoopAction,
     LcuOutcome,
+    _default_lcu_connection_validator,
+    champ_select_action_confirm_timeout_sec,
     lcu_loop_action_for,
 )
 
@@ -46,6 +53,38 @@ class _FakeSession:
         return self.responses.pop(0)
 
 
+class _FakeProcessInfo:
+    def __init__(self, *, name: str, exe: str, username: str) -> None:
+        self._name = name
+        self._exe = exe
+        self._username = username
+
+    def name(self) -> str:
+        return self._name
+
+    def exe(self) -> str:
+        return self._exe
+
+    def cmdline(self) -> list[str]:
+        return [self._exe]
+
+    def username(self) -> str:
+        return self._username
+
+
+class _FakeLaddr:
+    def __init__(self, ip: str, port: int) -> None:
+        self.ip = ip
+        self.port = port
+
+
+class _FakeNetConnection:
+    def __init__(self, *, pid: int, ip: str, port: int, status: str = "LISTEN") -> None:
+        self.pid = pid
+        self.laddr = _FakeLaddr(ip, port)
+        self.status = status
+
+
 class LcuClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -65,10 +104,262 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(conn.base_url, "https://127.0.0.1:2999")
         self.assertTrue(conn.authorization_header.startswith("Basic "))
 
+    def test_champ_select_confirm_timeout_uses_env_override(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV: "1.75"},
+        ):
+            self.assertEqual(champ_select_action_confirm_timeout_sec(), 1.75)
+
+        with mock.patch.dict(
+            os.environ,
+            {CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV: "not-a-number"},
+        ):
+            with self.assertWarns(RuntimeWarning):
+                self.assertEqual(
+                    champ_select_action_confirm_timeout_sec(),
+                    DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC,
+                )
+
+    def test_wait_for_action_completed_records_near_timeout_success(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+        completed = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=True,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, completed],
+            ),
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_completed(
+                31,
+                timeout_sec=0.15,
+                interval_sec=0.05,
+                metric_name="completion",
+            )
+
+        self.assertTrue(result.ok)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["completion_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["completion_timeout_sec"],
+            0.15,
+        )
+
+    def test_wait_for_action_champion_records_assignment_timing(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=0,
+            ),
+        )
+        assigned = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, assigned],
+            ),
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_champion(
+                31,
+                103,
+                timeout_sec=0.15,
+                interval_sec=0.05,
+                metric_name="assignment",
+            )
+
+        self.assertTrue(result.ok)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["assignment_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["assignment_timeout_sec"],
+            0.15,
+        )
+
+    def test_wait_for_action_completed_records_timeout_failure(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, pending],
+            ) as get_action,
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_completed(
+                31,
+                timeout_sec=0.10,
+                interval_sec=0.05,
+                metric_name="completion",
+            )
+
+        self.assertEqual(result.status, LcuOutcome.ACTION_REJECTED)
+        self.assertEqual(get_action.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["completion_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["completion_timeout_sec"],
+            0.10,
+        )
+
     def test_malformed_lockfile_returns_none(self) -> None:
         self.lockfile.write_text("bad:data", encoding="utf-8")
 
         self.assertIsNone(LcuClient(lockfile=self.lockfile).read_connection())
+
+    def test_request_rejects_untrusted_lockfile_without_contacting_session(self) -> None:
+        session = _FakeSession([_FakeResponse(200, "Lobby")])
+        client = LcuClient(
+            lockfile=self.lockfile,
+            session=session,
+            connection_validator=lambda _conn: False,
+        )
+
+        result = client.request("GET", "/lol-gameflow/v1/gameflow-phase")
+
+        self.assertEqual(result.error, "lockfile rejected")
+        self.assertEqual(session.calls, [])
+
+    def test_default_lockfile_validator_requires_matching_riot_process_and_port(
+        self,
+    ) -> None:
+        conn = LcuConnection(
+            pid=1234, port=2999, password="secret-token", protocol="https"
+        )
+        process = _FakeProcessInfo(
+            name="LeagueClientUx.exe",
+            exe=r"C:\Riot Games\League of Legends\LeagueClientUx.exe",
+            username=r"DAENG\enmso",
+        )
+
+        with (
+            mock.patch("lolmanager.core.lcu_client.getpass.getuser", return_value="enmso"),
+            mock.patch("lolmanager.core.lcu_client.psutil.Process", return_value=process),
+            mock.patch(
+                "lolmanager.core.lcu_client.psutil.net_connections",
+                return_value=[
+                    _FakeNetConnection(pid=1234, ip="127.0.0.1", port=2999)
+                ],
+            ),
+        ):
+            self.assertTrue(_default_lcu_connection_validator(conn))
+
+    def test_default_lockfile_validator_rejects_non_riot_process_name(self) -> None:
+        conn = LcuConnection(
+            pid=1234, port=2999, password="secret-token", protocol="https"
+        )
+        process = _FakeProcessInfo(
+            name="python.exe",
+            exe=r"C:\Users\enmso\AppData\Local\Programs\Python\python.exe",
+            username=r"DAENG\enmso",
+        )
+
+        with (
+            mock.patch("lolmanager.core.lcu_client.getpass.getuser", return_value="enmso"),
+            mock.patch("lolmanager.core.lcu_client.psutil.Process", return_value=process),
+            mock.patch(
+                "lolmanager.core.lcu_client.psutil.net_connections",
+                return_value=[
+                    _FakeNetConnection(pid=1234, ip="127.0.0.1", port=2999)
+                ],
+            ),
+        ):
+            self.assertFalse(_default_lcu_connection_validator(conn))
+
+    def test_default_lockfile_validator_rejects_port_owned_by_other_pid(self) -> None:
+        conn = LcuConnection(
+            pid=1234, port=2999, password="secret-token", protocol="https"
+        )
+        process = _FakeProcessInfo(
+            name="LeagueClientUx.exe",
+            exe=r"C:\Riot Games\League of Legends\LeagueClientUx.exe",
+            username=r"DAENG\enmso",
+        )
+
+        with (
+            mock.patch("lolmanager.core.lcu_client.getpass.getuser", return_value="enmso"),
+            mock.patch("lolmanager.core.lcu_client.psutil.Process", return_value=process),
+            mock.patch(
+                "lolmanager.core.lcu_client.psutil.net_connections",
+                return_value=[
+                    _FakeNetConnection(pid=9999, ip="127.0.0.1", port=2999)
+                ],
+            ),
+        ):
+            self.assertFalse(_default_lcu_connection_validator(conn))
 
     def test_gameflow_phase_is_cached(self) -> None:
         session = _FakeSession([_FakeResponse(200, "Matchmaking")])

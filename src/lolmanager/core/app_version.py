@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from importlib import import_module
+from importlib.resources import files
 from typing import Iterable, Optional
 
 
@@ -14,6 +16,9 @@ _DESCRIBE_RE = re.compile(
     r"(?:-(?P<count>\d+)-g[0-9a-fA-F]+)?(?P<dirty>-dirty)?$"
 )
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+_BUILD_VERSION_ASSIGNMENT_RE = re.compile(
+    r"BUILD_VERSION\s*=\s*['\"](?P<version>[^'\"]+)['\"]"
+)
 
 
 def version_from_git_describe(describe: object) -> str:
@@ -37,6 +42,33 @@ def format_app_version_label(version: object) -> str:
     if not _VERSION_RE.match(text):
         text = DEFAULT_APP_VERSION
     return f"v{text}"
+
+
+def _valid_version(value: object) -> str:
+    text = str(value or "").strip()
+    return text if _VERSION_RE.match(text) else ""
+
+
+def _embedded_build_version() -> str:
+    try:
+        module = import_module("lolmanager.core._build_version")
+        version = _valid_version(getattr(module, "BUILD_VERSION", ""))
+        if version:
+            return version
+    except Exception:
+        pass
+
+    try:
+        text = files("lolmanager.core").joinpath("_build_version.py").read_text(
+            encoding="utf-8"
+        )
+    except Exception:
+        return ""
+
+    match = _BUILD_VERSION_ASSIGNMENT_RE.search(text)
+    if not match:
+        return ""
+    return _valid_version(match.group("version"))
 
 
 def find_git_repo_root(candidates: Iterable[Path]) -> Optional[Path]:
@@ -75,8 +107,13 @@ def _runtime_git_candidates() -> list[Path]:
 
 def get_app_version(repo_root: Optional[Path] = None) -> str:
     env_version = os.environ.get("LOLMANAGER_VERSION", "").strip()
-    if _VERSION_RE.match(env_version):
-        return env_version
+    version = _valid_version(env_version)
+    if version:
+        return version
+
+    version = _embedded_build_version()
+    if version:
+        return version
 
     root = repo_root or find_git_repo_root(_runtime_git_candidates())
     if root is None:
