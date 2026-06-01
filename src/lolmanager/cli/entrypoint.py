@@ -72,7 +72,7 @@ from lolmanager.core.opgg_counter_recommendations import (
 )
 from lolmanager.cli.runtime_state import (
     ClientState,
-    LCU_UI_ACTION_CLASSIFICATION,
+    LCU_UI_ACTION_CLASSIFICATION as LCU_UI_ACTION_CLASSIFICATION,
     POSTGAME_PHASES,
     client_state_from_lcu_phase,
     should_preserve_champ_select_state,
