@@ -80,6 +80,12 @@ OP.GG 추천 캐시:
 %APPDATA%\LOLManager\opgg_counter_recommendation_cache.json
 ```
 
+환경 변수:
+
+| 이름 | 기본값 | 설명 |
+| --- | --- | --- |
+| `LOLMANAGER_CHAMPSELECT_ACTION_CONFIRM_TIMEOUT_SEC` | `2.0` | LCU 픽/밴 선택 및 완료 확인 대기 시간(초) |
+
 ## EXE 빌드
 
 ```bat

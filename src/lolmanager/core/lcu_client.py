@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import random
 import time
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import quote
 import warnings
 
@@ -18,6 +18,10 @@ from urllib3.exceptions import InsecureRequestWarning
 
 
 DEFAULT_LOCKFILE = Path(r"C:\Riot Games\League of Legends\lockfile")
+CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV = (
+    "LOLMANAGER_CHAMPSELECT_ACTION_CONFIRM_TIMEOUT_SEC"
+)
+DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC = 2.0
 PHASE_MATCHMAKING = "Matchmaking"
 PHASE_READY_CHECK = "ReadyCheck"
 PHASE_CHAMP_SELECT = "ChampSelect"
@@ -358,6 +362,34 @@ class HonorVoteCandidate:
     raw: dict[str, Any]
 
 
+def champ_select_action_confirm_timeout_sec(
+    environ: Optional[Mapping[str, str]] = None,
+) -> float:
+    env = os.environ if environ is None else environ
+    raw = str(env.get(CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV, "") or "").strip()
+    if not raw:
+        return DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        warnings.warn(
+            f"{CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV} must be a positive number; "
+            f"using {DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC:.1f}s",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC
+    if value <= 0:
+        warnings.warn(
+            f"{CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV} must be positive; "
+            f"using {DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC:.1f}s",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC
+    return value
+
+
 def _coerce_lcu_outcome(outcome: object) -> LcuOutcome:
     if isinstance(outcome, LcuDecision):
         return outcome.status
@@ -401,6 +433,7 @@ class LcuClient:
         )
         self._phase_cache: tuple[float, Optional[LcuDecision]] = (0.0, None)
         self._last_logged_phase: Optional[str] = None
+        self.last_champ_select_action_timings: dict[str, float] = {}
 
     def read_connection(self) -> Optional[LcuConnection]:
         try:
@@ -1320,6 +1353,21 @@ class LcuClient:
             reason=f"local action not found: {action_id}",
         )
 
+    def _record_champ_select_action_timing(
+        self,
+        metric_name: str,
+        *,
+        elapsed_sec: float,
+        timeout_sec: float,
+    ) -> None:
+        key = str(metric_name or "wait").strip() or "wait"
+        self.last_champ_select_action_timings[f"{key}_elapsed_sec"] = max(
+            0.0, float(elapsed_sec)
+        )
+        self.last_champ_select_action_timings[f"{key}_timeout_sec"] = max(
+            0.0, float(timeout_sec)
+        )
+
     def _wait_for_action_champion(
         self,
         action_id: int,
@@ -1327,8 +1375,11 @@ class LcuClient:
         *,
         timeout_sec: float = 0.8,
         interval_sec: float = 0.05,
+        metric_name: str = "assignment",
     ) -> LcuDecision:
-        deadline = time.monotonic() + max(0.0, timeout_sec)
+        timeout_sec = max(0.0, float(timeout_sec))
+        started_at = time.monotonic()
+        deadline = started_at + timeout_sec
         last: LcuDecision = LcuDecision(
             LcuOutcome.ACTION_REJECTED,
             reason="champ-select action champion assignment not confirmed",
@@ -1336,7 +1387,13 @@ class LcuClient:
 
         while True:
             action = self._get_local_action_by_id(action_id)
+            now = time.monotonic()
             if action.ok and action.value.champion_id == champion_id:
+                self._record_champ_select_action_timing(
+                    metric_name,
+                    elapsed_sec=now - started_at,
+                    timeout_sec=timeout_sec,
+                )
                 return action
             if action.ok:
                 last = LcuDecision(
@@ -1347,8 +1404,12 @@ class LcuClient:
             else:
                 last = action
 
-            now = time.monotonic()
             if now >= deadline:
+                self._record_champ_select_action_timing(
+                    metric_name,
+                    elapsed_sec=now - started_at,
+                    timeout_sec=timeout_sec,
+                )
                 return last
             time.sleep(min(max(0.0, interval_sec), deadline - now))
 
@@ -1358,8 +1419,11 @@ class LcuClient:
         *,
         timeout_sec: float = 0.8,
         interval_sec: float = 0.05,
+        metric_name: str = "completion",
     ) -> LcuDecision:
-        deadline = time.monotonic() + max(0.0, timeout_sec)
+        timeout_sec = max(0.0, float(timeout_sec))
+        started_at = time.monotonic()
+        deadline = started_at + timeout_sec
         last: LcuDecision = LcuDecision(
             LcuOutcome.ACTION_REJECTED,
             reason="champ-select action completion not confirmed",
@@ -1367,7 +1431,13 @@ class LcuClient:
 
         while True:
             action = self._get_local_action_by_id(action_id)
+            now = time.monotonic()
             if action.ok and action.value.completed:
+                self._record_champ_select_action_timing(
+                    metric_name,
+                    elapsed_sec=now - started_at,
+                    timeout_sec=timeout_sec,
+                )
                 return action
             if action.ok:
                 last = LcuDecision(
@@ -1378,8 +1448,12 @@ class LcuClient:
             else:
                 last = action
 
-            now = time.monotonic()
             if now >= deadline:
+                self._record_champ_select_action_timing(
+                    metric_name,
+                    elapsed_sec=now - started_at,
+                    timeout_sec=timeout_sec,
+                )
                 return last
             time.sleep(min(max(0.0, interval_sec), deadline - now))
 
@@ -1590,14 +1664,25 @@ class LcuClient:
             return patch_decision
 
         if complete:
-            self._wait_for_action_champion(action.value.id, int(champion.value))
+            confirm_timeout_sec = champ_select_action_confirm_timeout_sec()
+            self.last_champ_select_action_timings = {}
+            self._wait_for_action_champion(
+                action.value.id,
+                int(champion.value),
+                timeout_sec=confirm_timeout_sec,
+                metric_name="assignment",
+            )
 
             completed = self._complete_champ_select_action(
                 action.value.id, int(champion.value)
             )
             if not completed.ok:
                 return completed
-            completed_action = self._wait_for_action_completed(action.value.id)
+            completed_action = self._wait_for_action_completed(
+                action.value.id,
+                timeout_sec=confirm_timeout_sec,
+                metric_name="completion",
+            )
             if not completed_action.ok:
                 if (
                     completed.reason
@@ -1623,7 +1708,9 @@ class LcuClient:
                             )
                         return fallback_completed
                     completed_action = self._wait_for_action_completed(
-                        action.value.id
+                        action.value.id,
+                        timeout_sec=confirm_timeout_sec,
+                        metric_name="fallback_completion",
                     )
                 if not completed_action.ok:
                     return completed_action
