@@ -76,6 +76,9 @@ if errorlevel 1 (
 call :STOP_IF_RUNNING
 if errorlevel 1 exit /b %ERRORLEVEL%
 
+call :WRITE_BUILD_VERSION
+if errorlevel 1 exit /b %ERRORLEVEL%
+
 call :BUILD_EXE
 if errorlevel 1 exit /b %ERRORLEVEL%
 
@@ -113,6 +116,33 @@ echo [INFO] terminated.
 set "LM_KILLED_OK=1"
 exit /b 0
 
+:WRITE_BUILD_VERSION
+set "LM_BUILD_VERSION="
+for /f "usebackq delims=" %%V in (`uv run python -c "from lolmanager.core.app_version import get_app_version; print(get_app_version())" 2^>nul`) do (
+    if not defined LM_BUILD_VERSION set "LM_BUILD_VERSION=%%V"
+)
+if not defined LM_BUILD_VERSION set "LM_BUILD_VERSION=0.0.0.0"
+
+set "LM_BUILD_META_DIR=build\generated\lolmanager\core"
+set "LM_BUILD_VERSION_FILE=%LM_BUILD_META_DIR%\_build_version.py"
+if not exist "%LM_BUILD_META_DIR%" md "%LM_BUILD_META_DIR%" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] failed to create build metadata dir
+    >>"%LM_LOG%" echo [ERROR] failed to create build metadata dir
+    exit /b 4
+)
+
+>"%LM_BUILD_VERSION_FILE%" echo BUILD_VERSION = "%LM_BUILD_VERSION%"
+if errorlevel 1 (
+    echo [ERROR] failed to write build version metadata
+    >>"%LM_LOG%" echo [ERROR] failed to write build version metadata
+    exit /b 4
+)
+
+echo [INFO] build version: %LM_BUILD_VERSION%
+>>"%LM_LOG%" echo [INFO] build version: %LM_BUILD_VERSION%
+exit /b 0
+
 :BUILD_EXE
 echo [INFO] building onefile exe via PyInstaller...
 >>"%LM_LOG%" echo [INFO] building onefile exe via PyInstaller...
@@ -125,6 +155,7 @@ uv run --with pyinstaller pyinstaller ^
   --name "LOLManager" ^
   --icon "src\lolmanager\resources\assets\lolmanager.ico" ^
   --paths "src" ^
+  --add-data "%LM_BUILD_VERSION_FILE%;lolmanager\core" ^
   --add-data "src\lolmanager\resources;lolmanager\resources" ^
   --collect-all "ttkbootstrap" ^
   "src\lolmanager\cli\entrypoint.py" >>"%LM_LOG%" 2>&1
