@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+import types
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -375,6 +376,24 @@ class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
 
 
 class CliLcuStateTests(unittest.TestCase):
+    def test_cli_main_rejects_unknown_option_before_runtime_setup(self) -> None:
+        fake_gui = types.ModuleType("lolmanager.gui.config_gui")
+        fake_gui.run_config_gui = mock.Mock()
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ) as configure_logging,
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.dict(sys.modules, {"lolmanager.gui.config_gui": fake_gui}),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            entrypoint.cli_main(["--config-gui", "--debgu"])
+
+        self.assertEqual(raised.exception.code, 2)
+        configure_logging.assert_not_called()
+        fake_gui.run_config_gui.assert_not_called()
+
     def test_ensure_active_rect_times_out_when_window_missing(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
 

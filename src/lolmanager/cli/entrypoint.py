@@ -2430,9 +2430,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         action="store_true",
         help="설정(champion/ban/pick_coord/reserve_picks)을 GUI로 편집하고 종료합니다.",
     )
-    args, _unknown = parser.parse_known_args(
-        (argv if argv is not None else sys.argv[1:])
-    )
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     log_path = configure_runtime_logging(debug=bool(args.debug))
     install_exception_logger()
     logger = logging.getLogger("lolmanager")
