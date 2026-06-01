@@ -2044,8 +2044,6 @@ def try_pick_popups(
     if not matches:
         return False
 
-    clicked_any = False
-
     best_confirm_name: Optional[str] = None
     best_confirm_hit: Optional[tuple[tuple[int, int], object, float]] = None
     best_confirm_score = -1.0
@@ -2067,23 +2065,23 @@ def try_pick_popups(
         key = f"pick_popup:{name}"
         last = _last_popup_click_at.get(key, 0.0)
         if now - last < POPUP_CLICK_COOLDOWN_SEC:
-            continue
+            return False
 
         try:
             click_screen(center)
         except Exception as exc:
             logger.warning("팝업 버튼 클릭 실패(%s): %s", name, exc)
-            continue
+            return False
 
         _last_popup_click_at[key] = now
-        clicked_any = True
         if name == "confirm":
             tpl = confirm_name_to_path.get(best_confirm_name) if best_confirm_name else None
             logger.info("확인 팝업 클릭 처리(tpl=%s).", (tpl.name if tpl else "unknown"))
         else:
             logger.info("거절 버튼 클릭 처리.")
+        return True
 
-    return clicked_any
+    return False
 
 
 def _update_my_pick_turn_from_image(
