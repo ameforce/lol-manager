@@ -4,6 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -235,9 +236,20 @@ def fetch_champion_slug(position: str, champion_name: str) -> Optional[str]:
 
 def _absolute_opgg_url(detail_href: str) -> str:
     url = str(detail_href or "").strip()
-    if url.startswith("/"):
-        return "https://op.gg" + url
-    return url
+    if not url:
+        return ""
+
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc:
+        if parts.scheme != "https" or parts.netloc.casefold() != "op.gg":
+            return ""
+    elif not url.startswith("/"):
+        return ""
+
+    if not parts.path.startswith("/ko/lol/champions/") or "/build/" not in parts.path:
+        return ""
+
+    return urlunsplit(("https", "op.gg", parts.path, parts.query, ""))
 
 
 def _parse_percent(value: str) -> Optional[float]:
@@ -335,12 +347,15 @@ def fetch_counter_matchups_from_detail(
     limit: int = 10,
 ) -> List[CounterMatchup]:
     url = _absolute_opgg_url(detail_href)
+    if not url:
+        logger.warning("허용되지 않는 OP.GG 상세 href를 차단했습니다.")
+        return []
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    resp = requests.get(url, headers=headers, timeout=10)
+    resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
     if resp.status_code != 200:
         logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
         return []
@@ -357,12 +372,15 @@ def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
         return [matchup.champion for matchup in matchups[:limit]]
 
     url = _absolute_opgg_url(detail_href)
+    if not url:
+        logger.warning("허용되지 않는 OP.GG 상세 href를 차단했습니다.")
+        return []
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    resp = requests.get(url, headers=headers, timeout=10)
+    resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
     if resp.status_code != 200:
         logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
         return []
