@@ -55,7 +55,24 @@ COUNTER_HTML = """
 
 class _Response:
     status_code = 200
+    headers: dict[str, str] = {}
     text = COUNTER_HTML
+
+
+class _OversizedResponse:
+    status_code = 200
+    headers = {"Content-Length": "999999999"}
+    encoding = "utf-8"
+
+    @property
+    def text(self) -> str:
+        raise AssertionError("oversized response body should not be materialized")
+
+    def iter_content(self, *_args: object, **_kwargs: object) -> list[bytes]:
+        raise AssertionError("oversized response body should not be streamed")
+
+    def close(self) -> None:
+        pass
 
 
 def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None:
@@ -183,6 +200,39 @@ def test_detail_fetch_disables_redirects_for_allowed_opgg_url(monkeypatch) -> No
     assert [matchup.champion for matchup in matchups] == ["퀸", "신지드"]
     assert calls[0][0] == "https://op.gg/ko/lol/champions/malphite/build/top"
     assert calls[0][1]["allow_redirects"] is False
+
+
+def test_detail_fetch_rejects_oversized_response_before_text_read(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_get(_url: str, **kwargs: object) -> _OversizedResponse:
+        calls.append(kwargs)
+        return _OversizedResponse()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    assert (
+        fetch_counter_matchups_from_detail(
+            "https://op.gg/ko/lol/champions/malphite/build/top"
+        )
+        == []
+    )
+    assert calls[0]["stream"] is True
+
+
+def test_counter_parser_caps_link_scan_before_far_late_matches() -> None:
+    noisy_links = "\n".join("<li><a><span></span></a></li>" for _ in range(150))
+    html = f"""
+    <section>
+      <h3>상대하기 어려운 챔피언</h3>
+      <ul>
+        {noisy_links}
+        <li><a><img alt="퀸" /><span>42.82%</span></a></li>
+      </ul>
+    </section>
+    """
+
+    assert parse_counter_matchups_from_html(html, source_url="/malphite", limit=1) == []
 
 
 def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(

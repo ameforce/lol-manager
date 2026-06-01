@@ -10,6 +10,12 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError
 
+from lolmanager.core.opgg_http import (
+    MAX_OPGG_CHAMPION_ROWS,
+    MAX_OPGG_COUNTER_LINK_SCAN,
+    read_limited_text_response,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,14 +184,16 @@ def fetch_top_champions(
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         }
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10, stream=True)
         if resp.status_code != 200:
             return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        rows = soup.select("table tbody tr")
+        soup = BeautifulSoup(read_limited_text_response(resp), "lxml")
+        row_budget = MAX_OPGG_CHAMPION_ROWS if limit is None else min(
+            int(limit), MAX_OPGG_CHAMPION_ROWS
+        )
+        rows = soup.select("table tbody tr", limit=row_budget)
         champs_http: List[Tuple[str, Tuple[str, str], Optional[str]]] = []
-        slice_rows = rows if limit is None else rows[:limit]
-        for row in slice_rows:
+        for row in rows:
             strong = row.select_one("td:nth-of-type(2) div a strong")
             tier_path = row.select_one("td:nth-of-type(3) svg g path")
             link = row.select_one("td:nth-of-type(2) div a")
@@ -276,7 +284,9 @@ def _compact_text(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
-def _counter_links_from_difficult_section(soup: BeautifulSoup) -> List[object]:
+def _counter_links_from_difficult_section(
+    soup: BeautifulSoup, *, max_links: int
+) -> List[object]:
     header_text = soup.find(
         string=lambda text: bool(text and "상대하기 어려운" in str(text))
     )
@@ -285,14 +295,16 @@ def _counter_links_from_difficult_section(soup: BeautifulSoup) -> List[object]:
         if header is not None:
             ul = header.find_next("ul")
             if ul is not None:
-                links = ul.select("li a")
+                links = ul.select("li a", limit=max_links)
                 if links:
                     return list(links)
 
-    links = soup.select("section:nth-of-type(1) div:nth-of-type(3) ul li a")
+    links = soup.select(
+        "section:nth-of-type(1) div:nth-of-type(3) ul li a", limit=max_links
+    )
     if links:
         return list(links)
-    return list(soup.select("section ul li a"))
+    return list(soup.select("section ul li a", limit=max_links))
 
 
 def parse_counter_matchups_from_html(
@@ -301,8 +313,11 @@ def parse_counter_matchups_from_html(
     source_url: str = "",
     limit: int = 10,
 ) -> List[CounterMatchup]:
+    if limit <= 0:
+        return []
     soup = BeautifulSoup(html_text or "", "lxml")
-    links = _counter_links_from_difficult_section(soup)
+    scan_limit = min(MAX_OPGG_COUNTER_LINK_SCAN, max(1, int(limit)) * 4)
+    links = _counter_links_from_difficult_section(soup, max_links=scan_limit)
     matchups: List[CounterMatchup] = []
     seen: set[str] = set()
 
@@ -355,11 +370,18 @@ def fetch_counter_matchups_from_detail(
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+    resp = requests.get(
+        url, headers=headers, timeout=10, allow_redirects=False, stream=True
+    )
     if resp.status_code != 200:
         logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
         return []
-    return parse_counter_matchups_from_html(resp.text, source_url=url, limit=limit)
+    try:
+        html_text = read_limited_text_response(resp)
+    except ValueError as exc:
+        logger.error("OP.GG 상세 페이지 응답 거부: %s", exc)
+        return []
+    return parse_counter_matchups_from_html(html_text, source_url=url, limit=limit)
 
 
 def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
@@ -380,12 +402,22 @@ def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
+    resp = requests.get(
+        url, headers=headers, timeout=10, allow_redirects=False, stream=True
+    )
     if resp.status_code != 200:
         logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
         return []
-    soup = BeautifulSoup(resp.text, "lxml")
-    imgs = soup.select("section:nth-of-type(1) div:nth-of-type(3) ul li a img")
+    try:
+        html_text = read_limited_text_response(resp)
+    except ValueError as exc:
+        logger.error("OP.GG 상세 페이지 응답 거부: %s", exc)
+        return []
+    soup = BeautifulSoup(html_text, "lxml")
+    imgs = soup.select(
+        "section:nth-of-type(1) div:nth-of-type(3) ul li a img",
+        limit=min(MAX_OPGG_COUNTER_LINK_SCAN, max(1, int(limit)) * 4),
+    )
     counters: List[str] = []
     for img in imgs[:limit]:
         alt = img.get("alt")
