@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -13,14 +14,18 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from lolmanager.core import lcu_client as lcu_client_module
 from lolmanager.core.lcu_client import (
+    CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV,
     ChampSelectAction,
+    DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC,
     LcuConnection,
     LcuClient,
     LcuDecision,
     LcuLoopAction,
     LcuOutcome,
     _default_lcu_connection_validator,
+    champ_select_action_confirm_timeout_sec,
     lcu_loop_action_for,
 )
 
@@ -98,6 +103,177 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(conn.port, 2999)
         self.assertEqual(conn.base_url, "https://127.0.0.1:2999")
         self.assertTrue(conn.authorization_header.startswith("Basic "))
+
+    def test_champ_select_confirm_timeout_uses_env_override(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV: "1.75"},
+        ):
+            self.assertEqual(champ_select_action_confirm_timeout_sec(), 1.75)
+
+        with mock.patch.dict(
+            os.environ,
+            {CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV: "not-a-number"},
+        ):
+            with self.assertWarns(RuntimeWarning):
+                self.assertEqual(
+                    champ_select_action_confirm_timeout_sec(),
+                    DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC,
+                )
+
+    def test_wait_for_action_completed_records_near_timeout_success(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+        completed = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=True,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, completed],
+            ),
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_completed(
+                31,
+                timeout_sec=0.15,
+                interval_sec=0.05,
+                metric_name="completion",
+            )
+
+        self.assertTrue(result.ok)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["completion_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["completion_timeout_sec"],
+            0.15,
+        )
+
+    def test_wait_for_action_champion_records_assignment_timing(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=0,
+            ),
+        )
+        assigned = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, assigned],
+            ),
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_champion(
+                31,
+                103,
+                timeout_sec=0.15,
+                interval_sec=0.05,
+                metric_name="assignment",
+            )
+
+        self.assertTrue(result.ok)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["assignment_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["assignment_timeout_sec"],
+            0.15,
+        )
+
+    def test_wait_for_action_completed_records_timeout_failure(self) -> None:
+        client = LcuClient(lockfile=self.lockfile, session=_FakeSession([]))
+        pending = LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=ChampSelectAction(
+                id=31,
+                type="pick",
+                is_in_progress=True,
+                completed=False,
+                champion_id=103,
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                client,
+                "_get_local_action_by_id",
+                side_effect=[pending, pending],
+            ) as get_action,
+            mock.patch.object(
+                lcu_client_module.time,
+                "monotonic",
+                side_effect=[0.0, 0.05, 0.10],
+            ),
+            mock.patch.object(lcu_client_module.time, "sleep") as sleep,
+        ):
+            result = client._wait_for_action_completed(
+                31,
+                timeout_sec=0.10,
+                interval_sec=0.05,
+                metric_name="completion",
+            )
+
+        self.assertEqual(result.status, LcuOutcome.ACTION_REJECTED)
+        self.assertEqual(get_action.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+        self.assertAlmostEqual(
+            client.last_champ_select_action_timings["completion_elapsed_sec"],
+            0.10,
+        )
+        self.assertEqual(
+            client.last_champ_select_action_timings["completion_timeout_sec"],
+            0.10,
+        )
 
     def test_malformed_lockfile_returns_none(self) -> None:
         self.lockfile.write_text("bad:data", encoding="utf-8")
