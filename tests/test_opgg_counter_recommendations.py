@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from lolmanager.core.champion_fetcher import (
+    fetch_counter_matchups_from_detail,
     fetch_counters_from_detail,
     parse_counter_matchups_from_html,
 )
@@ -145,6 +146,67 @@ def test_parser_reads_difficult_matchups_and_name_only_fetch_stays_compatible(
         "퀸",
         "신지드",
     ]
+
+
+def test_detail_fetch_rejects_absolute_non_opgg_url_before_request(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> _Response:
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    assert (
+        fetch_counter_matchups_from_detail(
+            "http://127.0.0.1:65535/internal-metadata"
+        )
+        == []
+    )
+    assert fetch_counters_from_detail("https://example.invalid/not-opgg") == []
+    assert calls == []
+
+
+def test_detail_fetch_disables_redirects_for_allowed_opgg_url(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get(url: str, **kwargs: object) -> _Response:
+        calls.append((url, kwargs))
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    matchups = fetch_counter_matchups_from_detail(
+        "https://op.gg/ko/lol/champions/malphite/build/top"
+    )
+
+    assert [matchup.champion for matchup in matchups] == ["퀸", "신지드"]
+    assert calls[0][0] == "https://op.gg/ko/lol/champions/malphite/build/top"
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_get(url: str, **_kwargs: object) -> _Response:
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
+
+    result = get_counter_recommendations(
+        default_counter_cache_path(tmp_path / "champion_config.json"),
+        role="top",
+        configured_pick="말파이트",
+        ranked_entries=[("퀸", ("1티어", "blue"), "/ko/lol/champions/quinn/build/top")],
+        detail_href="http://127.0.0.1:65535/internal-metadata",
+        max_age_sec=0.0,
+    )
+
+    assert result.status == "cache_miss"
+    assert calls == []
 
 
 def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
