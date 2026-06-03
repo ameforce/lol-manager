@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from typing import Optional
 import unittest
 from unittest import mock
 
@@ -354,16 +355,6 @@ class _FakeBlockingModalLcu:
         return self.result
 
 
-class _FakeShowUxLcu:
-    def __init__(self, result: LcuDecision) -> None:
-        self.result = result
-        self.show_calls = 0
-
-    def show_ux_decision(self) -> LcuDecision:
-        self.show_calls += 1
-        return self.result
-
-
 class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
     def __init__(self, phase: str | None, result: LcuDecision) -> None:
         super().__init__(phase)
@@ -373,6 +364,54 @@ class _FakePhaseBlockingModalLcu(_FakePhaseLcu):
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
         self.dismiss_calls += 1
         return self.result
+
+
+class _FakeCliChampionConfig:
+    path = Path("champions.json")
+
+    def get(self, role: str):
+        if role == "mid":
+            return {"champion": "아리", "ban": ""}
+        return {}
+
+    def get_reserve_picks(self, role: str):
+        return []
+
+
+class _FakeCliChampSelectLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.position_calls = 0
+        self.select_calls: list[dict[str, object]] = []
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        phases = [PHASE_LOBBY, PHASE_CHAMP_SELECT, PHASE_CHAMP_SELECT]
+        phase = phases[min(self.phase_calls, len(phases) - 1)]
+        self.phase_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def get_local_player_position(self) -> LcuDecision:
+        self.position_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value="mid")
+
+    def select_champ_select_champion_decision(
+        self, champion_name: object, *, action_type: str, complete: bool = False
+    ) -> LcuDecision:
+        self.select_calls.append(
+            {
+                "champion_name": champion_name,
+                "action_type": action_type,
+                "complete": complete,
+            }
+        )
+        if len(self.select_calls) == 1:
+            return LcuDecision(LcuOutcome.SUCCESS, reason="prepick accepted")
+        return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
 
 
 class CliLcuStateTests(unittest.TestCase):
@@ -393,6 +432,136 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         configure_logging.assert_not_called()
         fake_gui.run_config_gui.assert_not_called()
+
+    def test_cli_main_routes_postgame_before_cycle_ui_wait(self) -> None:
+        postgame_message = "postgame routed before cycle ui fallback"
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(
+                    should_exit=mock.Mock(return_value=False)
+                ),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=object()),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_poll_lcu_phase_attempt",
+                side_effect=[
+                    entrypoint.PhaseLcuAttempt(
+                        PHASE_LOBBY, LcuLoopAction.ACT_LCU, "startup"
+                    ),
+                    entrypoint.PhaseLcuAttempt(
+                        PHASE_END_OF_GAME, LcuLoopAction.ACT_LCU, "postgame"
+                    ),
+                ],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_or_wait",
+                side_effect=[
+                    (0, 0, 1280, 720),
+                    RuntimeError("cycle start ui fallback should not wait"),
+                ],
+            ) as visible_wait,
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(entrypoint, "_dismiss_blocking_modal_lcu_attempt") as modal_lcu,
+            mock.patch.object(
+                entrypoint,
+                "process_postgame",
+                side_effect=RuntimeError(postgame_message),
+            ) as process_postgame,
+            self.assertRaisesRegex(RuntimeError, postgame_message),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(visible_wait.call_count, 1)
+        modal_lcu.assert_not_called()
+        process_postgame.assert_called_once()
+
+    def test_cli_main_minimized_champ_select_reaches_lcu_pick_before_image(
+        self,
+    ) -> None:
+        fake_lcu = _FakeCliChampSelectLcu()
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(
+                    should_exit=mock.Mock(return_value=False)
+                ),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                side_effect=[(0, 0, 1280, 720), minimized_rect, minimized_rect],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(entrypoint, "resolve_ban_name_for_runtime", return_value=""),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=RuntimeError("stop after minimized pick wait"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after minimized pick wait"),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(fake_lcu.position_calls, 1)
+        self.assertEqual(
+            fake_lcu.select_calls,
+            [
+                {"champion_name": "아리", "action_type": "pick", "complete": False},
+                {"champion_name": "아리", "action_type": "pick", "complete": True},
+            ],
+        )
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
 
     def test_ensure_active_rect_times_out_when_window_missing(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
@@ -428,6 +597,57 @@ class CliLcuStateTests(unittest.TestCase):
             entrypoint.ensure_active_rect(logger, poll=0.25, timeout_sec=0.5)
 
         sleep.assert_has_calls([mock.call(0.25), mock.call(0.25)])
+
+    def test_window_visibility_snapshot_classifies_visible_minimized_and_missing(
+        self,
+    ) -> None:
+        self.assertTrue(hasattr(entrypoint, "get_league_window_visibility"))
+        visible_rect = (0, 0, 1280, 720)
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        with mock.patch.object(
+            entrypoint, "find_league_window_rect", return_value=visible_rect
+        ):
+            visible = entrypoint.get_league_window_visibility()
+
+        self.assertEqual(visible.state.value, "visible")
+        self.assertEqual(visible.rect, visible_rect)
+
+        with mock.patch.object(
+            entrypoint, "find_league_window_rect", return_value=minimized_rect
+        ):
+            minimized = entrypoint.get_league_window_visibility()
+
+        self.assertEqual(minimized.state.value, "minimized")
+        self.assertIsNone(minimized.rect)
+
+        with mock.patch.object(entrypoint, "find_league_window_rect", return_value=None):
+            missing = entrypoint.get_league_window_visibility()
+
+        self.assertEqual(missing.state.value, "missing")
+        self.assertIsNone(missing.rect)
+
+    def test_visible_rect_or_wait_logs_restore_wait_without_raising(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        stage = "테스트 복원 대기"
+        minimized_rect = (-32000, -32000, -31900, -31900)
+        entrypoint._last_restore_wait_log_state.pop(stage, None)
+
+        with (
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=minimized_rect
+            ),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertLogs(logger, level="INFO") as logs,
+        ):
+            rect = entrypoint._visible_rect_or_wait(logger, stage, 0.25)
+
+        self.assertIsNone(rect)
+        sleep.assert_called_once_with(0.25)
+        self.assertTrue(
+            any("클라이언트 복원 대기" in message for message in logs.output)
+        )
 
     def test_lcu_phase_maps_to_runtime_state(self) -> None:
         self.assertEqual(
@@ -1190,7 +1410,9 @@ class CliLcuStateTests(unittest.TestCase):
                 return False
 
         with (
-            mock.patch.object(entrypoint, "ensure_active_rect", return_value=(0, 0, 1280, 720)),
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=(0, 0, 1280, 720)
+            ),
             mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
             mock.patch.object(entrypoint.Path, "exists", return_value=True),
             mock.patch.object(entrypoint, "search_and_act", return_value=True) as search,
@@ -1240,7 +1462,7 @@ class CliLcuStateTests(unittest.TestCase):
         with (
             mock.patch.object(
                 entrypoint,
-                "ensure_active_rect",
+                "find_league_window_rect",
                 return_value=(0, 0, 1280, 720),
             ),
             mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
@@ -1281,7 +1503,7 @@ class CliLcuStateTests(unittest.TestCase):
         with (
             mock.patch.object(
                 entrypoint,
-                "ensure_active_rect",
+                "find_league_window_rect",
                 return_value=(0, 0, 1280, 720),
             ),
             mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
@@ -1320,7 +1542,9 @@ class CliLcuStateTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(entrypoint, "ensure_active_rect", return_value=(0, 0, 1280, 720)),
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=(0, 0, 1280, 720)
+            ),
             mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
             mock.patch.object(entrypoint.Path, "exists", return_value=True),
             mock.patch.object(entrypoint, "search_and_act", return_value=True) as search,
@@ -1361,6 +1585,52 @@ class CliLcuStateTests(unittest.TestCase):
             click=True,
         )
 
+    def test_postgame_minimized_request_failure_waits_without_image_or_ux(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseDecisionLcu(
+            LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+        )
+
+        with (
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                return_value=(-32000, -32000, -31900, -31900),
+            ),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=RuntimeError("stop after minimized postgame wait"),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "stop after minimized postgame wait"
+            ),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        search.assert_not_called()
+        detect.assert_not_called()
+
     def test_postgame_none_phase_blocks_find_match_fallback(self) -> None:
         class _FakePostgameSequenceLcu(_FakePhaseDecisionSequenceLcu):
             def __init__(self) -> None:
@@ -1383,7 +1653,9 @@ class CliLcuStateTests(unittest.TestCase):
         fake = _FakePostgameSequenceLcu()
 
         with (
-            mock.patch.object(entrypoint, "ensure_active_rect", return_value=(0, 0, 1280, 720)),
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=(0, 0, 1280, 720)
+            ),
             mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
             mock.patch.object(
                 entrypoint,
@@ -1504,12 +1776,11 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(result.loop_action, LcuLoopAction.FALLBACK_IMAGE)
         self.assertEqual(result.outcome, "not_supported")
 
-    def test_stale_blocking_modal_ui_fallback_shows_ux_and_clicks_template(
+    def test_stale_blocking_modal_ui_fallback_clicks_visible_template_without_ux(
         self,
     ) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         image_dir = ROOT / "src" / "lolmanager" / "resources" / "images" / "1280"
-        fake = _FakeShowUxLcu(LcuDecision(LcuOutcome.SUCCESS, reason="shown"))
 
         with (
             mock.patch.object(
@@ -1525,17 +1796,38 @@ class CliLcuStateTests(unittest.TestCase):
                 0.85,
                 "사이클 시작",
                 logger,
-                lcu=fake,
             )
 
         self.assertTrue(handled)
-        self.assertEqual(fake.show_calls, 1)
         click_screen.assert_called_once_with((640, 432))
         find_matches.assert_called_once()
         self.assertEqual(
             find_matches.call_args.kwargs["search_rois"]["confirm#2"],
             entrypoint._popup_button_search_roi((0, 0, 1280, 720)),
         )
+
+    def test_blocking_modal_ui_fallback_skips_minimized_rect_without_ux(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        image_dir = ROOT / "src" / "lolmanager" / "resources" / "images" / "1280"
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        with (
+            mock.patch.object(entrypoint, "find_template_matches_once") as find_matches,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+        ):
+            handled = entrypoint._dismiss_blocking_modal_ui_fallback(
+                minimized_rect,
+                entrypoint._client_confirm_template_candidates(image_dir),
+                0.85,
+                "사이클 시작",
+                logger,
+            )
+
+        self.assertFalse(handled)
+        find_matches.assert_not_called()
+        click_screen.assert_not_called()
 
     def test_match_poll_dismisses_blocking_modal_via_lcu_before_image_confirm(
         self,
@@ -2137,6 +2429,47 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(role, "support")
         self.assertEqual(fake.position_calls, 1)
         image_detector.assert_called_once_with()
+
+    def test_role_detection_minimized_image_fallback_yields_to_lcu_loop(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeRoleLcu(
+            LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+        )
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        def image_detector() -> Optional[str]:
+            rect = entrypoint._visible_rect_or_wait(logger, "포지션 탐색", 0.2)
+            if rect is None:
+                return None
+            return "support"
+
+        with (
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=minimized_rect
+            ),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint, "find_best_template") as find_best_template,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(entrypoint.time, "sleep") as sleep,
+        ):
+            attempt = entrypoint._detect_role_lcu_first_with_retry_attempt(
+                fake,
+                stage="포지션 탐색",
+                logger=logger,
+                image_detector=image_detector,
+                interval_sec=0.2,
+            )
+
+        self.assertIsNone(attempt.role)
+        self.assertEqual(attempt.loop_action, LcuLoopAction.FALLBACK_IMAGE)
+        self.assertEqual(fake.position_calls, 1)
+        sleep.assert_called_once_with(0.2)
+        find_best_template.assert_not_called()
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
 
     def test_role_detection_retries_semantic_wait_with_sleep(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
