@@ -52,6 +52,7 @@ HONOR_BALLOT_ENDPOINT = "/lol-honor-v2/v1/ballot"
 HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
 END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
+LOBBY_PLAY_AGAIN_ENDPOINT = "/lol-lobby/v2/play-again"
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
 REMEDY_NOTIFICATIONS_ENDPOINT = "/lol-remedy/v1/remedy-notifications"
 REMEDY_NOTIFICATION_ACK_ENDPOINT = "/lol-remedy/v1/ack-remedy-notification"
@@ -63,6 +64,7 @@ PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT = (
 )
 PLAYER_NOTIFICATIONS_ENDPOINT = "/player-notifications/v1/notifications"
 PLAYER_MESSAGING_NOTIFICATION_ENDPOINT = "/lol-player-messaging/v1/notification"
+RANKED_NOTIFICATIONS_ENDPOINT = "/lol-ranked/v1/notifications"
 RIOTCLIENT_UX_ALLOW_FOREGROUND_ENDPOINT = "/riotclient/ux-allow-foreground"
 RIOTCLIENT_UX_SHOW_ENDPOINT = "/riotclient/ux-show"
 HONOR_VOTE_TYPE = "HEART"
@@ -621,6 +623,18 @@ class LcuClient:
     def dismiss_end_of_game_stats(self) -> bool:
         return self.dismiss_end_of_game_stats_decision().ok
 
+    def play_again_decision(self) -> LcuDecision:
+        result = self.request("POST", LOBBY_PLAY_AGAIN_ENDPOINT)
+        return _write_or_unsupported_decision(
+            result,
+            success_reason="lobby play again accepted",
+            rejected_reason="lobby play again rejected",
+            unsupported_reason="lobby play again endpoint is not available",
+        )
+
+    def play_again(self) -> bool:
+        return self.play_again_decision().ok
+
     def get_honor_ballot_decision(self) -> LcuDecision:
         result = self.request("GET", HONOR_BALLOT_ENDPOINT)
         if result.error:
@@ -779,6 +793,7 @@ class LcuClient:
             self._dismiss_player_behavior_v1_reporter_feedback_decision,
             self._dismiss_player_notifications_decision,
             self._dismiss_player_messaging_notification_decision,
+            self._dismiss_ranked_notifications_decision,
         )
         saw_supported_empty = False
         for handler in handlers:
@@ -1165,6 +1180,76 @@ class LcuClient:
             success_reason="player messaging notification acknowledged",
             rejected_reason="player messaging notification acknowledge rejected",
             unsupported_reason="player messaging notification acknowledge endpoint is not available",
+        )
+
+    def _dismiss_ranked_notifications_decision(self) -> LcuDecision:
+        result = self.request("GET", RANKED_NOTIFICATIONS_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="ranked notifications endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="ranked notifications request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="ranked notifications response is not a list",
+                status_code=result.status_code,
+            )
+
+        dismissed = 0
+        for notification in result.data:
+            if not isinstance(notification, dict):
+                continue
+            if _normalize_lookup_key(notification.get("displayType")) != "vignette":
+                continue
+            notification_id = _non_empty_identifier(
+                notification, "id", "notificationId"
+            )
+            if not notification_id:
+                continue
+            acknowledge = self.request(
+                "POST",
+                (
+                    f"{RANKED_NOTIFICATIONS_ENDPOINT}/"
+                    f"{quote(notification_id, safe='')}/acknowledge"
+                ),
+            )
+            decision = _write_or_unsupported_decision(
+                acknowledge,
+                success_reason="ranked notification acknowledged",
+                rejected_reason="ranked notification acknowledge rejected",
+                unsupported_reason="ranked notification acknowledge endpoint is not available",
+            )
+            if not decision.ok:
+                return decision
+            dismissed += 1
+
+        if dismissed:
+            return LcuDecision(
+                LcuOutcome.SUCCESS,
+                reason="ranked notifications acknowledged",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no ranked notifications",
+            status_code=result.status_code,
         )
 
     def get_champ_select_session(self) -> Optional[dict[str, Any]]:

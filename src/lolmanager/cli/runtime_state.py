@@ -29,6 +29,7 @@ LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {
     "pick_myturn": "fallback-only",
     "postgame_end_buttons": "ui-only",
     "postgame_continue": "lcu-first",
+    "postgame_play_again": "lcu-first",
     "postgame_honor_vote": "lcu-only-terminal",
     "blocking_modals": "lcu-first",
 }

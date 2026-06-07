@@ -103,6 +103,8 @@ ANSI_RESET = "\033[0m"
 
 DEFAULT_PICK_COORD = (386, 163)
 DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
+DEFAULT_IMAGE_SET_WIDTH = 1280
+DEFAULT_IMAGE_SET_HEIGHT = 720
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 
@@ -579,6 +581,7 @@ def _matchmaking_start_blocked_by_lcu_phase(
     logger: logging.Logger,
     *,
     max_age_sec: float = 0.5,
+    allow_none_phase: bool = False,
 ) -> bool:
     if lcu is None:
         return False
@@ -592,6 +595,12 @@ def _matchmaking_start_blocked_by_lcu_phase(
         return True
 
     if _phase_blocks_matchmaking_start(attempt.phase):
+        if allow_none_phase and attempt.phase == PHASE_NONE:
+            logger.debug(
+                "LCU phase=None 이지만 postgame 완료 직후이므로 대전찾기 시작을 허용합니다(%s).",
+                stage,
+            )
+            return False
         logger.debug(
             "LCU phase=%s 이므로 대전찾기 시작을 보류합니다(%s).",
             attempt.phase,
@@ -613,10 +622,14 @@ def _start_matchmaking_lcu_attempt(
     lcu: Optional[LcuClient],
     stage: str,
     logger: logging.Logger,
+    *,
+    allow_none_phase: bool = False,
 ) -> LcuActionAttempt:
     if lcu is None:
         return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
-    if _matchmaking_start_blocked_by_lcu_phase(lcu, stage, logger):
+    if _matchmaking_start_blocked_by_lcu_phase(
+        lcu, stage, logger, allow_none_phase=allow_none_phase
+    ):
         return LcuActionAttempt(False, LcuLoopAction.WAIT_AUTHORITATIVE, "phase_blocked")
 
     try:
@@ -801,6 +814,65 @@ def _dismiss_end_of_game_stats_lcu_attempt(
         )
     except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
         logger.exception("LCU 엔드 계속하기 중 예상하지 못한 오류(%s).", stage)
+        raise
+
+
+def _play_again_lcu_attempt(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> LcuActionAttempt:
+    if lcu is None:
+        return LcuActionAttempt(False, LcuLoopAction.FALLBACK_IMAGE, "not_attempted")
+
+    try:
+        decision_fn = getattr(lcu, "play_again_decision", None)
+        if not callable(decision_fn):
+            logger.debug(
+                "LCU 다음 게임 API가 없습니다(%s). 기존 postgame fallback 진행.",
+                stage,
+            )
+            return LcuActionAttempt(
+                False, LcuLoopAction.FALLBACK_IMAGE, "not_supported"
+            )
+
+        result = decision_fn()
+        outcome = _lcu_status_label(result)
+        if getattr(result, "ok", False):
+            logger.info("LCU 다음 게임 요청 완료(%s,outcome=%s).", stage, outcome)
+            return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
+
+        loop_action = lcu_loop_action_for(result, context="postgame_play_again")
+        if _lcu_status_label(result) == "unsupported":
+            loop_action = LcuLoopAction.FALLBACK_IMAGE
+        elif loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+            loop_action = LcuLoopAction.FALLBACK_IMAGE
+
+        if loop_action == LcuLoopAction.FALLBACK_IMAGE:
+            logger.debug(
+                "LCU 다음 게임 요청 실패(%s,outcome=%s). 기존 postgame fallback 진행.",
+                stage,
+                outcome,
+            )
+        else:
+            logger.debug(
+                "LCU 다음 게임 요청 보류(%s,outcome=%s,action=%s).",
+                stage,
+                outcome,
+                loop_action.value,
+            )
+        return LcuActionAttempt(False, loop_action, outcome)
+    except RequestException as exc:
+        logger.debug(
+            "LCU 다음 게임 요청 실패(%s): %s. 기존 postgame fallback 진행.",
+            stage,
+            exc,
+        )
+        return LcuActionAttempt(
+            False, LcuLoopAction.FALLBACK_IMAGE, "request_exception"
+        )
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 다음 게임 요청 중 예상하지 못한 오류(%s).", stage)
         raise
 
 
@@ -2175,6 +2247,9 @@ def process_postgame(
 ) -> None:
     _set_client_state(ClientState.POSTGAME_SCORE, time.monotonic(), logger)
     end_stats_dismissed = False
+    play_again_attempted = False
+    play_again_completed_at: Optional[float] = None
+    pre_end_honor_attempted = False
     while True:
         phase_attempt = _poll_lcu_phase_attempt(
             lcu, logger, "엔드 이후", max_age_sec=0.5
@@ -2197,12 +2272,68 @@ def process_postgame(
             logger.info("LCU postgame 종료 감지: phase=%s", phase)
             return
         if phase == PHASE_LOBBY:
+            if play_again_completed_at is not None:
+                elapsed = time.monotonic() - play_again_completed_at
+                logger.debug(
+                    "LCU 다음 게임 요청 후 Lobby 전이를 감지했습니다(%.1fs). "
+                    "대전찾기 중복 요청 없이 다음 phase를 기다립니다.",
+                    elapsed,
+                )
+                time.sleep(interval_sec)
+                continue
             logger.info("LCU postgame 이후 로비 감지. 대전 찾기 재시작을 시도합니다.")
+            start_attempt = _start_matchmaking_lcu_attempt(lcu, "엔드 이후", logger)
+            if start_attempt.completed:
+                return
+            if start_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                time.sleep(interval_sec)
+                continue
         if phase == PHASE_READY_CHECK:
             _accept_ready_check_via_lcu(lcu, "엔드 이후", logger)
             logger.info("LCU ReadyCheck 감지로 postgame 처리를 종료합니다.")
             return
         if phase == PHASE_NONE:
+            if play_again_completed_at is not None:
+                elapsed = time.monotonic() - play_again_completed_at
+                logger.debug(
+                    "LCU 다음 게임 요청 후 phase=None 유지 중입니다(%.1fs). "
+                    "로비/큐 전환을 기다립니다.",
+                    elapsed,
+                )
+                time.sleep(interval_sec)
+                continue
+            if end_stats_dismissed:
+                if not play_again_attempted:
+                    play_again_attempt = _play_again_lcu_attempt(
+                        lcu, "엔드 이후", logger
+                    )
+                    if play_again_attempt.completed:
+                        play_again_attempted = True
+                        play_again_completed_at = time.monotonic()
+                        logger.info(
+                            "LCU 다음 게임 처리 완료(outcome=%s). 로비/큐 상태를 계속 확인합니다.",
+                            play_again_attempt.outcome,
+                        )
+                        time.sleep(interval_sec)
+                        continue
+                    if play_again_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                        time.sleep(interval_sec)
+                        continue
+                    play_again_attempted = True
+
+                start_attempt = _start_matchmaking_lcu_attempt(
+                    lcu, "엔드 이후", logger, allow_none_phase=True
+                )
+                if start_attempt.completed:
+                    return
+                logger.debug(
+                    "LCU phase=None postgame 이후 대전찾기 요청 보류(outcome=%s,action=%s).",
+                    start_attempt.outcome,
+                    start_attempt.loop_action.value,
+                )
+                time.sleep(interval_sec)
+                continue
+
             modal_attempt = _dismiss_blocking_modal_lcu_attempt(
                 lcu, "엔드 이후", logger
             )
@@ -2223,13 +2354,46 @@ def process_postgame(
             time.sleep(interval_sec)
             continue
         if phase == PHASE_PRE_END_OF_GAME:
-            honor_attempt = _honor_vote_lcu_attempt(lcu, "엔드 이후", logger)
-            logger.info(
-                "LCU 명예 투표 화면 처리 종료(outcome=%s). 다음 자동화 사이클로 복귀합니다.",
-                honor_attempt.outcome,
+            if not pre_end_honor_attempted:
+                honor_attempt = _honor_vote_lcu_attempt(lcu, "엔드 이후", logger)
+                pre_end_honor_attempted = True
+                logger.info(
+                    "LCU 명예 투표 화면 처리 종료(outcome=%s). "
+                    "postgame 전환을 계속 확인합니다.",
+                    honor_attempt.outcome,
+                )
+            else:
+                logger.debug(
+                    "LCU PreEndOfGame 유지 중입니다. postgame 전환을 기다립니다."
+                )
+            modal_attempt = _dismiss_blocking_modal_lcu_attempt(
+                lcu, "엔드 이후", logger
             )
-            return
+            if modal_attempt.completed:
+                logger.info(
+                    "LCU PreEndOfGame 알림 처리 완료(outcome=%s). "
+                    "postgame 전환을 계속 확인합니다.",
+                    modal_attempt.outcome,
+                )
+            time.sleep(interval_sec)
+            continue
         if phase == PHASE_END_OF_GAME:
+            if not play_again_attempted:
+                play_again_attempt = _play_again_lcu_attempt(lcu, "엔드 이후", logger)
+                if play_again_attempt.completed:
+                    play_again_attempted = True
+                    play_again_completed_at = time.monotonic()
+                    logger.info(
+                        "LCU 다음 게임 처리 완료(outcome=%s). 로비/큐 상태를 계속 확인합니다.",
+                        play_again_attempt.outcome,
+                    )
+                    time.sleep(interval_sec)
+                    continue
+                if play_again_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                    time.sleep(interval_sec)
+                    continue
+                play_again_attempted = True
+
             if not end_stats_dismissed:
                 continue_attempt = _dismiss_end_of_game_stats_lcu_attempt(
                     lcu, "엔드 이후", logger
@@ -2488,16 +2652,34 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         reserves = pool_for_role[1:]
         _print_pick_pool_summary(role, primary, primary_ban, reserves)
 
+    rect: Optional[tuple[int, int, int, int]] = None
+    selected: Optional[Path] = None
+    width = DEFAULT_IMAGE_SET_WIDTH
+    height = DEFAULT_IMAGE_SET_HEIGHT
     while True:
         phase_attempt = _poll_lcu_phase_attempt(lcu, logger, "시작", max_age_sec=0.5)
+        phase = phase_attempt.phase
         if phase_attempt.phase == PHASE_READY_CHECK:
             _accept_ready_check_via_lcu(lcu, "시작", logger)
-        rect = _visible_rect_or_wait(logger, "시작", 1.0)
+
+        rect = _visible_rect_for_image_scan(logger, "시작")
         if rect is not None:
+            width, height = window_size_from_rect(rect)
+            selected = select_image_set(width)
             break
 
-    width, height = window_size_from_rect(rect)
-    selected = select_image_set(width)
+        if phase is not None and phase != PHASE_NONE:
+            selected = select_image_set(DEFAULT_IMAGE_SET_WIDTH)
+            if selected is not None:
+                logger.info(
+                    "LCU phase=%s 상태에서 LoL 창이 비가시입니다. "
+                    "기본 이미지 세트(%d)를 사용해 LCU 흐름을 계속합니다.",
+                    phase,
+                    DEFAULT_IMAGE_SET_WIDTH,
+                )
+                break
+
+        time.sleep(1.0)
 
     logger.info("클라이언트 크기: %dx%d", width, height)
     if not selected:
