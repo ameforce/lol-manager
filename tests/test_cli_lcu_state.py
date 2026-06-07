@@ -326,6 +326,119 @@ class _FakePostgameContinueToLobbyLcu:
         return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
 
 
+class _FakePostgameContinueToNoneLcu:
+    def __init__(
+        self,
+        start_result: LcuDecision,
+        *,
+        play_again_result: LcuDecision | None = None,
+    ) -> None:
+        self.start_result = start_result
+        self.play_again_result = play_again_result or LcuDecision(
+            LcuOutcome.UNSUPPORTED, reason="play again unavailable"
+        )
+        self.phase_calls = 0
+        self.dismiss_stats_calls = 0
+        self.play_again_calls = 0
+        self.start_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.phase_calls == 1:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_NONE)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return self.phase_calls <= 1
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
+
+    def play_again_decision(self) -> LcuDecision:
+        self.play_again_calls += 1
+        return self.play_again_result
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        return self.start_result
+
+
+class _FakePostgamePlayAgainToLobbyLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.play_again_calls = 0
+        self.dismiss_stats_calls = 0
+        self.start_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.phase_calls == 1:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+        if self.phase_calls in {2, 3}:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_LOBBY)
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_CHAMP_SELECT)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def play_again_decision(self) -> LcuDecision:
+        self.play_again_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="play again accepted")
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return self.phase_calls == 1
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+
+
+class _FakePostgameRejectedPlayAgainToLobbyLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.play_again_calls = 0
+        self.dismiss_stats_calls = 0
+        self.start_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.dismiss_stats_calls == 0:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_LOBBY)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def play_again_decision(self) -> LcuDecision:
+        self.play_again_calls += 1
+        return LcuDecision(LcuOutcome.ACTION_REJECTED, reason="play again rejected")
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return self.dismiss_stats_calls == 0
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+
+
 class _FakePostgameLobbyStartLcu:
     def __init__(self) -> None:
         self.phase_calls = 0
@@ -339,6 +452,83 @@ class _FakePostgameLobbyStartLcu:
 
     def consume_phase_transition(self, phase: str):
         return None
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+
+
+class _FakePostgamePreEndToLobbyLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.honor_calls = 0
+        self.dismiss_stats_calls = 0
+        self.start_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.phase_calls <= 2:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_PRE_END_OF_GAME)
+        if self.phase_calls == 3:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_LOBBY)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return self.phase_calls == 3
+
+    def honor_random_eligible_teammate_decision(self) -> LcuDecision:
+        self.honor_calls += 1
+        return LcuDecision(LcuOutcome.NO_CURRENT_ACTION)
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+
+
+class _FakePostgamePreEndRankedNotificationLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.honor_calls = 0
+        self.dismiss_calls = 0
+        self.dismiss_stats_calls = 0
+        self.start_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.phase_calls == 1:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_PRE_END_OF_GAME)
+        if self.phase_calls == 2:
+            return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME)
+        return LcuDecision(LcuOutcome.SUCCESS, value=PHASE_LOBBY)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def honor_random_eligible_teammate_decision(self) -> LcuDecision:
+        self.honor_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="honor submitted")
+
+    def dismiss_blocking_modal_decision(self) -> LcuDecision:
+        self.dismiss_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="ranked notification acknowledged")
+
+    def is_end_of_game_stats_available(self) -> bool:
+        return self.phase_calls == 2
+
+    def dismiss_end_of_game_stats_decision(self) -> LcuDecision:
+        self.dismiss_stats_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="dismissed")
 
     def start_matchmaking_decision(self) -> LcuDecision:
         self.start_calls += 1
@@ -472,11 +662,13 @@ class CliLcuStateTests(unittest.TestCase):
             mock.patch.object(
                 entrypoint,
                 "_visible_rect_or_wait",
-                side_effect=[
-                    (0, 0, 1280, 720),
-                    RuntimeError("cycle start ui fallback should not wait"),
-                ],
+                side_effect=RuntimeError("cycle start ui fallback should not wait"),
             ) as visible_wait,
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_for_image_scan",
+                return_value=(0, 0, 1280, 720),
+            ) as visible_scan,
             mock.patch.object(
                 entrypoint, "select_image_set", return_value=Path("images/1280")
             ),
@@ -491,9 +683,74 @@ class CliLcuStateTests(unittest.TestCase):
         ):
             entrypoint.cli_main([])
 
-        self.assertEqual(visible_wait.call_count, 1)
+        self.assertEqual(visible_scan.call_count, 1)
+        visible_wait.assert_not_called()
         modal_lcu.assert_not_called()
         process_postgame.assert_called_once()
+
+    def test_cli_main_minimized_ingame_reaches_monitor_without_startup_visible_wait(
+        self,
+    ) -> None:
+        monitor_message = "ingame monitor reached from minimized startup"
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(
+                    should_exit=mock.Mock(return_value=False)
+                ),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=object()),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_poll_lcu_phase_attempt",
+                side_effect=[
+                    entrypoint.PhaseLcuAttempt(
+                        PHASE_IN_PROGRESS, LcuLoopAction.ACT_LCU, "startup"
+                    ),
+                    entrypoint.PhaseLcuAttempt(
+                        PHASE_IN_PROGRESS, LcuLoopAction.ACT_LCU, "cycle"
+                    ),
+                ],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_or_wait",
+                side_effect=RuntimeError("startup visible wait should not block ingame"),
+            ) as visible_wait,
+            mock.patch.object(
+                entrypoint, "_visible_rect_for_image_scan", return_value=None
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ) as select_images,
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(entrypoint, "_dismiss_blocking_modal_lcu_attempt"),
+            mock.patch.object(
+                entrypoint,
+                "monitor_ingame_and_postgame",
+                side_effect=RuntimeError(monitor_message),
+            ) as monitor,
+            self.assertRaisesRegex(RuntimeError, monitor_message),
+        ):
+            entrypoint.cli_main([])
+
+        visible_wait.assert_not_called()
+        select_images.assert_called_once_with(1280)
+        monitor.assert_called_once()
 
     def test_cli_main_minimized_champ_select_reaches_lcu_pick_before_image(
         self,
@@ -1496,6 +1753,148 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(fake.start_calls, 1)
         search.assert_not_called()
 
+    def test_postgame_end_of_game_none_requeues_via_lcu_without_ui_wait(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameContinueToNoneLcu(
+            LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+        )
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=[None, RuntimeError("unexpected postgame none wait")],
+            ),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.start_calls, 1)
+        self.assertGreaterEqual(fake.phase_calls, 3)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_end_of_game_none_uses_play_again_before_lobby_search(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameContinueToNoneLcu(
+            LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted"),
+            play_again_result=LcuDecision(
+                LcuOutcome.SUCCESS, reason="play again accepted"
+            ),
+        )
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=[None, None, RuntimeError("stop after play again")],
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after play again"),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.dismiss_stats_calls, 0)
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.start_calls, 0)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_end_of_game_uses_play_again_before_dismiss_stats(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameContinueToNoneLcu(
+            LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted"),
+            play_again_result=LcuDecision(
+                LcuOutcome.SUCCESS, reason="play again accepted"
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_or_wait",
+                side_effect=RuntimeError("visible wait should not gate play again"),
+            ) as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=RuntimeError("stop after end play again"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after end play again"),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [Path("client_confirm-button.png")],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 0)
+        self.assertEqual(fake.start_calls, 0)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
     def test_postgame_lobby_phase_requeues_via_lcu_before_return(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePostgameLobbyStartLcu()
@@ -1534,6 +1933,83 @@ class CliLcuStateTests(unittest.TestCase):
 
         self.assertEqual(fake.start_calls, 1)
         search.assert_not_called()
+
+    def test_postgame_play_again_lobby_transition_waits_without_requeue(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgamePlayAgainToLobbyLcu()
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(entrypoint.time, "sleep", return_value=None),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 0)
+        self.assertEqual(fake.start_calls, 0)
+        self.assertGreaterEqual(fake.phase_calls, 3)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_rejected_play_again_falls_back_to_dismiss_stats_once(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgameRejectedPlayAgainToLobbyLcu()
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=[None, RuntimeError("play-again livelock")],
+            ),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        self.assertEqual(fake.start_calls, 1)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
 
     def test_postgame_request_failure_keeps_ui_only_end_button_scan(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
@@ -1631,50 +2107,27 @@ class CliLcuStateTests(unittest.TestCase):
         search.assert_not_called()
         detect.assert_not_called()
 
-    def test_postgame_none_phase_blocks_find_match_fallback(self) -> None:
-        class _FakePostgameSequenceLcu(_FakePhaseDecisionSequenceLcu):
-            def __init__(self) -> None:
-                super().__init__(
-                    [
-                        LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME),
-                        LcuDecision(LcuOutcome.SUCCESS, value=PHASE_NONE),
-                    ]
-                )
-                self.start_calls = 0
-
-            def is_end_of_game_stats_available(self) -> bool:
-                return False
-
-            def start_matchmaking_decision(self) -> LcuDecision:
-                self.start_calls += 1
-                return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
-
+    def test_postgame_none_after_end_stats_failed_lcu_start_waits_without_fallback(
+        self,
+    ) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        fake = _FakePostgameSequenceLcu()
+        fake = _FakePostgameContinueToNoneLcu(
+            LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+        )
 
         with (
-            mock.patch.object(
-                entrypoint, "find_league_window_rect", return_value=(0, 0, 1280, 720)
-            ),
-            mock.patch.object(entrypoint, "detect_champion_select", return_value=False),
-            mock.patch.object(
-                entrypoint,
-                "poll_match_state",
-                return_value=entrypoint.MatchPollAttempt(
-                    False,
-                    False,
-                    LcuLoopAction.ACT_LCU,
-                    "end_of_game",
-                    PHASE_END_OF_GAME,
-                ),
-            ),
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
             mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
             mock.patch.object(
                 entrypoint.time,
                 "sleep",
-                side_effect=RuntimeError("stop after one postgame iteration"),
+                side_effect=[None, RuntimeError("stop after postgame none start fail")],
             ),
-            self.assertRaisesRegex(RuntimeError, "stop after one postgame iteration"),
+            self.assertRaisesRegex(
+                RuntimeError, "stop after postgame none start fail"
+            ),
         ):
             entrypoint.process_postgame(
                 Path("end_next-button.png"),
@@ -1692,19 +2145,29 @@ class CliLcuStateTests(unittest.TestCase):
                 lcu=fake,
             )
 
-        self.assertEqual(fake.start_calls, 0)
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        self.assertEqual(fake.start_calls, 1)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
         search.assert_not_called()
+        poll.assert_not_called()
 
-    def test_postgame_pre_end_honor_attempt_returns_without_image_fallback(self) -> None:
+    def test_postgame_pre_end_honor_attempt_waits_without_image_fallback(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePostgameHonorLcu(
             LcuDecision(LcuOutcome.UNSUPPORTED, reason="no confirmed honor route")
         )
 
         with (
-            mock.patch.object(entrypoint, "ensure_active_rect") as ensure_rect,
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
             mock.patch.object(entrypoint, "search_and_act") as search,
             mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=RuntimeError("stop after preend wait"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after preend wait"),
         ):
             entrypoint.process_postgame(
                 Path("end_next-button.png"),
@@ -1723,7 +2186,87 @@ class CliLcuStateTests(unittest.TestCase):
             )
 
         self.assertEqual(fake.honor_calls, 1)
-        ensure_rect.assert_not_called()
+        visible_rect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_pre_end_stays_until_lobby_then_requeues_via_lcu(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgamePreEndToLobbyLcu()
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(
+                entrypoint,
+                "poll_match_state",
+                return_value=entrypoint.MatchPollAttempt(
+                    False, False, LcuLoopAction.ACT_LCU, "lobby", PHASE_LOBBY
+                ),
+            ) as poll,
+            mock.patch.object(entrypoint.time, "sleep", return_value=None) as sleep,
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.honor_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        self.assertEqual(fake.start_calls, 1)
+        self.assertGreaterEqual(fake.phase_calls, 4)
+        sleep.assert_called()
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_pre_end_dismisses_ranked_notification_via_lcu(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgamePreEndRankedNotificationLcu()
+
+        with (
+            mock.patch.object(entrypoint, "_visible_rect_or_wait") as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(entrypoint.time, "sleep", return_value=None) as sleep,
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.honor_calls, 1)
+        self.assertEqual(fake.dismiss_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 1)
+        self.assertEqual(fake.start_calls, 1)
+        sleep.assert_called()
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
         search.assert_not_called()
         poll.assert_not_called()
 

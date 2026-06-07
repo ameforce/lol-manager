@@ -469,6 +469,18 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_play_again_posts_to_lobby_play_again_endpoint(self) -> None:
+        session = _FakeSession([_FakeResponse(204)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.play_again_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[0]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith("/lol-lobby/v2/play-again")
+        )
+
     def test_honor_random_eligible_teammate_votes_random_ally_and_submits(
         self,
     ) -> None:
@@ -652,6 +664,87 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_blocking_modal_acknowledges_ranked_notification(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
+                ),
+                _FakeResponse(
+                    200,
+                    [
+                        {
+                            "displayType": "VIGNETTE",
+                            "id": 1,
+                            "notifyReason": "LEAGUE_PROMOTED",
+                            "queueType": "RANKED_SOLO_5x5",
+                        }
+                    ],
+                ),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[6]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[6]["url"]).endswith("/lol-ranked/v1/notifications")
+        )
+        self.assertEqual(session.calls[7]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[7]["url"]).endswith(
+                "/lol-ranked/v1/notifications/1/acknowledge"
+            )
+        )
+
+    def test_dismiss_blocking_modal_ignores_non_vignette_ranked_notification(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
+                ),
+                _FakeResponse(
+                    200,
+                    [
+                        {
+                            "displayType": "TOAST",
+                            "id": 1,
+                            "notifyReason": "LEAGUE_PROMOTED",
+                        }
+                    ],
+                ),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
+        self.assertEqual(len(session.calls), 7)
+        self.assertEqual(session.calls[6]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[6]["url"]).endswith("/lol-ranked/v1/notifications")
+        )
+
     def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
         self,
     ) -> None:
@@ -666,6 +759,7 @@ class LcuClientTests(unittest.TestCase):
                     200,
                     {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
                 ),
+                _FakeResponse(200, []),
             ]
         )
         client = LcuClient(lockfile=self.lockfile, session=session)
