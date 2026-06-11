@@ -370,11 +370,14 @@ class _FakePostgameContinueToNoneLcu:
 
 
 class _FakePostgamePlayAgainToLobbyLcu:
-    def __init__(self) -> None:
+    def __init__(self, start_result: Optional[LcuDecision] = None) -> None:
         self.phase_calls = 0
         self.play_again_calls = 0
         self.dismiss_stats_calls = 0
         self.start_calls = 0
+        self.start_result = start_result or LcuDecision(
+            LcuOutcome.SUCCESS, reason="matchmaking search accepted"
+        )
 
     def get_gameflow_phase_decision(
         self, *, max_age_sec: float = 0.25
@@ -402,7 +405,7 @@ class _FakePostgamePlayAgainToLobbyLcu:
 
     def start_matchmaking_decision(self) -> LcuDecision:
         self.start_calls += 1
-        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+        return self.start_result
 
 
 class _FakePostgameRejectedPlayAgainToLobbyLcu:
@@ -1934,7 +1937,7 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(fake.start_calls, 1)
         search.assert_not_called()
 
-    def test_postgame_play_again_lobby_transition_waits_without_requeue(self) -> None:
+    def test_postgame_play_again_lobby_transition_requeues_via_lcu(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePostgamePlayAgainToLobbyLcu()
 
@@ -1963,8 +1966,56 @@ class CliLcuStateTests(unittest.TestCase):
 
         self.assertEqual(fake.play_again_calls, 1)
         self.assertEqual(fake.dismiss_stats_calls, 0)
-        self.assertEqual(fake.start_calls, 0)
+        self.assertEqual(fake.start_calls, 1)
         self.assertGreaterEqual(fake.phase_calls, 3)
+        visible_rect.assert_not_called()
+        detect.assert_not_called()
+        search.assert_not_called()
+        poll.assert_not_called()
+
+    def test_postgame_play_again_lobby_start_failure_retries_lcu_only(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePostgamePlayAgainToLobbyLcu(
+            LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+        )
+
+        with (
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_or_wait",
+                side_effect=RuntimeError("ui fallback should not run"),
+            ) as visible_rect,
+            mock.patch.object(entrypoint, "detect_champion_select") as detect,
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "poll_match_state") as poll,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=[None, RuntimeError("stop after lcu retry")],
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after lcu retry"),
+        ):
+            entrypoint.process_postgame(
+                Path("end_next-button.png"),
+                Path("end_one-more-button.png"),
+                Path("lobby_find-match-button.png"),
+                Path("lobby_finding-match-text.png"),
+                Path("lobby_accept-button.png"),
+                [],
+                Path("prepick_search-text.png"),
+                [],
+                0.85,
+                0.2,
+                1.0,
+                logger,
+                lcu=fake,
+            )
+
+        self.assertEqual(fake.play_again_calls, 1)
+        self.assertEqual(fake.dismiss_stats_calls, 0)
+        self.assertEqual(fake.start_calls, 1)
         visible_rect.assert_not_called()
         detect.assert_not_called()
         search.assert_not_called()
