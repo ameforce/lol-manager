@@ -2274,17 +2274,25 @@ def process_postgame(
         if phase == PHASE_LOBBY:
             if play_again_completed_at is not None:
                 elapsed = time.monotonic() - play_again_completed_at
-                logger.debug(
+                logger.info(
                     "LCU 다음 게임 요청 후 Lobby 전이를 감지했습니다(%.1fs). "
-                    "대전찾기 중복 요청 없이 다음 phase를 기다립니다.",
+                    "대전 찾기 재시작을 시도합니다.",
                     elapsed,
                 )
-                time.sleep(interval_sec)
-                continue
-            logger.info("LCU postgame 이후 로비 감지. 대전 찾기 재시작을 시도합니다.")
+            else:
+                logger.info("LCU postgame 이후 로비 감지. 대전 찾기 재시작을 시도합니다.")
             start_attempt = _start_matchmaking_lcu_attempt(lcu, "엔드 이후", logger)
             if start_attempt.completed:
                 return
+            if play_again_completed_at is not None:
+                logger.debug(
+                    "LCU 다음 게임 요청 후 Lobby 대전찾기 요청 보류"
+                    "(outcome=%s,action=%s). LCU 재시도를 계속합니다.",
+                    start_attempt.outcome,
+                    start_attempt.loop_action.value,
+                )
+                time.sleep(interval_sec)
+                continue
             if start_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 time.sleep(interval_sec)
                 continue
