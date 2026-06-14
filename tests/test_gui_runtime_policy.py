@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 import unittest
@@ -11,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from lolmanager.gui.app_gui import (
     EXTERNAL_SYNC_MS,
+    LolManagerGui,
     external_sync_delay_ms,
     should_recover_cli_exit,
 )
@@ -65,6 +67,16 @@ class GuiRuntimePolicyTests(unittest.TestCase):
                 restart_limit=1,
             )
         )
+
+    def test_opgg_shutdown_hook_is_only_in_client_auto_exit_branch(self) -> None:
+        sync_source = inspect.getsource(LolManagerGui._sync_external_state)
+        stop_source = inspect.getsource(LolManagerGui.stop)
+        close_source = inspect.getsource(LolManagerGui._on_close)
+
+        self.assertIn("LoL client closed. Exiting.", sync_source)
+        self.assertIn("close_owned_opgg_for_current_session", sync_source)
+        self.assertNotIn("close_owned_opgg_for_current_session", stop_source)
+        self.assertNotIn("close_owned_opgg_for_current_session", close_source)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ ENV_ALLOW_UNTRUSTED_APP_PATHS = "LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS"
 LEAGUE_CLIENT_EXE_NAME = "LeagueClient.exe"
 RIOT_CLIENT_SERVICES_EXE_NAME = "RiotClientServices.exe"
 OPGG_EXE_NAME = "OP.GG.exe"
+OPGG_SHUTDOWN_TIMEOUT_SEC = 2.0
 
 LEAGUE_RIOT_LAUNCH_ARGS: tuple[str, ...] = (
     "--launch-product=league_of_legends",
@@ -256,29 +257,106 @@ def _format_cmd(cmd: Iterable[str]) -> str:
         return " ".join(str(x) for x in cmd)
 
 
-def start_cmd_once(
+@dataclass
+class OwnedExternalProcess:
+    exe_path: str
+    process: object
+
+
+@dataclass
+class ExternalAppsSession:
+    owned_opgg: Optional[OwnedExternalProcess] = None
+
+    def close_owned_opgg(
+        self,
+        *,
+        timeout_sec: float = OPGG_SHUTDOWN_TIMEOUT_SEC,
+        logger: Optional[logging.Logger] = None,
+    ) -> bool:
+        owned = self.owned_opgg
+        if owned is None:
+            return False
+
+        proc = owned.process
+        try:
+            poll = getattr(proc, "poll", None)
+            if callable(poll) and poll() is not None:
+                self.owned_opgg = None
+                return False
+
+            if logger:
+                logger.info("OP.GG 자동 종료 요청: %s", owned.exe_path)
+            getattr(proc, "terminate")()
+            getattr(proc, "wait")(timeout=float(timeout_sec))
+        except subprocess.TimeoutExpired:
+            if logger:
+                logger.warning(
+                    "OP.GG 종료 대기 시간 초과. 강제 종료합니다: %s",
+                    owned.exe_path,
+                )
+            try:
+                getattr(proc, "kill")()
+                getattr(proc, "wait")(timeout=float(timeout_sec))
+            except Exception as exc:
+                if logger:
+                    logger.warning("OP.GG 강제 종료 실패: %s", exc)
+        except Exception as exc:
+            if logger:
+                logger.warning("OP.GG 자동 종료 실패: %s", exc)
+        finally:
+            self.owned_opgg = None
+        return True
+
+
+_CURRENT_EXTERNAL_APPS_SESSION = ExternalAppsSession()
+
+
+def current_external_apps_session() -> ExternalAppsSession:
+    return _CURRENT_EXTERNAL_APPS_SESSION
+
+
+def set_current_external_apps_session(
+    session: ExternalAppsSession,
+) -> ExternalAppsSession:
+    global _CURRENT_EXTERNAL_APPS_SESSION
+    _CURRENT_EXTERNAL_APPS_SESSION = session
+    return session
+
+
+def close_owned_opgg_for_current_session(
+    *,
+    timeout_sec: float = OPGG_SHUTDOWN_TIMEOUT_SEC,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    return _CURRENT_EXTERNAL_APPS_SESSION.close_owned_opgg(
+        timeout_sec=timeout_sec,
+        logger=logger,
+    )
+
+
+def start_cmd_process_once(
     cmd: list[str],
     *,
     cwd: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
-) -> bool:
+) -> Optional[subprocess.Popen[bytes]]:
     if not cmd:
         if logger:
             logger.warning("프로세스 실행 스킵: 빈 커맨드")
-        return False
+        return None
 
     exe = Path(str(cmd[0]))
     if not exe.is_file():
         if logger:
             logger.warning("실행 파일이 아닙니다(스킵): %s", exe)
-        return False
+        return None
     if exe.suffix.casefold() != ".exe":
         if logger:
             logger.warning("Windows .exe 실행 파일이 아닙니다(스킵): %s", exe)
-        return False
+        return None
 
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd or exe.parent),
             stdin=subprocess.DEVNULL,
@@ -288,16 +366,33 @@ def start_cmd_once(
     except Exception as exc:
         if logger:
             logger.warning("프로세스 실행 실패: %s (%s)", _format_cmd(cmd), exc)
-        return False
+        return None
 
     if logger:
         logger.info("프로세스 실행 요청: %s", _format_cmd(cmd))
-    return True
+    return proc
+
+
+def start_cmd_once(
+    cmd: list[str],
+    *,
+    cwd: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    return start_cmd_process_once(cmd, cwd=cwd, logger=logger) is not None
+
+
+def start_exe_process_once(
+    exe_path: str,
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[subprocess.Popen[bytes]]:
+    p = Path(str(exe_path))
+    return start_cmd_process_once([str(p)], logger=logger)
 
 
 def start_exe_once(exe_path: str, *, logger: Optional[logging.Logger] = None) -> bool:
-    p = Path(str(exe_path))
-    return start_cmd_once([str(p)], logger=logger)
+    return start_exe_process_once(exe_path, logger=logger) is not None
 
 
 def ensure_external_apps_running_once(
@@ -305,7 +400,8 @@ def ensure_external_apps_running_once(
     league_exe: Optional[str] = None,
     opgg_exe: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
-) -> None:
+) -> ExternalAppsSession:
+    session = set_current_external_apps_session(ExternalAppsSession())
     league_exe = str(league_exe or league_client_exe_path())
     opgg_exe = str(opgg_exe or opgg_exe_path())
     valid_opgg_exe = _validate_app_exe_path(
@@ -349,13 +445,20 @@ def ensure_external_apps_running_once(
                 ENV_RIOT_CLIENT_SERVICES_EXE,
             )
     if valid_opgg_exe and not opgg_running:
-        ok = start_exe_once(valid_opgg_exe, logger=logger)
+        opgg_proc = start_exe_process_once(valid_opgg_exe, logger=logger)
+        ok = opgg_proc is not None
+        if opgg_proc is not None:
+            session.owned_opgg = OwnedExternalProcess(
+                exe_path=valid_opgg_exe,
+                process=opgg_proc,
+            )
         if not ok and logger:
             logger.warning(
                 "OP.GG 자동 실행 실패. 설치 경로가 다르면 환경 변수 %s에 "
                 "OP.GG.exe 경로를 지정하세요.",
                 ENV_OPGG_EXE,
             )
+    return session
 
 
 @dataclass
