@@ -1966,6 +1966,73 @@ def _authoritative_champ_select_exit_from_match_poll(
     return None
 
 
+def _wait_for_champ_select_after_match_accept(
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+    *,
+    interval_sec: float,
+    timeout_sec: float,
+) -> PhaseLcuAttempt:
+    if lcu is None:
+        return PhaseLcuAttempt(
+            None, LcuLoopAction.FALLBACK_IMAGE, "not_attempted"
+        )
+
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    wait_count = 0
+
+    while True:
+        phase_attempt = _poll_lcu_phase_attempt(
+            lcu, logger, f"{stage} ChampSelect 대기"
+        )
+        phase = phase_attempt.phase
+
+        if (
+            phase_attempt.loop_action == LcuLoopAction.ACT_LCU
+            and phase == PHASE_CHAMP_SELECT
+        ):
+            logger.info("LCU ChampSelect 진입 확인(%s).", stage)
+            return phase_attempt
+
+        if phase_attempt.loop_action == LcuLoopAction.ACT_LCU:
+            if phase == PHASE_READY_CHECK:
+                ready_attempt = _accept_ready_check_lcu_attempt(lcu, stage, logger)
+                if ready_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE:
+                    return PhaseLcuAttempt(
+                        phase, ready_attempt.loop_action, ready_attempt.outcome
+                    )
+            elif phase not in {PHASE_MATCHMAKING, PHASE_NONE}:
+                logger.info(
+                    "LCU 매칭 수락 후 ChampSelect 대신 phase=%s 감지(%s). "
+                    "외부 매칭 사이클로 복귀합니다.",
+                    phase,
+                    stage,
+                )
+                return phase_attempt
+        elif phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE:
+            return phase_attempt
+
+        wait_count += 1
+        now = time.monotonic()
+        if now >= deadline:
+            logger.warning(
+                "LCU 매칭 수락 후 ChampSelect 대기 시간 초과(%s,%.1fs).",
+                stage,
+                timeout_sec,
+            )
+            return PhaseLcuAttempt(None, LcuLoopAction.WAIT_AUTHORITATIVE, "timeout")
+
+        if wait_count == 1 or wait_count % 5 == 0:
+            logger.info(
+                "LCU 매칭 수락 후 ChampSelect 대기 중(%s,phase=%s,%d회).",
+                stage,
+                phase or "UNKNOWN",
+                wait_count,
+            )
+        time.sleep(min(max(0.0, interval_sec), max(0.0, deadline - now)))
+
+
 def detect_match_reset(
     rect,
     stage: str,
@@ -2884,6 +2951,39 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
         finding_early = False
+        restart_matching_cycle = False
+
+        def confirm_champ_select_after_lcu_accept(stage: str) -> Optional[bool]:
+            nonlocal restart_matching_cycle
+            champ_select_attempt = _wait_for_champ_select_after_match_accept(
+                lcu,
+                stage,
+                logger,
+                interval_sec=interval_sec,
+                timeout_sec=max(12.0, interval_sec * 20.0),
+            )
+            if (
+                champ_select_attempt.loop_action == LcuLoopAction.ACT_LCU
+                and champ_select_attempt.phase == PHASE_CHAMP_SELECT
+            ):
+                return True
+            if champ_select_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+                logger.info(
+                    "LCU 매칭 수락 후 ChampSelect 대기 보류(%s,outcome=%s). "
+                    "외부 매칭 사이클로 복귀합니다.",
+                    stage,
+                    champ_select_attempt.outcome,
+                )
+                restart_matching_cycle = True
+                return False
+            logger.info(
+                "LCU 매칭 수락 후 ChampSelect 미진입(%s,phase=%s,outcome=%s).",
+                stage,
+                champ_select_attempt.phase or "UNKNOWN",
+                champ_select_attempt.outcome,
+            )
+            restart_matching_cycle = True
+            return False
 
         logger.info("대전 찾기 버튼 탐색 시작.")
         while True:
@@ -2910,6 +3010,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 accepted_early = True
                 break
             if accepted:
+                if poll_attempt.loop_action == LcuLoopAction.ACT_LCU:
+                    champ_select_ready = confirm_champ_select_after_lcu_accept(
+                        "사이클 진입"
+                    )
+                    if champ_select_ready is None:
+                        continue
+                    if not champ_select_ready:
+                        break
                 logger.info("LCU 매칭 수락 처리 완료(사이클 진입). 수락 단계로 이동합니다.")
                 accepted_early = True
                 break
@@ -2949,6 +3057,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 time.sleep(interval_sec)
                 continue
             if accepted:
+                if poll_attempt.loop_action == LcuLoopAction.ACT_LCU:
+                    champ_select_ready = confirm_champ_select_after_lcu_accept(
+                        "사이클 진입"
+                    )
+                    if champ_select_ready is None:
+                        continue
+                    if not champ_select_ready:
+                        break
                 logger.info("이미 매칭 수락 감지(사이클 진입). 수락 단계로 이동합니다.")
                 accepted_early = True
                 break
@@ -2977,6 +3093,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             logger.debug("대전 찾기 버튼 미검출. %.1fs 후 재시도...", interval_sec)
             time.sleep(interval_sec)
 
+        if restart_matching_cycle:
+            continue
+
         if not accepted_early:
             last_finding_state = finding_early if finding_early else None
             while True:
@@ -3002,6 +3121,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     logger.info("LCU 챔피언 선택 진입 감지(매칭 단계).")
                     break
                 if accepted:
+                    if poll_attempt.loop_action == LcuLoopAction.ACT_LCU:
+                        champ_select_ready = confirm_champ_select_after_lcu_accept(
+                            "매칭 단계"
+                        )
+                        if champ_select_ready is None:
+                            continue
+                        if not champ_select_ready:
+                            break
                     break
                 if finding:
                     if finding != last_finding_state:
@@ -3031,6 +3158,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     logger.info("매칭 상태 텍스트: %s", "감지" if finding else "미감지")
                     last_finding_state = finding
                 if accepted:
+                    if poll_attempt.loop_action == LcuLoopAction.ACT_LCU:
+                        champ_select_ready = confirm_champ_select_after_lcu_accept(
+                            "매칭 단계"
+                        )
+                        if champ_select_ready is None:
+                            continue
+                        if not champ_select_ready:
+                            break
                     break
                 if finding:
                     continue
@@ -3067,6 +3202,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         "대전 찾기 버튼 미검출. %.1fs 후 재시도...", interval_sec
                     )
                 time.sleep(interval_sec)
+
+        if restart_matching_cycle:
+            continue
 
         _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
 
