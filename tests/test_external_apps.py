@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 from lolmanager.platform import external_apps
@@ -66,8 +67,8 @@ def test_ensure_external_apps_skips_untrusted_opgg_override(
     starts: list[str] = []
     monkeypatch.setattr(
         external_apps,
-        "start_exe_once",
-        lambda exe_path, *, logger=None: starts.append(str(exe_path)) or True,
+        "start_exe_process_once",
+        lambda exe_path, *, logger=None: starts.append(str(exe_path)) or _FakePopen(),
     )
     caplog.set_level(logging.WARNING)
 
@@ -100,8 +101,8 @@ def test_ensure_external_apps_allows_explicit_untrusted_opgg_override(
     starts: list[str] = []
     monkeypatch.setattr(
         external_apps,
-        "start_exe_once",
-        lambda exe_path, *, logger=None: starts.append(str(exe_path)) or True,
+        "start_exe_process_once",
+        lambda exe_path, *, logger=None: starts.append(str(exe_path)) or _FakePopen(),
     )
 
     external_apps.ensure_external_apps_running_once(league_exe=str(league))
@@ -122,3 +123,124 @@ def test_start_cmd_once_rejects_directory_targets(
 
     assert external_apps.start_cmd_once([str(tmp_path)]) is False
     assert calls == []
+
+
+class _FakePopen:
+    def __init__(self, *, stays_alive_after_terminate: bool = False) -> None:
+        self.stays_alive_after_terminate = stays_alive_after_terminate
+        self.alive = True
+        self.calls: list[str] = []
+
+    def poll(self) -> int | None:
+        return None if self.alive else 0
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+        if not self.stays_alive_after_terminate:
+            self.alive = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append(f"wait:{timeout}")
+        if self.alive:
+            raise subprocess.TimeoutExpired("OP.GG.exe", timeout)
+        return 0
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.alive = False
+
+
+def test_ensure_external_apps_records_owned_opgg_only_when_this_run_starts_it(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    local_app_data = tmp_path / "LocalAppData"
+    opgg = _touch_exe(local_app_data / "Programs" / "OP.GG" / "OP.GG.exe")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): str(path) == str(league) for path in paths},
+    )
+    proc = _FakePopen()
+    monkeypatch.setattr(
+        external_apps,
+        "start_exe_process_once",
+        lambda exe_path, *, logger=None: proc,
+    )
+
+    session = external_apps.ensure_external_apps_running_once(
+        league_exe=str(league),
+        opgg_exe=str(opgg),
+    )
+
+    assert session.owned_opgg is not None
+    assert session.owned_opgg.process is proc
+    assert external_apps.current_external_apps_session() is session
+
+
+def test_ensure_external_apps_resets_session_and_does_not_own_preexisting_opgg(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    local_app_data = tmp_path / "LocalAppData"
+    opgg = _touch_exe(local_app_data / "Programs" / "OP.GG" / "OP.GG.exe")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    previous_proc = _FakePopen()
+    external_apps.set_current_external_apps_session(
+        external_apps.ExternalAppsSession(
+            owned_opgg=external_apps.OwnedExternalProcess(
+                exe_path=str(opgg),
+                process=previous_proc,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): True for path in paths},
+    )
+    starts: list[str] = []
+    monkeypatch.setattr(
+        external_apps,
+        "start_exe_process_once",
+        lambda exe_path, *, logger=None: starts.append(str(exe_path)),
+    )
+
+    session = external_apps.ensure_external_apps_running_once(
+        league_exe=str(league),
+        opgg_exe=str(opgg),
+    )
+
+    assert session.owned_opgg is None
+    assert external_apps.current_external_apps_session() is session
+    assert starts == []
+
+
+def test_close_owned_opgg_terminates_then_kills_after_timeout() -> None:
+    proc = _FakePopen(stays_alive_after_terminate=True)
+    session = external_apps.ExternalAppsSession(
+        owned_opgg=external_apps.OwnedExternalProcess(
+            exe_path=r"C:\Users\me\AppData\Local\Programs\OP.GG\OP.GG.exe",
+            process=proc,
+        )
+    )
+
+    assert session.close_owned_opgg(timeout_sec=0.25) is True
+
+    assert proc.calls == ["terminate", "wait:0.25", "kill", "wait:0.25"]
+    assert session.owned_opgg is None
+
+
+def test_close_owned_opgg_noops_without_owned_process() -> None:
+    session = external_apps.ExternalAppsSession()
+
+    assert session.close_owned_opgg(timeout_sec=0.25) is False

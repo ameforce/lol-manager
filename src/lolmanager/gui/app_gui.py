@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import ctypes
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import queue
@@ -37,7 +38,11 @@ from lolmanager.platform.paths import (
     user_data_dir,
 )
 from lolmanager.platform.runtime import is_frozen
-from lolmanager.platform.external_apps import LeagueClientExitGuard, league_client_exe_path
+from lolmanager.platform.external_apps import (
+    LeagueClientExitGuard,
+    close_owned_opgg_for_current_session,
+    league_client_exe_path,
+)
 from lolmanager.platform.resolution_detector import (
     find_league_window_rect,
     is_game_foreground,
@@ -103,6 +108,7 @@ def should_recover_cli_exit(
     if not league_running:
         return False
     return int(restart_count) < max(0, int(restart_limit))
+
 
 _USER32 = ctypes.WinDLL("user32", use_last_error=True)
 _MONITOR_DEFAULTTONEAREST = 2
@@ -251,7 +257,8 @@ def _top_hwnd(hwnd: int) -> int:
         return 0
     try:
         top = int(
-            _USER32.GetAncestor(ctypes.c_void_p(int(hwnd)), ctypes.c_uint(_GA_ROOT)) or 0
+            _USER32.GetAncestor(ctypes.c_void_p(int(hwnd)), ctypes.c_uint(_GA_ROOT))
+            or 0
         )
     except Exception:
         top = 0
@@ -1867,7 +1874,9 @@ class LolManagerGui:
             restart_count=self._unexpected_cli_restart_count,
         ):
             self._unexpected_cli_restart_count += 1
-            self.running_var.set("Restarting" if code is None else f"Restarting({code})")
+            self.running_var.set(
+                "Restarting" if code is None else f"Restarting({code})"
+            )
             self.btn_start.configure(state=tk.DISABLED)
             self._append_log(
                 "[GUI] Automation process ended unexpectedly "
@@ -2028,7 +2037,11 @@ class LolManagerGui:
                 try:
                     cpu = 0.0 if is_new else float(p.cpu_percent(interval=None) or 0.0)
                     rss = int(getattr(p.memory_info(), "rss", 0) or 0)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
                     self._proc_usage_procs.pop(pid, None)
                     continue
                 except Exception:
@@ -2041,7 +2054,9 @@ class LolManagerGui:
             )
         finally:
             try:
-                after_id = str(self.root.after(PROC_USAGE_POLL_MS, self._poll_proc_usage))
+                after_id = str(
+                    self.root.after(PROC_USAGE_POLL_MS, self._poll_proc_usage)
+                )
             except Exception:
                 after_id = None
             self._proc_usage_after_id = after_id
@@ -2121,7 +2136,9 @@ class LolManagerGui:
                 state["minimized"] = bool(rect is not None and is_rect_minimized(rect))
 
                 try:
-                    state["league_running"] = bool(self._league_exit_guard.poll_is_running())
+                    state["league_running"] = bool(
+                        self._league_exit_guard.poll_is_running()
+                    )
                 except Exception:
                     state["league_running"] = False
 
@@ -2293,6 +2310,9 @@ class LolManagerGui:
                         now - self._client_closed_at
                     ) >= AUTO_EXIT_AFTER_CLIENT_CLOSED_SEC:
                         self._append_log("[GUI] LoL client closed. Exiting.\n")
+                        close_owned_opgg_for_current_session(
+                            logger=logging.getLogger("lolmanager")
+                        )
                         try:
                             if self.proc and self.proc.poll() is None:
                                 self.proc.terminate()
@@ -2304,7 +2324,9 @@ class LolManagerGui:
             self._apply_lol_topmost(want_topmost)
         if prev_topmost and not want_topmost:
             self._restore_active_window_after_topmost_release()
-        self.root.after(external_sync_delay_ms(in_game=in_game), self._sync_external_state)
+        self.root.after(
+            external_sync_delay_ms(in_game=in_game), self._sync_external_state
+        )
 
     def _refresh_match_stats(self, *, force: bool) -> None:
         p = self._match_stats_path
@@ -2477,7 +2499,11 @@ class LolManagerGui:
                     h = max(1, int(wrect[3] - wrect[1]))
                     self._outer_wh = (w, h)
                 else:
-                    w = int(self.root.winfo_width()) or int(self.root.winfo_reqwidth()) or 1
+                    w = (
+                        int(self.root.winfo_width())
+                        or int(self.root.winfo_reqwidth())
+                        or 1
+                    )
                     h = (
                         int(self.root.winfo_height())
                         or int(self.root.winfo_reqheight())
