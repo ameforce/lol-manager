@@ -25,6 +25,7 @@
 - Choose the hotfix version from the requested version or the current package version. If the matching `vX.Y.Z` tag already exists, increment to the next patch version.
 - Create or use `hotfix/vX.Y.Z`, update `pyproject.toml` and the editable `lolmanager` entry in `uv.lock` to `X.Y.Z`, then run `uv lock --check`, `uv run --group dev python -m pytest -q`, and `uv build` on the hotfix branch.
 - Commit the hotfix with a normal `<type>: <subject>` message.
+- For normal `<type>: <subject>` commits, write the subject in Korean unless there is a necessary reason to use another language. Keep prescribed merge and tag messages exactly as documented.
 - Finish the hotfix with Git-flow style merge commits:
   - Merge the hotfix into `main` with `git merge --no-ff hotfix/vX.Y.Z -m "Merge branch 'hotfix/vX.Y.Z'"`.
   - Create an annotated tag on the main merge commit with `git tag -a vX.Y.Z -m "Version X.Y.Z"`.
