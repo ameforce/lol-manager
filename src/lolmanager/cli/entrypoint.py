@@ -3656,6 +3656,77 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 if lcu_pick_attempt.completed:
                     _set_my_pick_turn(False, time.monotonic(), logger)
                     break
+                if lcu_pick_attempt.outcome == "action_rejected":
+                    logger.info(
+                        "LCU 픽 준비가 거절되었습니다. 현재 챔피언을 사용할 수 없는 것으로 판단하고 예비 픽을 시도합니다: %s",
+                        champion_name,
+                    )
+                    switched = False
+                    reserve_wait_authoritative = False
+                    reserve_fallback_image = False
+                    for next_idx in range(pick_index + 1, len(pick_pool)):
+                        next_champ, next_ban = pick_pool[next_idx]
+                        logger.info(
+                            "예비 챔피언 전환 시도: #%d %s", next_idx + 1, next_champ
+                        )
+                        reserve_lcu_attempt = _champ_select_action_attempt_via_lcu(
+                            lcu,
+                            next_champ,
+                            action_type="pick",
+                            complete=True,
+                            stage="예비 픽 준비",
+                            logger=logger,
+                        )
+                        if reserve_lcu_attempt.completed:
+                            pick_index = next_idx
+                            champion_name = next_champ
+                            ban_name = resolve_ban_name_for_runtime(
+                                counter_cache_path,
+                                role=role or "",
+                                champion_name=champion_name,
+                                configured_ban=next_ban,
+                                logger=logger,
+                            )
+                            logger.info("LCU 예비 픽 준비 완료: %s", champion_name)
+                            _set_my_pick_turn(False, time.monotonic(), logger)
+                            switched = True
+                            break
+                        if reserve_lcu_attempt.outcome == "action_rejected":
+                            logger.info(
+                                "예비 챔피언도 LCU에서 거절되었습니다. 다음 후보로 진행: %s",
+                                next_champ,
+                            )
+                            continue
+                        if (
+                            reserve_lcu_attempt.loop_action
+                            == LcuLoopAction.WAIT_AUTHORITATIVE
+                        ):
+                            logger.debug(
+                                "LCU 예비 픽 대기(outcome=%s). 같은 루프에서 예비 이미지 전환을 스킵합니다.",
+                                reserve_lcu_attempt.outcome,
+                            )
+                            reserve_wait_authoritative = True
+                            break
+
+                        reserve_fallback_image = True
+                        logger.debug(
+                            "LCU 예비 픽 요청 실패(outcome=%s). 기존 이미지 fallback 흐름으로 진행합니다.",
+                            reserve_lcu_attempt.outcome,
+                        )
+                        break
+
+                    if switched:
+                        break
+                    if reserve_wait_authoritative:
+                        time.sleep(interval_sec)
+                        continue
+                    if not reserve_fallback_image:
+                        logger.warning(
+                            "사용 가능한 예비 챔피언을 찾지 못했습니다. 수동 픽이 필요합니다."
+                        )
+                        time.sleep(interval_sec)
+                        continue
+
                 if lcu_pick_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     now = time.monotonic()
                     action_type = _apply_lcu_champ_select_action_state(

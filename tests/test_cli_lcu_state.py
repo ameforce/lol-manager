@@ -11,11 +11,6 @@ from unittest import mock
 
 from requests import Timeout
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
 from lolmanager.cli import entrypoint
 from lolmanager.core.lcu_client import (
     LcuDecision,
@@ -34,6 +29,8 @@ from lolmanager.core.lcu_client import (
     LcuOutcome,
 )
 from lolmanager.core.opgg_counter_recommendations import AUTO_BAN_VALUE
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FakeLcu:
@@ -592,6 +589,20 @@ class _FakeCliChampionConfig:
         return []
 
 
+class _FakeReserveCliChampionConfig:
+    path = Path("champions.json")
+
+    def get(self, role: str):
+        if role == "mid":
+            return {"champion": "카타리나", "ban": ""}
+        return {}
+
+    def get_reserve_picks(self, role: str):
+        if role == "mid":
+            return [("오리아나", ""), ("트위스티드 페이트", "")]
+        return []
+
+
 class _FakeCliChampSelectLcu:
     def __init__(self) -> None:
         self.phase_calls = 0
@@ -626,6 +637,52 @@ class _FakeCliChampSelectLcu:
         if len(self.select_calls) == 1:
             return LcuDecision(LcuOutcome.SUCCESS, reason="prepick accepted")
         return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+
+
+class _FakeReserveFallbackLcu:
+    def __init__(self, complete_results: list[LcuDecision]) -> None:
+        self.complete_results = list(complete_results)
+        self.phase_calls = 0
+        self.position_calls = 0
+        self.select_calls: list[dict[str, object]] = []
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        phases = [PHASE_LOBBY, PHASE_CHAMP_SELECT, PHASE_CHAMP_SELECT]
+        phase = phases[min(self.phase_calls, len(phases) - 1)]
+        self.phase_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def get_local_player_position(self) -> LcuDecision:
+        self.position_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value="mid")
+
+    def get_local_action_state(
+        self, action_type: str, *, require_in_progress: bool = False
+    ) -> LcuDecision:
+        return LcuDecision(LcuOutcome.NO_CURRENT_ACTION)
+
+    def select_champ_select_champion_decision(
+        self, champion_name: object, *, action_type: str, complete: bool = False
+    ) -> LcuDecision:
+        self.select_calls.append(
+            {
+                "champion_name": champion_name,
+                "action_type": action_type,
+                "complete": complete,
+            }
+        )
+        if not complete:
+            return LcuDecision(LcuOutcome.SUCCESS, reason="prepick accepted")
+        complete_call_count = sum(
+            1 for call in self.select_calls if bool(call["complete"])
+        )
+        result_index = min(complete_call_count - 1, len(self.complete_results) - 1)
+        return self.complete_results[result_index]
 
 
 class _FakeCliReadyCheckRematchLcu(_FakeCliChampSelectLcu):
@@ -682,6 +739,68 @@ class _FakeCliChampSelectDodgeRematchLcu(_FakeCliReadyCheckRematchLcu):
 
 
 class CliLcuStateTests(unittest.TestCase):
+    def _run_cli_champ_select_until_runtime_sleep(
+        self, fake_lcu: _FakeReserveFallbackLcu
+    ) -> tuple[mock.Mock, mock.Mock, mock.Mock]:
+        minimized_rect = (-32000, -32000, -31900, -31900)
+        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+
+        def stop_at_next_sleep(_seconds: float) -> None:
+            raise RuntimeError("stop after champ-select sleep")
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(
+                    should_exit=mock.Mock(return_value=False)
+                ),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeReserveCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                side_effect=[(0, 0, 1280, 720), minimized_rect, minimized_rect],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(entrypoint, "resolve_ban_name_for_runtime", return_value=""),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=stop_at_next_sleep,
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            entrypoint.cli_main([])
+
+        return search, click_relative, click_screen
+
     def test_cli_main_rejects_unknown_option_before_runtime_setup(self) -> None:
         fake_gui = types.ModuleType("lolmanager.gui.config_gui")
         fake_gui.run_config_gui = mock.Mock()
@@ -891,6 +1010,73 @@ class CliLcuStateTests(unittest.TestCase):
             [
                 {"champion_name": "아리", "action_type": "pick", "complete": False},
                 {"champion_name": "아리", "action_type": "pick", "complete": True},
+            ],
+        )
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
+
+    def test_cli_main_reserve_pick_when_primary_lcu_action_rejected(
+        self,
+    ) -> None:
+        fake_lcu = _FakeReserveFallbackLcu(
+            [
+                LcuDecision(
+                    LcuOutcome.ACTION_REJECTED,
+                    reason="primary champion unavailable",
+                ),
+                LcuDecision(LcuOutcome.SUCCESS, reason="reserve accepted"),
+            ]
+        )
+
+        search, click_relative, click_screen = (
+            self._run_cli_champ_select_until_runtime_sleep(fake_lcu)
+        )
+
+        self.assertEqual(
+            fake_lcu.select_calls[:3],
+            [
+                {"champion_name": "카타리나", "action_type": "pick", "complete": False},
+                {"champion_name": "카타리나", "action_type": "pick", "complete": True},
+                {"champion_name": "오리아나", "action_type": "pick", "complete": True},
+            ],
+        )
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
+
+    def test_cli_main_reserve_pick_tries_second_reserve_when_first_reserve_rejected(
+        self,
+    ) -> None:
+        fake_lcu = _FakeReserveFallbackLcu(
+            [
+                LcuDecision(
+                    LcuOutcome.ACTION_REJECTED,
+                    reason="primary champion unavailable",
+                ),
+                LcuDecision(
+                    LcuOutcome.ACTION_REJECTED,
+                    reason="first reserve unavailable",
+                ),
+                LcuDecision(LcuOutcome.SUCCESS, reason="second reserve accepted"),
+            ]
+        )
+
+        search, click_relative, click_screen = (
+            self._run_cli_champ_select_until_runtime_sleep(fake_lcu)
+        )
+
+        self.assertEqual(
+            fake_lcu.select_calls[:4],
+            [
+                {"champion_name": "카타리나", "action_type": "pick", "complete": False},
+                {"champion_name": "카타리나", "action_type": "pick", "complete": True},
+                {"champion_name": "오리아나", "action_type": "pick", "complete": True},
+                {
+                    "champion_name": "트위스티드 페이트",
+                    "action_type": "pick",
+                    "complete": True,
+                },
             ],
         )
         search.assert_not_called()
