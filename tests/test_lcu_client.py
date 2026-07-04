@@ -543,11 +543,98 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
 
-    def test_dismiss_blocking_modal_deletes_simple_dialog_messages(
+    def test_dismiss_blocking_modal_declines_received_pick_order_swap(
         self,
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, [{"id": 42, "state": "RECEIVED"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[0]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertEqual(session.calls[1]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps/42/decline"
+            )
+        )
+
+    def test_dismiss_blocking_modal_ignores_pick_order_swap_without_received_state(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    [
+                        {"id": 42, "state": "SENT"},
+                        {"id": 43, "state": "AVAILABLE"},
+                    ],
+                ),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
+                ),
+                _FakeResponse(200, []),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
+        self.assertEqual(len(session.calls), 8)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertFalse(
+            any(
+                "/pick-order-swaps/42/decline" in str(call["url"])
+                for call in session.calls
+            )
+        )
+
+    def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_response(
+        self,
+    ) -> None:
+        session = _FakeSession([_FakeResponse(200, {"id": 42, "state": "RECEIVED"})])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+
+    def test_dismiss_blocking_modal_continues_when_pick_order_swap_unsupported(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(404, {"message": "not found"}),
                 _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
                 _FakeResponse(204),
             ]
@@ -560,12 +647,41 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(session.calls[0]["method"], "GET")
         self.assertTrue(
             str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertEqual(session.calls[1]["method"], "GET")
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
                 "/lol-simple-dialog-messages/v1/messages"
             )
         )
-        self.assertEqual(session.calls[1]["method"], "DELETE")
+        self.assertEqual(session.calls[2]["method"], "DELETE")
+
+    def test_dismiss_blocking_modal_deletes_simple_dialog_messages(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[1]["method"], "GET")
         self.assertTrue(
             str(session.calls[1]["url"]).endswith(
+                "/lol-simple-dialog-messages/v1/messages"
+            )
+        )
+        self.assertEqual(session.calls[2]["method"], "DELETE")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
                 "/lol-simple-dialog-messages/v1/messages/dialog-a"
             )
         )
@@ -575,6 +691,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(
                     200,
@@ -594,13 +711,13 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[1]["method"], "GET")
+        self.assertEqual(session.calls[2]["method"], "GET")
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-remedy/v1/remedy-notifications")
+            str(session.calls[2]["url"]).endswith("/lol-remedy/v1/remedy-notifications")
         )
-        self.assertEqual(session.calls[2]["method"], "PUT")
+        self.assertEqual(session.calls[3]["method"], "PUT")
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
+            str(session.calls[3]["url"]).endswith(
                 "/lol-remedy/v1/ack-remedy-notification/remedy-a"
             )
         )
@@ -612,6 +729,7 @@ class LcuClientTests(unittest.TestCase):
             [
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
+                _FakeResponse(200, []),
                 _FakeResponse(200, [{"key": "feedback-a", "title": "신고 피드백"}]),
                 _FakeResponse(204),
             ]
@@ -621,15 +739,15 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[2]["method"], "GET")
+        self.assertEqual(session.calls[3]["method"], "GET")
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
+            str(session.calls[3]["url"]).endswith(
                 "/lol-player-behavior/v2/reporter-feedback"
             )
         )
-        self.assertEqual(session.calls[3]["method"], "POST")
+        self.assertEqual(session.calls[4]["method"], "POST")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
+            str(session.calls[4]["url"]).endswith(
                 "/lol-player-behavior/v2/reporter-feedback/feedback-a"
             )
         )
@@ -639,6 +757,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(404, {"message": "not found"}),
@@ -651,15 +770,15 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[3]["method"], "GET")
+        self.assertEqual(session.calls[4]["method"], "GET")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
+            str(session.calls[4]["url"]).endswith(
                 "/lol-player-behavior/v1/reporter-feedback"
             )
         )
-        self.assertEqual(session.calls[4]["method"], "DELETE")
+        self.assertEqual(session.calls[5]["method"], "DELETE")
         self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
+            str(session.calls[5]["url"]).endswith(
                 "/lol-player-behavior/v1/reporter-feedback/7"
             )
         )
@@ -669,6 +788,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -697,13 +817,13 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[6]["method"], "GET")
+        self.assertEqual(session.calls[7]["method"], "GET")
         self.assertTrue(
-            str(session.calls[6]["url"]).endswith("/lol-ranked/v1/notifications")
+            str(session.calls[7]["url"]).endswith("/lol-ranked/v1/notifications")
         )
-        self.assertEqual(session.calls[7]["method"], "POST")
+        self.assertEqual(session.calls[8]["method"], "POST")
         self.assertTrue(
-            str(session.calls[7]["url"]).endswith(
+            str(session.calls[8]["url"]).endswith(
                 "/lol-ranked/v1/notifications/1/acknowledge"
             )
         )
@@ -713,6 +833,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -739,10 +860,10 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
-        self.assertEqual(len(session.calls), 7)
-        self.assertEqual(session.calls[6]["method"], "GET")
+        self.assertEqual(len(session.calls), 8)
+        self.assertEqual(session.calls[7]["method"], "GET")
         self.assertTrue(
-            str(session.calls[6]["url"]).endswith("/lol-ranked/v1/notifications")
+            str(session.calls[7]["url"]).endswith("/lol-ranked/v1/notifications")
         )
 
     def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
@@ -750,6 +871,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
+                _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),

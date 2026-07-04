@@ -2849,6 +2849,26 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(result.outcome, "unsupported")
         self.assertEqual(fake.dismiss_calls, 1)
 
+    def test_blocking_modal_attempt_allows_image_fallback_when_lcu_response_malformed(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeBlockingModalLcu(
+            LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="pick-order swap response is not a list",
+            )
+        )
+
+        result = entrypoint._dismiss_blocking_modal_lcu_attempt(
+            fake, "픽 팝업", logger
+        )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.loop_action, LcuLoopAction.FALLBACK_IMAGE)
+        self.assertEqual(result.outcome, "malformed_response")
+        self.assertEqual(fake.dismiss_calls, 1)
+
     def test_blocking_modal_attempt_allows_image_fallback_without_lcu_route(
         self,
     ) -> None:

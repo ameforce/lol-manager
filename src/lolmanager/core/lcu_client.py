@@ -65,6 +65,9 @@ PLAYER_BEHAVIOR_V1_REPORTER_FEEDBACK_ENDPOINT = (
 PLAYER_NOTIFICATIONS_ENDPOINT = "/player-notifications/v1/notifications"
 PLAYER_MESSAGING_NOTIFICATION_ENDPOINT = "/lol-player-messaging/v1/notification"
 RANKED_NOTIFICATIONS_ENDPOINT = "/lol-ranked/v1/notifications"
+CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT = (
+    "/lol-champ-select/v1/session/pick-order-swaps"
+)
 RIOTCLIENT_UX_ALLOW_FOREGROUND_ENDPOINT = "/riotclient/ux-allow-foreground"
 RIOTCLIENT_UX_SHOW_ENDPOINT = "/riotclient/ux-show"
 HONOR_VOTE_TYPE = "HEART"
@@ -187,6 +190,17 @@ def _non_empty_identifier(item: object, *keys: str) -> Optional[str]:
         if text and text != "0":
             return text
     return None
+
+
+def _received_pick_order_swap_id(item: object) -> Optional[int]:
+    if not isinstance(item, dict):
+        return None
+    if _normalize_lookup_key(item.get("state")) != "received":
+        return None
+    swap_id = _parse_optional_int(item.get("id"))
+    if swap_id is None or swap_id <= 0:
+        return None
+    return swap_id
 
 
 def _connection_outcome_for_error(error: Optional[str]) -> "LcuOutcome":
@@ -787,6 +801,7 @@ class LcuClient:
 
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
         handlers = (
+            self._decline_received_pick_order_swap_decision,
             self._dismiss_simple_dialog_messages_decision,
             self._dismiss_remedy_notifications_decision,
             self._dismiss_player_behavior_v2_reporter_feedback_decision,
@@ -819,6 +834,57 @@ class LcuClient:
 
     def dismiss_blocking_modal(self) -> bool:
         return self.dismiss_blocking_modal_decision().ok
+
+    def _decline_received_pick_order_swap_decision(self) -> LcuDecision:
+        result = self.request("GET", CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="pick-order swap endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="pick-order swap request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="pick-order swap response is not a list",
+                status_code=result.status_code,
+            )
+
+        for swap in result.data:
+            swap_id = _received_pick_order_swap_id(swap)
+            if swap_id is None:
+                continue
+            decline = self.request(
+                "POST",
+                f"{CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT}/{swap_id}/decline",
+            )
+            return _write_or_unsupported_decision(
+                decline,
+                success_reason="pick-order swap declined",
+                rejected_reason="pick-order swap decline rejected",
+                unsupported_reason="pick-order swap decline endpoint is not available",
+            )
+
+        return LcuDecision(
+            LcuOutcome.NO_CURRENT_ACTION,
+            reason="no received pick-order swap request",
+            status_code=result.status_code,
+        )
 
     def _dismiss_simple_dialog_messages_decision(self) -> LcuDecision:
         result = self.request("GET", SIMPLE_DIALOG_MESSAGES_ENDPOINT)
