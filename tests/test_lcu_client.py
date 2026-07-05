@@ -662,7 +662,6 @@ class LcuClientTests(unittest.TestCase):
                 _FakeResponse(404, {"message": "no active delegate"}),
                 _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
                 _FakeResponse(204),
-                _FakeResponse(204),
             ]
         )
         client = LcuClient(lockfile=self.lockfile, session=session)
@@ -670,7 +669,7 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(len(session.calls), 5)
+        self.assertEqual(len(session.calls), 4)
         self.assertTrue(
             str(session.calls[0]["url"]).endswith(
                 "/lol-champ-select/v1/session/pick-order-swaps"
@@ -689,13 +688,14 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(session.calls[3]["method"], "POST")
         self.assertTrue(
             str(session.calls[3]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/24/decline"
+                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
             )
         )
-        self.assertEqual(session.calls[4]["method"], "POST")
-        self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
+        self.assertFalse(
+            any(
+                "/lol-champ-select/v1/session/pick-order-swaps/"
+                in str(call["url"])
+                for call in session.calls
             )
         )
 

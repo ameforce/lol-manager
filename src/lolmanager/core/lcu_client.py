@@ -1005,18 +1005,6 @@ class LcuClient:
                 reason="no received ongoing pick-order swap request",
                 status_code=result.status_code,
             )
-        decline = self.request(
-            "POST",
-            f"{CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT}/{swap_id}/decline",
-        )
-        decline_decision = _write_or_unsupported_decision(
-            decline,
-            success_reason="pick-order swap declined",
-            rejected_reason="pick-order swap decline rejected",
-            unsupported_reason="pick-order swap decline endpoint is not available",
-        )
-        if not decline_decision.ok:
-            return decline_decision
         clear = self.request(
             "POST",
             f"{CHAMP_SELECT_ONGOING_PICK_ORDER_SWAP_ENDPOINT}/{swap_id}/clear",
