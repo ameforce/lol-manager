@@ -771,7 +771,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
-                _no_ongoing_pick_order_swap_response(),
+                _FakeResponse(204),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(404, {"message": "not found"}),
