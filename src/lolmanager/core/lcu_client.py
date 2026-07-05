@@ -68,6 +68,9 @@ RANKED_NOTIFICATIONS_ENDPOINT = "/lol-ranked/v1/notifications"
 CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT = (
     "/lol-champ-select/v1/session/pick-order-swaps"
 )
+CHAMP_SELECT_ONGOING_PICK_ORDER_SWAP_ENDPOINT = (
+    "/lol-champ-select/v1/ongoing-pick-order-swap"
+)
 RIOTCLIENT_UX_ALLOW_FOREGROUND_ENDPOINT = "/riotclient/ux-allow-foreground"
 RIOTCLIENT_UX_SHOW_ENDPOINT = "/riotclient/ux-show"
 HONOR_VOTE_TYPE = "HEART"
@@ -192,9 +195,10 @@ def _non_empty_identifier(item: object, *keys: str) -> Optional[str]:
     return None
 
 
-def _received_pick_order_swap_id(item: object) -> Optional[int]:
-    if not isinstance(item, dict):
-        return None
+PickOrderSwapPayload = Mapping[str, Any]
+
+
+def _received_pick_order_swap_id(item: PickOrderSwapPayload) -> Optional[int]:
     if _normalize_lookup_key(item.get("state")) != "received":
         return None
     swap_id = _parse_optional_int(item.get("id"))
@@ -352,6 +356,24 @@ class LcuDecision:
     @property
     def ok(self) -> bool:
         return self.status == LcuOutcome.SUCCESS
+
+
+def _pick_order_swap_payloads(
+    items: Sequence[Any],
+    *,
+    status_code: Optional[int],
+    source: str,
+) -> LcuDecision | list[PickOrderSwapPayload]:
+    payloads: list[PickOrderSwapPayload] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason=f"{source} item is not an object",
+                status_code=status_code,
+            )
+        payloads.append(item)
+    return payloads
 
 
 @dataclass(frozen=True)
@@ -845,11 +867,25 @@ class LcuClient:
                 error=result.error,
             )
         if result.status_code in {404, 405}:
-            return LcuDecision(
+            endpoint_decision = LcuDecision(
                 LcuOutcome.UNSUPPORTED,
                 reason="pick-order swap endpoint is not available",
                 status_code=result.status_code,
             )
+            session_decision = (
+                self._decline_received_pick_order_swap_from_session_decision()
+            )
+            if session_decision.ok:
+                return session_decision
+            ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
+            if ongoing_decision.status != LcuOutcome.UNSUPPORTED:
+                return ongoing_decision
+            if session_decision.status in {
+                LcuOutcome.NO_CURRENT_ACTION,
+                LcuOutcome.UNSUPPORTED,
+            }:
+                return session_decision
+            return endpoint_decision
         if not result.ok:
             return LcuDecision(
                 LcuOutcome.REQUEST_FAILED
@@ -865,7 +901,74 @@ class LcuClient:
                 status_code=result.status_code,
             )
 
-        for swap in result.data:
+        payloads = _pick_order_swap_payloads(
+            result.data,
+            status_code=result.status_code,
+            source="pick-order swap response",
+        )
+        if isinstance(payloads, LcuDecision):
+            return payloads
+
+        endpoint_decision = self._decline_received_pick_order_swaps_decision(
+            payloads,
+            status_code=result.status_code,
+        )
+        if endpoint_decision.ok:
+            return endpoint_decision
+        if endpoint_decision.status not in {
+            LcuOutcome.NO_CURRENT_ACTION,
+            LcuOutcome.UNSUPPORTED,
+        }:
+            return endpoint_decision
+        session_decision = self._decline_received_pick_order_swap_from_session_decision()
+        if session_decision.ok:
+            return session_decision
+        ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
+        if ongoing_decision.status == LcuOutcome.UNSUPPORTED:
+            if endpoint_decision.status == LcuOutcome.UNSUPPORTED:
+                return endpoint_decision
+            if session_decision.status == LcuOutcome.UNSUPPORTED:
+                return session_decision
+            return endpoint_decision
+        return ongoing_decision
+
+    def _decline_received_pick_order_swap_from_session_decision(self) -> LcuDecision:
+        result = self._champ_select_session_decision()
+        if not result.ok:
+            return result
+        raw_swaps = result.value.get("pickOrderSwaps")
+        if raw_swaps is None:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no pick-order swaps in champ-select session",
+                status_code=result.status_code,
+            )
+        if not isinstance(raw_swaps, list):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="champ-select pickOrderSwaps payload is not a list",
+                status_code=result.status_code,
+            )
+        payloads = _pick_order_swap_payloads(
+            raw_swaps,
+            status_code=result.status_code,
+            source="champ-select pickOrderSwaps payload",
+        )
+        if isinstance(payloads, LcuDecision):
+            return payloads
+
+        return self._decline_received_pick_order_swaps_decision(
+            payloads,
+            status_code=result.status_code,
+        )
+
+    def _decline_received_pick_order_swaps_decision(
+        self,
+        swaps: Sequence[PickOrderSwapPayload],
+        *,
+        status_code: Optional[int],
+    ) -> LcuDecision:
+        for swap in swaps:
             swap_id = _received_pick_order_swap_id(swap)
             if swap_id is None:
                 continue
@@ -883,7 +986,74 @@ class LcuClient:
         return LcuDecision(
             LcuOutcome.NO_CURRENT_ACTION,
             reason="no received pick-order swap request",
-            status_code=result.status_code,
+            status_code=status_code,
+        )
+
+    def _decline_ongoing_pick_order_swap_decision(self) -> LcuDecision:
+        result = self.request("GET", CHAMP_SELECT_ONGOING_PICK_ORDER_SWAP_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if result.status_code in {404, 405}:
+            return LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="ongoing pick-order swap endpoint is not available",
+                status_code=result.status_code,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED
+                if result.status_code is None or result.status_code >= 500
+                else LcuOutcome.ACTION_REJECTED,
+                reason="ongoing pick-order swap request failed",
+                status_code=result.status_code,
+            )
+        if result.data in (None, ""):
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no ongoing pick-order swap request",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, dict):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="ongoing pick-order swap response is not an object",
+                status_code=result.status_code,
+            )
+        if not result.data:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no ongoing pick-order swap request",
+                status_code=result.status_code,
+            )
+        swap_id = _received_pick_order_swap_id(result.data)
+        if swap_id is None:
+            if _normalize_lookup_key(result.data.get("state")) == "received":
+                return LcuDecision(
+                    LcuOutcome.MALFORMED_RESPONSE,
+                    reason="ongoing pick-order swap response has no positive id",
+                    status_code=result.status_code,
+                )
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no received ongoing pick-order swap request",
+                status_code=result.status_code,
+            )
+        clear = self.request(
+            "POST",
+            f"{CHAMP_SELECT_ONGOING_PICK_ORDER_SWAP_ENDPOINT}/{swap_id}/clear",
+        )
+        return _write_or_unsupported_decision(
+            clear,
+            success_reason="ongoing pick-order swap notification cleared",
+            rejected_reason="ongoing pick-order swap notification clear rejected",
+            unsupported_reason=(
+                "ongoing pick-order swap notification clear endpoint is not available"
+            ),
         )
 
     def _dismiss_simple_dialog_messages_decision(self) -> LcuDecision:
