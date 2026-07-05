@@ -732,14 +732,14 @@ class LcuClientTests(unittest.TestCase):
         self,
     ) -> None:
         session = _FakeSession(
-                    [
-                        _FakeResponse(
-                            200,
+            [
+                _FakeResponse(
+                    200,
                     [
                         {"id": 42, "state": "SENT"},
                         {"id": 43, "state": "AVAILABLE"},
-                            ],
-                        ),
+                    ],
+                ),
                 _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
