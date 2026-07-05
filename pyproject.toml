@@ -30,6 +30,17 @@ lolmanager-config = "lolmanager.gui.config_gui:run_config_gui"
 [tool.uv]
 package = true
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.codegraph",
+    "/.omo",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.venv",
+    "/build",
+    "/dist",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/lolmanager"]
 include = [
