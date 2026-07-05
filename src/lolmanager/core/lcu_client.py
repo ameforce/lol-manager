@@ -195,9 +195,10 @@ def _non_empty_identifier(item: object, *keys: str) -> Optional[str]:
     return None
 
 
-def _received_pick_order_swap_id(item: object) -> Optional[int]:
-    if not isinstance(item, dict):
-        return None
+PickOrderSwapPayload = Mapping[str, Any]
+
+
+def _received_pick_order_swap_id(item: PickOrderSwapPayload) -> Optional[int]:
     if _normalize_lookup_key(item.get("state")) != "received":
         return None
     swap_id = _parse_optional_int(item.get("id"))
@@ -355,6 +356,24 @@ class LcuDecision:
     @property
     def ok(self) -> bool:
         return self.status == LcuOutcome.SUCCESS
+
+
+def _pick_order_swap_payloads(
+    items: Sequence[Any],
+    *,
+    status_code: Optional[int],
+    source: str,
+) -> LcuDecision | list[PickOrderSwapPayload]:
+    payloads: list[PickOrderSwapPayload] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason=f"{source} item is not an object",
+                status_code=status_code,
+            )
+        payloads.append(item)
+    return payloads
 
 
 @dataclass(frozen=True)
@@ -887,8 +906,16 @@ class LcuClient:
                 status_code=result.status_code,
             )
 
-        endpoint_decision = self._decline_received_pick_order_swaps_decision(
+        payloads = _pick_order_swap_payloads(
             result.data,
+            status_code=result.status_code,
+            source="pick-order swap response",
+        )
+        if isinstance(payloads, LcuDecision):
+            return payloads
+
+        endpoint_decision = self._decline_received_pick_order_swaps_decision(
+            payloads,
             status_code=result.status_code,
         )
         if endpoint_decision.status != LcuOutcome.NO_CURRENT_ACTION:
@@ -926,14 +953,22 @@ class LcuClient:
                 reason="champ-select pickOrderSwaps payload is not a list",
                 status_code=result.status_code,
             )
-        return self._decline_received_pick_order_swaps_decision(
+        payloads = _pick_order_swap_payloads(
             raw_swaps,
+            status_code=result.status_code,
+            source="champ-select pickOrderSwaps payload",
+        )
+        if isinstance(payloads, LcuDecision):
+            return payloads
+
+        return self._decline_received_pick_order_swaps_decision(
+            payloads,
             status_code=result.status_code,
         )
 
     def _decline_received_pick_order_swaps_decision(
         self,
-        swaps: list[object],
+        swaps: Sequence[PickOrderSwapPayload],
         *,
         status_code: Optional[int],
     ) -> LcuDecision:
