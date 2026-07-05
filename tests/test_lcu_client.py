@@ -614,13 +614,21 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
-    def test_dismiss_blocking_modal_declines_ongoing_pick_order_swap_notification(
+    def test_dismiss_blocking_modal_declines_pick_order_swap_from_session_after_empty_collection(
         self,
     ) -> None:
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
-                _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
+                _FakeResponse(
+                    200,
+                    {
+                        "localPlayerCellId": 1,
+                        "pickOrderSwaps": [
+                            {"id": 25, "state": "RECEIVED", "cellId": 2}
+                        ],
+                    },
+                ),
                 _FakeResponse(204),
             ]
         )
@@ -636,14 +644,58 @@ class LcuClientTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
-            )
+            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
         )
         self.assertEqual(session.calls[2]["method"], "POST")
         self.assertTrue(
             str(session.calls[2]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps/25/decline"
+            )
+        )
+
+    def test_dismiss_blocking_modal_declines_ongoing_pick_order_swap_notification(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
+                _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
+                _FakeResponse(204),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(len(session.calls), 5)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
+                "/lol-champ-select/v1/session"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            )
+        )
+        self.assertEqual(session.calls[3]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[3]["url"]).endswith(
                 "/lol-champ-select/v1/session/pick-order-swaps/24/decline"
+            )
+        )
+        self.assertEqual(session.calls[4]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[4]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
             )
         )
 
@@ -653,6 +705,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _FakeResponse(200, {"id": 0, "state": "RECEIVED", "cellId": 2}),
             ]
         )
@@ -661,9 +714,9 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
-        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(len(session.calls), 3)
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith(
+            str(session.calls[2]["url"]).endswith(
                 "/lol-champ-select/v1/ongoing-pick-order-swap"
             )
         )
@@ -679,14 +732,15 @@ class LcuClientTests(unittest.TestCase):
         self,
     ) -> None:
         session = _FakeSession(
-            [
-                _FakeResponse(
-                    200,
+                    [
+                        _FakeResponse(
+                            200,
                     [
                         {"id": 42, "state": "SENT"},
                         {"id": 43, "state": "AVAILABLE"},
-                    ],
-                ),
+                            ],
+                        ),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -705,7 +759,7 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
-        self.assertEqual(len(session.calls), 9)
+        self.assertEqual(len(session.calls), 10)
         self.assertTrue(
             str(session.calls[0]["url"]).endswith(
                 "/lol-champ-select/v1/session/pick-order-swaps"
@@ -727,6 +781,7 @@ class LcuClientTests(unittest.TestCase):
                 session = _FakeSession(
                     [
                         _FakeResponse(200, []),
+                        _FakeResponse(404, {"message": "no active delegate"}),
                         _FakeResponse(200, {"id": 77, "state": state, "cellId": 2}),
                         _FakeResponse(200, []),
                         _FakeResponse(200, []),
@@ -751,9 +806,9 @@ class LcuClientTests(unittest.TestCase):
                 result = client.dismiss_blocking_modal_decision()
 
                 self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
-                self.assertEqual(len(session.calls), 9)
+                self.assertEqual(len(session.calls), 10)
                 self.assertTrue(
-                    str(session.calls[1]["url"]).endswith(
+                    str(session.calls[2]["url"]).endswith(
                         "/lol-champ-select/v1/ongoing-pick-order-swap"
                     )
                 )
@@ -771,6 +826,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _FakeResponse(204),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -789,9 +845,9 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
-        self.assertEqual(len(session.calls), 9)
+        self.assertEqual(len(session.calls), 10)
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith(
+            str(session.calls[2]["url"]).endswith(
                 "/lol-champ-select/v1/ongoing-pick-order-swap"
             )
         )
@@ -866,6 +922,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
                 _FakeResponse(204),
@@ -876,15 +933,15 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[2]["method"], "GET")
+        self.assertEqual(session.calls[3]["method"], "GET")
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
+            str(session.calls[3]["url"]).endswith(
                 "/lol-simple-dialog-messages/v1/messages"
             )
         )
-        self.assertEqual(session.calls[3]["method"], "DELETE")
+        self.assertEqual(session.calls[4]["method"], "DELETE")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
+            str(session.calls[4]["url"]).endswith(
                 "/lol-simple-dialog-messages/v1/messages/dialog-a"
             )
         )
@@ -895,6 +952,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(
@@ -915,13 +973,13 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[3]["method"], "GET")
+        self.assertEqual(session.calls[4]["method"], "GET")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith("/lol-remedy/v1/remedy-notifications")
+            str(session.calls[4]["url"]).endswith("/lol-remedy/v1/remedy-notifications")
         )
-        self.assertEqual(session.calls[4]["method"], "PUT")
+        self.assertEqual(session.calls[5]["method"], "PUT")
         self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
+            str(session.calls[5]["url"]).endswith(
                 "/lol-remedy/v1/ack-remedy-notification/remedy-a"
             )
         )
@@ -932,6 +990,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -944,15 +1003,15 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[4]["method"], "GET")
+        self.assertEqual(session.calls[5]["method"], "GET")
         self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
+            str(session.calls[5]["url"]).endswith(
                 "/lol-player-behavior/v2/reporter-feedback"
             )
         )
-        self.assertEqual(session.calls[5]["method"], "POST")
+        self.assertEqual(session.calls[6]["method"], "POST")
         self.assertTrue(
-            str(session.calls[5]["url"]).endswith(
+            str(session.calls[6]["url"]).endswith(
                 "/lol-player-behavior/v2/reporter-feedback/feedback-a"
             )
         )
@@ -963,6 +1022,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -976,15 +1036,15 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[5]["method"], "GET")
+        self.assertEqual(session.calls[6]["method"], "GET")
         self.assertTrue(
-            str(session.calls[5]["url"]).endswith(
+            str(session.calls[6]["url"]).endswith(
                 "/lol-player-behavior/v1/reporter-feedback"
             )
         )
-        self.assertEqual(session.calls[6]["method"], "DELETE")
+        self.assertEqual(session.calls[7]["method"], "DELETE")
         self.assertTrue(
-            str(session.calls[6]["url"]).endswith(
+            str(session.calls[7]["url"]).endswith(
                 "/lol-player-behavior/v1/reporter-feedback/7"
             )
         )
@@ -995,6 +1055,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -1024,13 +1085,13 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[8]["method"], "GET")
+        self.assertEqual(session.calls[9]["method"], "GET")
         self.assertTrue(
-            str(session.calls[8]["url"]).endswith("/lol-ranked/v1/notifications")
+            str(session.calls[9]["url"]).endswith("/lol-ranked/v1/notifications")
         )
-        self.assertEqual(session.calls[9]["method"], "POST")
+        self.assertEqual(session.calls[10]["method"], "POST")
         self.assertTrue(
-            str(session.calls[9]["url"]).endswith(
+            str(session.calls[10]["url"]).endswith(
                 "/lol-ranked/v1/notifications/1/acknowledge"
             )
         )
@@ -1041,6 +1102,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -1068,10 +1130,10 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
-        self.assertEqual(len(session.calls), 9)
-        self.assertEqual(session.calls[8]["method"], "GET")
+        self.assertEqual(len(session.calls), 10)
+        self.assertEqual(session.calls[9]["method"], "GET")
         self.assertTrue(
-            str(session.calls[8]["url"]).endswith("/lol-ranked/v1/notifications")
+            str(session.calls[9]["url"]).endswith("/lol-ranked/v1/notifications")
         )
 
     def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
@@ -1080,6 +1142,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "no active delegate"}),
                 _no_ongoing_pick_order_swap_response(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),

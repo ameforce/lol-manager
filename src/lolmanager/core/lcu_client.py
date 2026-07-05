@@ -889,6 +889,14 @@ class LcuClient:
         )
         if endpoint_decision.status != LcuOutcome.NO_CURRENT_ACTION:
             return endpoint_decision
+        session_decision = self._decline_received_pick_order_swap_from_session_decision()
+        if session_decision.ok:
+            return session_decision
+        if session_decision.status not in {
+            LcuOutcome.NO_CURRENT_ACTION,
+            LcuOutcome.NO_SESSION,
+        }:
+            return session_decision
         ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
         if ongoing_decision.status == LcuOutcome.UNSUPPORTED:
             return endpoint_decision
@@ -1001,11 +1009,25 @@ class LcuClient:
             "POST",
             f"{CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT}/{swap_id}/decline",
         )
-        return _write_or_unsupported_decision(
+        decline_decision = _write_or_unsupported_decision(
             decline,
             success_reason="pick-order swap declined",
             rejected_reason="pick-order swap decline rejected",
             unsupported_reason="pick-order swap decline endpoint is not available",
+        )
+        if not decline_decision.ok:
+            return decline_decision
+        clear = self.request(
+            "POST",
+            f"{CHAMP_SELECT_ONGOING_PICK_ORDER_SWAP_ENDPOINT}/{swap_id}/clear",
+        )
+        return _write_or_unsupported_decision(
+            clear,
+            success_reason="ongoing pick-order swap notification cleared",
+            rejected_reason="ongoing pick-order swap notification clear rejected",
+            unsupported_reason=(
+                "ongoing pick-order swap notification clear endpoint is not available"
+            ),
         )
 
     def _dismiss_simple_dialog_messages_decision(self) -> LcuDecision:
