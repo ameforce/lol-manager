@@ -1498,6 +1498,38 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(attempt.phase, PHASE_LOBBY)
         self.assertEqual(attempt.loop_action, LcuLoopAction.ACT_LCU)
 
+    def test_champ_select_phase_poll_dismisses_blocking_modal_before_returning(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseBlockingModalLcu(
+            PHASE_CHAMP_SELECT,
+            LcuDecision(LcuOutcome.SUCCESS, reason="pick-order swap declined"),
+        )
+
+        attempt = entrypoint._poll_lcu_phase_attempt(fake, logger, "phase")
+
+        self.assertEqual(attempt.phase, PHASE_CHAMP_SELECT)
+        self.assertEqual(attempt.loop_action, LcuLoopAction.ACT_LCU)
+        self.assertEqual(attempt.outcome, "success")
+        self.assertEqual(fake.dismiss_calls, 1)
+
+    def test_champ_select_phase_poll_keeps_phase_when_modal_route_empty(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseBlockingModalLcu(
+            PHASE_CHAMP_SELECT,
+            LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="no current action"),
+        )
+
+        attempt = entrypoint._poll_lcu_phase_attempt(fake, logger, "phase")
+
+        self.assertEqual(attempt.phase, PHASE_CHAMP_SELECT)
+        self.assertEqual(attempt.loop_action, LcuLoopAction.ACT_LCU)
+        self.assertEqual(attempt.outcome, "success")
+        self.assertEqual(fake.dismiss_calls, 1)
+
     def test_lcu_phase_transition_hook_logs_and_reraises_unexpected_exception(
         self,
     ) -> None:
