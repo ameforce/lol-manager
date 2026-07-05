@@ -856,12 +856,16 @@ class LcuClient:
             if session_decision.status not in {
                 LcuOutcome.NO_CURRENT_ACTION,
                 LcuOutcome.NO_SESSION,
+                LcuOutcome.UNSUPPORTED,
             }:
                 return session_decision
             ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
             if ongoing_decision.status != LcuOutcome.UNSUPPORTED:
                 return ongoing_decision
-            if session_decision.status == LcuOutcome.NO_CURRENT_ACTION:
+            if session_decision.status in {
+                LcuOutcome.NO_CURRENT_ACTION,
+                LcuOutcome.UNSUPPORTED,
+            }:
                 return session_decision
             return LcuDecision(
                 LcuOutcome.UNSUPPORTED,
@@ -895,10 +899,13 @@ class LcuClient:
         if session_decision.status not in {
             LcuOutcome.NO_CURRENT_ACTION,
             LcuOutcome.NO_SESSION,
+            LcuOutcome.UNSUPPORTED,
         }:
             return session_decision
         ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
         if ongoing_decision.status == LcuOutcome.UNSUPPORTED:
+            if session_decision.status == LcuOutcome.UNSUPPORTED:
+                return session_decision
             return endpoint_decision
         return ongoing_decision
 
