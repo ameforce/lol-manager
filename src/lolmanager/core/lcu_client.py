@@ -918,7 +918,12 @@ class LcuClient:
             payloads,
             status_code=result.status_code,
         )
-        if endpoint_decision.status != LcuOutcome.NO_CURRENT_ACTION:
+        if endpoint_decision.ok:
+            return endpoint_decision
+        if endpoint_decision.status not in {
+            LcuOutcome.NO_CURRENT_ACTION,
+            LcuOutcome.UNSUPPORTED,
+        }:
             return endpoint_decision
         session_decision = self._decline_received_pick_order_swap_from_session_decision()
         if session_decision.ok:

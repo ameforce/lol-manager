@@ -724,6 +724,42 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_blocking_modal_clears_ongoing_when_collection_decline_unsupported(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, [{"id": 23, "state": "RECEIVED"}]),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(404, {"message": "no active delegate"}),
+                _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        collection_decline = _first_endpoint_call_index(
+            session,
+            method="POST",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
+        )
+        ongoing_lookup = _first_endpoint_call_index(
+            session,
+            method="GET",
+            suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
+        )
+        self.assertLess(collection_decline, ongoing_lookup)
+        self.assertTrue(
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
+            )
+        )
+
     def test_dismiss_blocking_modal_declines_pick_order_swap_from_session_after_empty_collection(
         self,
     ) -> None:
