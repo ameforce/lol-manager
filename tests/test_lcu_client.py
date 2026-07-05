@@ -620,7 +620,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
-                _FakeResponse(200, {"id": 24, "cellId": 2}),
+                _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
                 _FakeResponse(204),
             ]
         )
@@ -653,7 +653,7 @@ class LcuClientTests(unittest.TestCase):
         session = _FakeSession(
             [
                 _FakeResponse(200, []),
-                _FakeResponse(200, {"id": 0, "cellId": 2}),
+                _FakeResponse(200, {"id": 0, "state": "RECEIVED", "cellId": 2}),
             ]
         )
         client = LcuClient(lockfile=self.lockfile, session=session)
@@ -718,6 +718,52 @@ class LcuClientTests(unittest.TestCase):
                 for call in session.calls
             )
         )
+
+    def test_dismiss_blocking_modal_ignores_ongoing_pick_order_swap_without_received_state(
+        self,
+    ) -> None:
+        for state in ("SENT", "AVAILABLE"):
+            with self.subTest(state=state):
+                session = _FakeSession(
+                    [
+                        _FakeResponse(200, []),
+                        _FakeResponse(200, {"id": 77, "state": state, "cellId": 2}),
+                        _FakeResponse(200, []),
+                        _FakeResponse(200, []),
+                        _FakeResponse(404, {"message": "not found"}),
+                        _FakeResponse(200, []),
+                        _FakeResponse(200, []),
+                        _FakeResponse(
+                            200,
+                            {
+                                "accountId": 0,
+                                "body": "",
+                                "id": 0,
+                                "msgId": "",
+                                "title": "",
+                            },
+                        ),
+                        _FakeResponse(200, []),
+                    ]
+                )
+                client = LcuClient(lockfile=self.lockfile, session=session)
+
+                result = client.dismiss_blocking_modal_decision()
+
+                self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
+                self.assertEqual(len(session.calls), 9)
+                self.assertTrue(
+                    str(session.calls[1]["url"]).endswith(
+                        "/lol-champ-select/v1/ongoing-pick-order-swap"
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        "/pick-order-swaps/" in str(call["url"])
+                        and str(call["url"]).endswith("/decline")
+                        for call in session.calls
+                    )
+                )
 
     def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_response(
         self,
