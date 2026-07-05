@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any, TypedDict
 import unittest
 from unittest import mock
 
@@ -41,12 +42,18 @@ class _FakeResponse:
         return self._data
 
 
+class _FakeRequestCall(TypedDict):
+    method: str
+    url: str
+    kwargs: dict[str, Any]
+
+
 class _FakeSession:
     def __init__(self, responses: list[_FakeResponse]) -> None:
         self.responses = list(responses)
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[_FakeRequestCall] = []
 
-    def request(self, method: str, url: str, **kwargs):
+    def request(self, method: str, url: str, **kwargs: Any) -> _FakeResponse:
         self.calls.append({"method": method, "url": url, "kwargs": kwargs})
         if not self.responses:
             raise AssertionError("no fake response queued")
@@ -55,6 +62,57 @@ class _FakeSession:
 
 def _no_ongoing_pick_order_swap_response() -> _FakeResponse:
     return _FakeResponse(404, {"message": "not found"})
+
+
+def _no_pick_order_swap_responses() -> list[_FakeResponse]:
+    return [
+        _FakeResponse(200, []),
+        _FakeResponse(404, {"message": "no active delegate"}),
+        _no_ongoing_pick_order_swap_response(),
+    ]
+
+
+def _endpoint_calls(
+    session: _FakeSession,
+    *,
+    method: str,
+    suffix: str,
+) -> list[_FakeRequestCall]:
+    return [
+        call
+        for call in session.calls
+        if call["method"] == method and call["url"].endswith(suffix)
+    ]
+
+
+def _has_endpoint_call(
+    session: _FakeSession,
+    *,
+    method: str,
+    suffix: str,
+) -> bool:
+    return bool(_endpoint_calls(session, method=method, suffix=suffix))
+
+
+def _first_endpoint_call_index(
+    session: _FakeSession,
+    *,
+    method: str,
+    suffix: str,
+) -> int:
+    for index, call in enumerate(session.calls):
+        if call["method"] == method and call["url"].endswith(suffix):
+            return index
+    raise AssertionError(f"{method} {suffix} was not called")
+
+
+def _pick_order_decline_calls(session: _FakeSession) -> list[_FakeRequestCall]:
+    return [
+        call
+        for call in session.calls
+        if "/lol-champ-select/v1/session/pick-order-swaps/" in call["url"]
+        and call["url"].endswith("/decline")
+    ]
 
 
 class _FakeProcessInfo:
@@ -562,16 +620,18 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 2)
-        self.assertEqual(session.calls[0]["method"], "GET")
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
-        self.assertEqual(session.calls[1]["method"], "POST")
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/42/decline"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/42/decline",
             )
         )
 
@@ -600,17 +660,22 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 3)
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+            _has_endpoint_call(
+                session, method="GET", suffix="/lol-champ-select/v1/session"
+            )
         )
-        self.assertEqual(session.calls[2]["method"], "POST")
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/23/decline"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
             )
         )
 
@@ -640,29 +705,22 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 5)
-        self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
-            )
+        session_decline = _first_endpoint_call_index(
+            session,
+            method="POST",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
         )
-        self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+        ongoing_lookup = _first_endpoint_call_index(
+            session,
+            method="GET",
+            suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
         )
-        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertLess(session_decline, ongoing_lookup)
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/23/decline"
-            )
-        )
-        self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
-            )
-        )
-        self.assertEqual(session.calls[4]["method"], "POST")
-        self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
             )
         )
 
@@ -690,20 +748,21 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 3)
-        self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
-            )
+        collection_lookup = _first_endpoint_call_index(
+            session,
+            method="GET",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps",
         )
-        self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+        session_lookup = _first_endpoint_call_index(
+            session, method="GET", suffix="/lol-champ-select/v1/session"
         )
-        self.assertEqual(session.calls[2]["method"], "POST")
-        self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/25/decline"
-            )
+        session_decline = _first_endpoint_call_index(
+            session,
+            method="POST",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/decline",
         )
+        self.assertLess(collection_lookup, session_lookup)
+        self.assertLess(session_lookup, session_decline)
 
     def test_dismiss_blocking_modal_clears_ongoing_after_empty_collection_and_unsupported_session_decline(
         self,
@@ -731,29 +790,22 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 5)
-        self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
-            )
+        session_decline = _first_endpoint_call_index(
+            session,
+            method="POST",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/decline",
         )
-        self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+        ongoing_lookup = _first_endpoint_call_index(
+            session,
+            method="GET",
+            suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
         )
-        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertLess(session_decline, ongoing_lookup)
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps/25/decline"
-            )
-        )
-        self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
-            )
-        )
-        self.assertEqual(session.calls[4]["method"], "POST")
-        self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap/26/clear"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/26/clear",
             )
         )
 
@@ -775,31 +827,36 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 4)
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith(
-                "/lol-champ-select/v1/session"
+            _has_endpoint_call(
+                session, method="GET", suffix="/lol-champ-select/v1/session"
             )
         )
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertEqual(session.calls[3]["method"], "POST")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
             )
         )
         self.assertFalse(
-            any(
-                "/lol-champ-select/v1/session/pick-order-swaps/"
-                in str(call["url"])
-                for call in session.calls
+            _endpoint_calls(
+                session,
+                method="POST",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/24/decline",
             )
         )
 
@@ -820,17 +877,13 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
         self.assertEqual(len(session.calls), 3)
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertFalse(
-            any(
-                "/pick-order-swaps/" in str(call["url"])
-                and str(call["url"]).endswith("/decline")
-                for call in session.calls
-            )
-        )
+        self.assertFalse(_pick_order_decline_calls(session))
 
     def test_dismiss_blocking_modal_ignores_pick_order_swap_without_received_state(
         self,
@@ -865,17 +918,13 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
         self.assertEqual(len(session.calls), 10)
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
-        self.assertFalse(
-            any(
-                "/pick-order-swaps/" in str(call["url"])
-                and str(call["url"]).endswith("/decline")
-                for call in session.calls
-            )
-        )
+        self.assertFalse(_pick_order_decline_calls(session))
 
     def test_dismiss_blocking_modal_ignores_ongoing_pick_order_swap_without_received_state(
         self,
@@ -912,17 +961,13 @@ class LcuClientTests(unittest.TestCase):
                 self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
                 self.assertEqual(len(session.calls), 10)
                 self.assertTrue(
-                    str(session.calls[2]["url"]).endswith(
-                        "/lol-champ-select/v1/ongoing-pick-order-swap"
+                    _has_endpoint_call(
+                        session,
+                        method="GET",
+                        suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
                     )
                 )
-                self.assertFalse(
-                    any(
-                        "/pick-order-swaps/" in str(call["url"])
-                        and str(call["url"]).endswith("/decline")
-                        for call in session.calls
-                    )
-                )
+                self.assertFalse(_pick_order_decline_calls(session))
 
     def test_dismiss_blocking_modal_treats_ongoing_pick_order_swap_204_as_no_current_action(
         self,
@@ -951,17 +996,13 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
         self.assertEqual(len(session.calls), 10)
         self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertFalse(
-            any(
-                "/pick-order-swaps/" in str(call["url"])
-                and str(call["url"]).endswith("/decline")
-                for call in session.calls
-            )
-        )
+        self.assertFalse(_pick_order_decline_calls(session))
 
     def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_response(
         self,
@@ -974,10 +1015,24 @@ class LcuClientTests(unittest.TestCase):
         self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
         self.assertEqual(len(session.calls), 1)
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
+
+    def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_item(
+        self,
+    ) -> None:
+        session = _FakeSession([_FakeResponse(200, [42])])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
+        self.assertEqual(result.reason, "pick-order swap response item is not an object")
+        self.assertEqual(len(session.calls), 1)
 
     def test_dismiss_blocking_modal_continues_when_pick_order_swap_unsupported(
         self,
@@ -996,38 +1051,46 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[0]["method"], "GET")
         self.assertTrue(
-            str(session.calls[0]["url"]).endswith(
-                "/lol-champ-select/v1/session/pick-order-swaps"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
-        self.assertEqual(session.calls[1]["method"], "GET")
         self.assertTrue(
-            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
-        )
-        self.assertEqual(session.calls[2]["method"], "GET")
-        self.assertTrue(
-            str(session.calls[2]["url"]).endswith(
-                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            _has_endpoint_call(
+                session, method="GET", suffix="/lol-champ-select/v1/session"
             )
         )
-        self.assertEqual(session.calls[3]["method"], "GET")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
-                "/lol-simple-dialog-messages/v1/messages"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertEqual(session.calls[4]["method"], "DELETE")
+        self.assertTrue(
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-simple-dialog-messages/v1/messages",
+            )
+        )
+        self.assertTrue(
+            _has_endpoint_call(
+                session,
+                method="DELETE",
+                suffix="/lol-simple-dialog-messages/v1/messages/dialog-a",
+            )
+        )
 
     def test_dismiss_blocking_modal_deletes_simple_dialog_messages(
         self,
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
                 _FakeResponse(204),
             ]
@@ -1037,16 +1100,18 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[3]["method"], "GET")
         self.assertTrue(
-            str(session.calls[3]["url"]).endswith(
-                "/lol-simple-dialog-messages/v1/messages"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-simple-dialog-messages/v1/messages",
             )
         )
-        self.assertEqual(session.calls[4]["method"], "DELETE")
         self.assertTrue(
-            str(session.calls[4]["url"]).endswith(
-                "/lol-simple-dialog-messages/v1/messages/dialog-a"
+            _has_endpoint_call(
+                session,
+                method="DELETE",
+                suffix="/lol-simple-dialog-messages/v1/messages/dialog-a",
             )
         )
 
@@ -1055,9 +1120,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(
                     200,
@@ -1077,14 +1140,18 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[4]["method"], "GET")
         self.assertTrue(
-            str(session.calls[4]["url"]).endswith("/lol-remedy/v1/remedy-notifications")
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-remedy/v1/remedy-notifications",
+            )
         )
-        self.assertEqual(session.calls[5]["method"], "PUT")
         self.assertTrue(
-            str(session.calls[5]["url"]).endswith(
-                "/lol-remedy/v1/ack-remedy-notification/remedy-a"
+            _has_endpoint_call(
+                session,
+                method="PUT",
+                suffix="/lol-remedy/v1/ack-remedy-notification/remedy-a",
             )
         )
 
@@ -1093,9 +1160,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, [{"key": "feedback-a", "title": "신고 피드백"}]),
@@ -1107,16 +1172,18 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[5]["method"], "GET")
         self.assertTrue(
-            str(session.calls[5]["url"]).endswith(
-                "/lol-player-behavior/v2/reporter-feedback"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-player-behavior/v2/reporter-feedback",
             )
         )
-        self.assertEqual(session.calls[6]["method"], "POST")
         self.assertTrue(
-            str(session.calls[6]["url"]).endswith(
-                "/lol-player-behavior/v2/reporter-feedback/feedback-a"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-player-behavior/v2/reporter-feedback/feedback-a",
             )
         )
 
@@ -1125,9 +1192,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(404, {"message": "not found"}),
@@ -1140,16 +1205,18 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[6]["method"], "GET")
         self.assertTrue(
-            str(session.calls[6]["url"]).endswith(
-                "/lol-player-behavior/v1/reporter-feedback"
+            _has_endpoint_call(
+                session,
+                method="GET",
+                suffix="/lol-player-behavior/v1/reporter-feedback",
             )
         )
-        self.assertEqual(session.calls[7]["method"], "DELETE")
         self.assertTrue(
-            str(session.calls[7]["url"]).endswith(
-                "/lol-player-behavior/v1/reporter-feedback/7"
+            _has_endpoint_call(
+                session,
+                method="DELETE",
+                suffix="/lol-player-behavior/v1/reporter-feedback/7",
             )
         )
 
@@ -1158,9 +1225,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -1189,14 +1254,16 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        self.assertEqual(session.calls[9]["method"], "GET")
         self.assertTrue(
-            str(session.calls[9]["url"]).endswith("/lol-ranked/v1/notifications")
+            _has_endpoint_call(
+                session, method="GET", suffix="/lol-ranked/v1/notifications"
+            )
         )
-        self.assertEqual(session.calls[10]["method"], "POST")
         self.assertTrue(
-            str(session.calls[10]["url"]).endswith(
-                "/lol-ranked/v1/notifications/1/acknowledge"
+            _has_endpoint_call(
+                session,
+                method="POST",
+                suffix="/lol-ranked/v1/notifications/1/acknowledge",
             )
         )
 
@@ -1205,9 +1272,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
@@ -1235,9 +1300,10 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
         self.assertEqual(len(session.calls), 10)
-        self.assertEqual(session.calls[9]["method"], "GET")
         self.assertTrue(
-            str(session.calls[9]["url"]).endswith("/lol-ranked/v1/notifications")
+            _has_endpoint_call(
+                session, method="GET", suffix="/lol-ranked/v1/notifications"
+            )
         )
 
     def test_dismiss_blocking_modal_reports_no_current_action_when_empty(
@@ -1245,9 +1311,7 @@ class LcuClientTests(unittest.TestCase):
     ) -> None:
         session = _FakeSession(
             [
-                _FakeResponse(200, []),
-                _FakeResponse(404, {"message": "no active delegate"}),
-                _no_ongoing_pick_order_swap_response(),
+                *_no_pick_order_swap_responses(),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
                 _FakeResponse(200, []),
