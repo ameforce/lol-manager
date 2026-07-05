@@ -614,6 +614,58 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_blocking_modal_clears_ongoing_when_session_decline_unsupported(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(
+                    200,
+                    {
+                        "localPlayerCellId": 1,
+                        "pickOrderSwaps": [
+                            {"id": 23, "state": "RECEIVED", "cellId": 2}
+                        ],
+                    },
+                ),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(200, {"id": 24, "state": "RECEIVED", "cellId": 2}),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(len(session.calls), 5)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+        )
+        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps/23/decline"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[3]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            )
+        )
+        self.assertEqual(session.calls[4]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[4]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap/24/clear"
+            )
+        )
+
     def test_dismiss_blocking_modal_declines_pick_order_swap_from_session_after_empty_collection(
         self,
     ) -> None:
@@ -650,6 +702,58 @@ class LcuClientTests(unittest.TestCase):
         self.assertTrue(
             str(session.calls[2]["url"]).endswith(
                 "/lol-champ-select/v1/session/pick-order-swaps/25/decline"
+            )
+        )
+
+    def test_dismiss_blocking_modal_clears_ongoing_after_empty_collection_and_unsupported_session_decline(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {
+                        "localPlayerCellId": 1,
+                        "pickOrderSwaps": [
+                            {"id": 25, "state": "RECEIVED", "cellId": 2}
+                        ],
+                    },
+                ),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(200, {"id": 26, "state": "RECEIVED", "cellId": 2}),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(len(session.calls), 5)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith("/lol-champ-select/v1/session")
+        )
+        self.assertEqual(session.calls[2]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[2]["url"]).endswith(
+                "/lol-champ-select/v1/session/pick-order-swaps/25/decline"
+            )
+        )
+        self.assertTrue(
+            str(session.calls[3]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            )
+        )
+        self.assertEqual(session.calls[4]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[4]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap/26/clear"
             )
         )
 
