@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Final
 
-from lolmanager.core.opgg_champion_list import normalize_name
+from lolmanager.core.champion_names import normalize_name
 
 
 DISPLAY_SEPARATOR_PREFIX: Final = "────────"

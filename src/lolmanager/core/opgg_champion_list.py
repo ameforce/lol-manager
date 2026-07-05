@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import requests
 from bs4 import BeautifulSoup
 
+from lolmanager.core.champion_names import normalize_name
 from lolmanager.core.opgg_http import (
     MAX_OPGG_CHAMPION_ROWS,
     read_limited_text_response,
@@ -36,10 +37,6 @@ _CACHE_VERSION = 4
 
 
 _MIN_EXPECTED_CHAMPION_COUNT = 120
-
-
-def normalize_name(value: str) -> str:
-    return "".join(str(value or "").split()).casefold()
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,14 @@ def tier_from_fill(fill: str | None) -> tuple[str, str]:
     return (tier.label, tier.color)
 
 
+def tier_from_label(tier_label: str | None) -> tuple[str, str]:
+    label = str(tier_label or "").strip() or "unknown"
+    for tier in TIER_COLORS.values():
+        if label == tier.label:
+            return (tier.label, tier.color)
+    return (label, "none")
+
+
 def tier_from_badge_fills(
     fills: Iterable[str | None], *, require_badge_glyph: bool
 ) -> tuple[str, str]:
@@ -64,15 +72,12 @@ def tier_fill_from_entry_container(container: Tag) -> str | None:
 
 
 def _tier_fill_from_scope(scope: Tag, *, require_badge_glyph: bool) -> str | None:
-    first_fill: str | None = None
     for svg in scope.select("svg"):
         fills = [
             str(path.get("fill") or "").strip()
             for path in svg.select("path[fill]")
             if str(path.get("fill") or "").strip()
         ]
-        if first_fill is None and fills:
-            first_fill = fills[0]
         tier_label, _color = tier_from_badge_fills(
             fills, require_badge_glyph=require_badge_glyph
         )
@@ -80,4 +85,4 @@ def _tier_fill_from_scope(scope: Tag, *, require_badge_glyph: bool) -> str | Non
             return next(
                 fill for fill in fills if tier_from_fill(fill)[0] != "unknown"
             )
-    return first_fill
+    return None

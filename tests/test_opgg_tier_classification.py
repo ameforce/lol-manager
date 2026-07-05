@@ -36,6 +36,30 @@ def test_position_entry_parser_reads_tier_column_not_rank_change_icon() -> None:
     ]
 
 
+def test_position_entry_parser_ignores_tier_color_without_badge_glyph() -> None:
+    html = """
+    <table>
+      <tr>
+        <td>1</td>
+        <td>
+          <a href="/ko/lol/champions/garen/build/top">
+            <strong>가렌</strong>
+          </a>
+        </td>
+        <td>
+          <svg aria-label="non tier indicator">
+            <path fill="#9aa4af" d="M1 1h4v4H1z" />
+          </svg>
+        </td>
+      </tr>
+    </table>
+    """
+
+    assert parse_position_entries_from_opgg_html(html, "top") == [
+        ("가렌", "unknown", "/ko/lol/champions/garen/build/top")
+    ]
+
+
 def test_stale_opgg_tier_cache_is_rejected_after_parser_contract_change(
     tmp_path: Path,
 ) -> None:
