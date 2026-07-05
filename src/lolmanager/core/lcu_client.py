@@ -209,6 +209,8 @@ def _received_pick_order_swap_id(item: object) -> Optional[int]:
 def _ongoing_pick_order_swap_id(item: object) -> Optional[int]:
     if not isinstance(item, dict):
         return None
+    if _normalize_lookup_key(item.get("state")) != "received":
+        return None
     swap_id = _parse_optional_int(item.get("id"))
     if swap_id is None or swap_id <= 0:
         return None
@@ -927,7 +929,7 @@ class LcuClient:
 
     def _decline_received_pick_order_swaps_decision(
         self,
-        swaps: Sequence[Any],
+        swaps: list[object],
         *,
         status_code: Optional[int],
     ) -> LcuDecision:
@@ -961,7 +963,7 @@ class LcuClient:
                 status_code=result.status_code,
                 error=result.error,
             )
-        if result.status_code in {204, 404, 405}:
+        if result.status_code in {404, 405}:
             return LcuDecision(
                 LcuOutcome.UNSUPPORTED,
                 reason="ongoing pick-order swap endpoint is not available",
@@ -995,9 +997,15 @@ class LcuClient:
             )
         swap_id = _ongoing_pick_order_swap_id(result.data)
         if swap_id is None:
+            if _normalize_lookup_key(result.data.get("state")) == "received":
+                return LcuDecision(
+                    LcuOutcome.MALFORMED_RESPONSE,
+                    reason="ongoing pick-order swap response has no positive id",
+                    status_code=result.status_code,
+                )
             return LcuDecision(
-                LcuOutcome.MALFORMED_RESPONSE,
-                reason="ongoing pick-order swap response has no positive id",
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no received ongoing pick-order swap request",
                 status_code=result.status_code,
             )
         decline = self.request(
