@@ -477,6 +477,7 @@ def _poll_lcu_phase_attempt(
 
     _apply_lcu_phase_state(phase, time.monotonic(), logger)
     if phase == PHASE_CHAMP_SELECT:
+        _dismiss_blocking_modal_lcu_attempt(lcu, f"{stage} ChampSelect", logger)
         _apply_lcu_champ_select_action_state(lcu, time.monotonic(), logger, stage)
     return PhaseLcuAttempt(phase, LcuLoopAction.ACT_LCU, outcome)
 
