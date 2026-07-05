@@ -27,6 +27,10 @@ from lolmanager.core.opgg_counter_recommendations import (
     is_auto_ban_value,
     load_recommendation_cache,
 )
+from lolmanager.gui.champion_candidate_values import (
+    DISPLAY_SEPARATOR_PREFIX,
+    build_champion_candidate_values,
+)
 from lolmanager.gui.log_view_model import ROLE_LABEL_KO
 from lolmanager.platform.paths import champion_config_path, resource_path
 from lolmanager.platform.runtime import is_frozen
@@ -39,7 +43,6 @@ if TYPE_CHECKING:
 
 ROLE_ORDER: Tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 APP_USER_MODEL_ID = "LOLManager"
-DISPLAY_SEPARATOR_PREFIX = "────────"
 BanCandidateValues = Tuple[List[str], Dict[str, str], str]
 AUTOSAVE_DELAY_MS = 600
 ROLE_VAR_FIELD_NAMES: Tuple[str, ...] = (
@@ -496,31 +499,10 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     btns.pack(side=tk.RIGHT)
 
     def _build_display_values_for_role(role: str) -> List[str]:
-        base = all_champion_values
-        ranked = role_ranked_entries.get(role) or []
-        if not ranked:
-            return base
-
-        out: List[str] = []
-        ranked_keys: set[str] = set()
-        last_tier: Optional[str] = None
-        for rank, entry in enumerate(ranked, start=1):
-            name, tier_label = entry[0], entry[1]
-            n = str(name or "").strip()
-            if not n:
-                continue
-            t = str(tier_label or "").strip() or "unknown"
-            if t != last_tier:
-                out.append(f"{_SEP_PREFIX} {t} {_SEP_PREFIX}")
-                last_tier = t
-            out.append(f"{rank:>3}. {n}")
-            ranked_keys.add(normalize_name(n))
-
-        tail = [x for x in base if normalize_name(x) not in ranked_keys]
-        if tail:
-            out.append(f"{_SEP_PREFIX} 기타 {_SEP_PREFIX}")
-            out.extend(tail)
-        return out
+        return build_champion_candidate_values(
+            ranked_entries=role_ranked_entries.get(role) or [],
+            all_champion_values=all_champion_values,
+        )
 
     def _filter_display_values(
         values: List[str], exclude_keys: set[str], keep_raw: str
