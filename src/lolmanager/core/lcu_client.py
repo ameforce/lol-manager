@@ -867,16 +867,15 @@ class LcuClient:
                 error=result.error,
             )
         if result.status_code in {404, 405}:
+            endpoint_decision = LcuDecision(
+                LcuOutcome.UNSUPPORTED,
+                reason="pick-order swap endpoint is not available",
+                status_code=result.status_code,
+            )
             session_decision = (
                 self._decline_received_pick_order_swap_from_session_decision()
             )
             if session_decision.ok:
-                return session_decision
-            if session_decision.status not in {
-                LcuOutcome.NO_CURRENT_ACTION,
-                LcuOutcome.NO_SESSION,
-                LcuOutcome.UNSUPPORTED,
-            }:
                 return session_decision
             ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
             if ongoing_decision.status != LcuOutcome.UNSUPPORTED:
@@ -886,11 +885,7 @@ class LcuClient:
                 LcuOutcome.UNSUPPORTED,
             }:
                 return session_decision
-            return LcuDecision(
-                LcuOutcome.UNSUPPORTED,
-                reason="pick-order swap endpoint is not available",
-                status_code=result.status_code,
-            )
+            return endpoint_decision
         if not result.ok:
             return LcuDecision(
                 LcuOutcome.REQUEST_FAILED
