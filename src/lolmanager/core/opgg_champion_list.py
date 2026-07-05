@@ -13,9 +13,14 @@ from urllib.parse import urlsplit
 import requests
 from bs4 import BeautifulSoup
 
+from lolmanager.core.champion_names import normalize_name
 from lolmanager.core.opgg_http import (
     MAX_OPGG_CHAMPION_ROWS,
     read_limited_text_response,
+)
+from lolmanager.core.opgg_tiers import (
+    tier_fill_from_entry_container,
+    tier_from_fill,
 )
 
 OPGG_CHAMPIONS_URL_KO = "https://op.gg/ko/lol/champions"
@@ -28,14 +33,10 @@ OPGG_CHAMPIONS_BY_POSITION_URLS_KO: Tuple[str, ...] = (
 )
 
 
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 
 _MIN_EXPECTED_CHAMPION_COUNT = 120
-
-
-def normalize_name(value: str) -> str:
-    return "".join(str(value or "").split()).casefold()
 
 
 @dataclass(frozen=True)
@@ -48,15 +49,6 @@ class ChampionListCache:
     )
 
 
-_TIER_COLORS: Dict[str, Tuple[str, str]] = {
-    "currentcolor": ("OP", "red"),
-    "#0093ff": ("1티어", "blue"),
-    "#00bba3": ("2티어", "green"),
-    "#ffb900": ("3티어", "yellow"),
-    "#9aa4af": ("4티어", "gray"),
-    "#a88a67": ("5티어", "brown"),
-}
-
 _CHAMPION_LINK_SELECTOR = 'a[href*="/ko/lol/champions/"]'
 _CHAMPION_NAME_SELECTORS: Tuple[str, ...] = (
     "strong",
@@ -65,13 +57,6 @@ _CHAMPION_NAME_SELECTORS: Tuple[str, ...] = (
     '[class*="champion"][class*="name"]',
 )
 _CHAMPION_ENTRY_CONTAINERS: Tuple[str, ...] = ("tr", "li", "article")
-
-
-def _tier_from_fill(fill: Optional[str]) -> Tuple[str, str]:
-    if not fill:
-        return ("unknown", "none")
-    key = str(fill).strip().lower()
-    return _TIER_COLORS.get(key, ("unknown", "none"))
 
 
 def opgg_position_selector_summary(position: str) -> str:
@@ -161,23 +146,6 @@ def _entry_container(anchor: object) -> object:
     return getattr(anchor, "parent", None) or anchor
 
 
-def _tier_fill_from_container(container: object) -> Optional[str]:
-    select = getattr(container, "select", None)
-    if not callable(select):
-        return None
-
-    first_fill: Optional[str] = None
-    for path in select("svg path[fill]"):
-        fill = str(path.get("fill") or "").strip()
-        if not fill:
-            continue
-        if first_fill is None:
-            first_fill = fill
-        if _tier_from_fill(fill)[0] != "unknown":
-            return fill
-    return first_fill
-
-
 def parse_position_entries_from_opgg_html(
     html_text: str,
     position: str,
@@ -200,8 +168,8 @@ def parse_position_entries_from_opgg_html(
         if not name:
             continue
 
-        fill_val = _tier_fill_from_container(_entry_container(anchor))
-        tier_label, _color = _tier_from_fill(fill_val)
+        fill_val = tier_fill_from_entry_container(_entry_container(anchor))
+        tier_label, _color = tier_from_fill(fill_val)
         entries.append((name, tier_label, href))
         if len(entries) >= limit:
             break
