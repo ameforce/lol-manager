@@ -12,7 +12,7 @@ from typing import Callable, Iterable, Optional, Tuple
 from lolmanager.core.champion_names import normalize_name
 
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 DEFAULT_MAX_AGE_SEC = 12 * 60 * 60
 DEFAULT_DISPLAY_SEPARATOR_PREFIX = "────────"
 AUTO_BAN_VALUE = "__auto__"

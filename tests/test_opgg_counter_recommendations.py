@@ -316,7 +316,7 @@ def test_recommendation_cache_is_separate_versioned_and_stale_safe(tmp_path: Pat
     assert stale.status == "cache_stale"
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    payload["v"] = -1
+    payload["v"] = 2
     cache_path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert (
