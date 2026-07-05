@@ -10,12 +10,17 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError
 
+from lolmanager.core.champion_names import normalize_name as _normalize_name
 from lolmanager.core.opgg_http import (
     MAX_OPGG_CHAMPION_ROWS,
     MAX_OPGG_COUNTER_LINK_SCAN,
     read_limited_text_response,
 )
 from lolmanager.core.opgg_champion_list import parse_position_entries_from_opgg_html
+from lolmanager.core.opgg_tiers import (
+    tier_from_fill as _tier_from_fill,
+    tier_from_label as _tier_from_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,20 +43,6 @@ POSITION_URLS = {
     "adc": "https://op.gg/ko/lol/champions?position=adc",
     "support": "https://op.gg/ko/lol/champions?position=support",
 }
-
-
-TIER_COLORS: dict[str, Tuple[str, str]] = {
-    "currentcolor": ("OP", "red"),
-    "#0093ff": ("1티어", "blue"),
-    "#00bba3": ("2티어", "green"),
-    "#ffb900": ("3티어", "yellow"),
-    "#9aa4af": ("4티어", "gray"),
-    "#a88a67": ("5티어", "brown"),
-}
-
-
-def _normalize_name(value: object) -> str:
-    return "".join(str(value or "").split()).casefold()
 
 
 def _ranked_entry_name(entry: object) -> str:
@@ -88,21 +79,6 @@ def sort_counter_candidates_by_role_rank(
         deduped.append((rank is None, rank_order, counter_order, name))
 
     return [name for _unknown, _rank, _counter_order, name in sorted(deduped)]
-
-
-def _tier_from_fill(fill: Optional[str]) -> Tuple[str, str]:
-    if not fill:
-        return ("unknown", "none")
-    key = fill.strip().lower()
-    return TIER_COLORS.get(key, ("unknown", "none"))
-
-
-def _tier_from_label(tier_label: str) -> Tuple[str, str]:
-    label = str(tier_label or "").strip() or "unknown"
-    for known_label, color in TIER_COLORS.values():
-        if label == known_label:
-            return (known_label, color)
-    return (label, "none")
 
 
 def _scrape(
