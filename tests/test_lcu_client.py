@@ -1121,6 +1121,31 @@ class LcuClientTests(unittest.TestCase):
             )
         )
 
+    def test_dismiss_blocking_modal_continues_when_pick_order_session_probe_fails(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _FakeResponse(500, {"message": "session unavailable"}),
+                _no_ongoing_pick_order_swap_response(),
+                _FakeResponse(200, [{"id": "dialog-a", "title": "알림"}]),
+                _FakeResponse(204),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertTrue(
+            _has_endpoint_call(
+                session,
+                method="DELETE",
+                suffix="/lol-simple-dialog-messages/v1/messages/dialog-a",
+            )
+        )
+
     def test_dismiss_blocking_modal_deletes_simple_dialog_messages(
         self,
     ) -> None:

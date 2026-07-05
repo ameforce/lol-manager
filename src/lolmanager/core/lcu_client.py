@@ -928,14 +928,10 @@ class LcuClient:
         session_decision = self._decline_received_pick_order_swap_from_session_decision()
         if session_decision.ok:
             return session_decision
-        if session_decision.status not in {
-            LcuOutcome.NO_CURRENT_ACTION,
-            LcuOutcome.NO_SESSION,
-            LcuOutcome.UNSUPPORTED,
-        }:
-            return session_decision
         ongoing_decision = self._decline_ongoing_pick_order_swap_decision()
         if ongoing_decision.status == LcuOutcome.UNSUPPORTED:
+            if endpoint_decision.status == LcuOutcome.UNSUPPORTED:
+                return endpoint_decision
             if session_decision.status == LcuOutcome.UNSUPPORTED:
                 return session_decision
             return endpoint_decision
