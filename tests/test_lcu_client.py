@@ -765,6 +765,44 @@ class LcuClientTests(unittest.TestCase):
                     )
                 )
 
+    def test_dismiss_blocking_modal_treats_ongoing_pick_order_swap_204_as_no_current_action(
+        self,
+    ) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, []),
+                _no_ongoing_pick_order_swap_response(),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(404, {"message": "not found"}),
+                _FakeResponse(200, []),
+                _FakeResponse(200, []),
+                _FakeResponse(
+                    200,
+                    {"accountId": 0, "body": "", "id": 0, "msgId": "", "title": ""},
+                ),
+                _FakeResponse(200, []),
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.dismiss_blocking_modal_decision()
+
+        self.assertEqual(result.status, LcuOutcome.NO_CURRENT_ACTION)
+        self.assertEqual(len(session.calls), 9)
+        self.assertTrue(
+            str(session.calls[1]["url"]).endswith(
+                "/lol-champ-select/v1/ongoing-pick-order-swap"
+            )
+        )
+        self.assertFalse(
+            any(
+                "/pick-order-swaps/" in str(call["url"])
+                and str(call["url"]).endswith("/decline")
+                for call in session.calls
+            )
+        )
+
     def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_response(
         self,
     ) -> None:

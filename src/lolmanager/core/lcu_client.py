@@ -206,17 +206,6 @@ def _received_pick_order_swap_id(item: object) -> Optional[int]:
     return swap_id
 
 
-def _ongoing_pick_order_swap_id(item: object) -> Optional[int]:
-    if not isinstance(item, dict):
-        return None
-    if _normalize_lookup_key(item.get("state")) != "received":
-        return None
-    swap_id = _parse_optional_int(item.get("id"))
-    if swap_id is None or swap_id <= 0:
-        return None
-    return swap_id
-
-
 def _connection_outcome_for_error(error: Optional[str]) -> "LcuOutcome":
     if error and "lockfile unavailable" in error:
         return LcuOutcome.UNAVAILABLE
@@ -995,7 +984,7 @@ class LcuClient:
                 reason="no ongoing pick-order swap request",
                 status_code=result.status_code,
             )
-        swap_id = _ongoing_pick_order_swap_id(result.data)
+        swap_id = _received_pick_order_swap_id(result.data)
         if swap_id is None:
             if _normalize_lookup_key(result.data.get("state")) == "received":
                 return LcuDecision(
