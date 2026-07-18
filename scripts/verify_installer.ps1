@@ -156,6 +156,9 @@ try {
     if (Test-Path -LiteralPath $installedExe) {
         throw '제거 후 설치 EXE가 남아 있습니다.'
     }
+    if (Test-Path -LiteralPath $installDir) {
+        throw '제거 후 설치 경로가 남아 있습니다.'
+    }
     if (Test-Path -LiteralPath $desktopShortcut) {
         throw '제거 후 installer가 만든 바탕 화면 바로가기가 남아 있습니다.'
     }
