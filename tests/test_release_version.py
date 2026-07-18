@@ -26,6 +26,8 @@ def _release_context_version() -> str:
     for prefix in ("hotfix/v", "release/v"):
         if branch.startswith(prefix):
             return branch.removeprefix(prefix)
+    if branch:
+        return ""
 
     tag = _git_output("describe", "--tags", "--exact-match", "--match", "v[0-9]*")
     return tag.removeprefix("v") if tag.startswith("v") else ""

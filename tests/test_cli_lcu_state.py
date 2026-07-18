@@ -738,6 +738,99 @@ class _FakeCliChampSelectDodgeRematchLcu(_FakeCliReadyCheckRematchLcu):
         return LcuDecision(LcuOutcome.SUCCESS, value="mid")
 
 
+class _FakeCliFinalPickDodgeRematchLcu(_FakeCliChampSelectLcu):
+    def __init__(self) -> None:
+        super().__init__()
+        self.accept_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        phases = [
+            PHASE_LOBBY,
+            PHASE_CHAMP_SELECT,
+            PHASE_CHAMP_SELECT,
+            PHASE_LOBBY,
+            PHASE_MATCHMAKING,
+            PHASE_READY_CHECK,
+            PHASE_CHAMP_SELECT,
+        ]
+        phase = phases[min(self.phase_calls, len(phases) - 1)]
+        self.phase_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+    def accept_ready_check_decision(self) -> LcuDecision:
+        self.accept_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="ready accepted")
+
+    def select_champ_select_champion_decision(
+        self, champion_name: object, *, action_type: str, complete: bool = False
+    ) -> LcuDecision:
+        self.select_calls.append(
+            {
+                "champion_name": champion_name,
+                "action_type": action_type,
+                "complete": complete,
+            }
+        )
+        call_count = len(self.select_calls)
+        if call_count in {1, 3}:
+            return LcuDecision(LcuOutcome.SUCCESS, reason="prepick accepted")
+        if call_count == 2:
+            return LcuDecision(LcuOutcome.NO_SESSION, reason="dodge removed session")
+        raise RuntimeError("rematch final pick reached")
+
+
+class _FakeCliReservePickDodgeLcu(_FakeReserveFallbackLcu):
+    def __init__(self) -> None:
+        super().__init__(
+            [
+                LcuDecision(LcuOutcome.ACTION_REJECTED, reason="primary unavailable"),
+                LcuDecision(LcuOutcome.NO_SESSION, reason="dodge removed session"),
+            ]
+        )
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        phases: list[str | Exception] = [
+            PHASE_LOBBY,
+            PHASE_CHAMP_SELECT,
+            PHASE_CHAMP_SELECT,
+            PHASE_CHAMP_SELECT,
+            PHASE_MATCHMAKING,
+            RuntimeError("outer cycle restarted after reserve dodge"),
+        ]
+        phase = phases[min(self.phase_calls, len(phases) - 1)]
+        self.phase_calls += 1
+        if isinstance(phase, Exception):
+            raise phase
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+
+class _FakeChampSelectPhaseGuardLcu:
+    def __init__(self, phases: list[LcuDecision | str]) -> None:
+        self.phases = list(phases)
+        self.phase_calls = 0
+        self.accept_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        phase = self.phases[min(self.phase_calls, len(self.phases) - 1)]
+        self.phase_calls += 1
+        if isinstance(phase, LcuDecision):
+            return phase
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def accept_ready_check_decision(self) -> LcuDecision:
+        self.accept_calls += 1
+        return LcuDecision(LcuOutcome.SUCCESS, reason="ready accepted")
+
+
 class CliLcuStateTests(unittest.TestCase):
     def _run_cli_champ_select_until_runtime_sleep(
         self, fake_lcu: _FakeReserveFallbackLcu
@@ -1231,6 +1324,137 @@ class CliLcuStateTests(unittest.TestCase):
                 {"champion_name": "아리", "action_type": "pick", "complete": True},
             ],
         )
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
+
+    def test_cli_main_final_pick_no_session_recovers_lobby_matchmaking_ready_check(
+        self,
+    ) -> None:
+        fake_lcu = _FakeCliFinalPickDodgeRematchLcu()
+        minimized_rect = (-32000, -32000, -31900, -31900)
+        entrypoint._last_lcu_ready_accept_at.clear()
+
+        def fail_if_final_pick_waits(seconds: float) -> None:
+            if seconds == 1.0 and len(fake_lcu.select_calls) == 2:
+                raise RuntimeError("stuck in final pick wait")
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                side_effect=[(0, 0, 1280, 720), minimized_rect, minimized_rect],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(entrypoint, "resolve_ban_name_for_runtime", return_value=""),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(
+                entrypoint.time, "sleep", side_effect=fail_if_final_pick_waits
+            ),
+            self.assertRaisesRegex(RuntimeError, "rematch final pick reached"),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(fake_lcu.accept_calls, 1)
+        self.assertEqual(fake_lcu.position_calls, 2)
+        self.assertEqual(fake_lcu.phase_calls, 7)
+        self.assertEqual(len(fake_lcu.select_calls), 4)
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
+
+    def test_cli_main_reserve_pick_no_session_restarts_outer_cycle(self) -> None:
+        fake_lcu = _FakeCliReservePickDodgeLcu()
+        minimized_rect = (-32000, -32000, -31900, -31900)
+
+        def fail_if_reserve_waits(seconds: float) -> None:
+            if seconds == 1.0 and len(fake_lcu.select_calls) >= 3:
+                raise RuntimeError("stuck in reserve pick wait")
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(
+                entrypoint, "ChampionConfig", _FakeReserveCliChampionConfig
+            ),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                side_effect=[(0, 0, 1280, 720), minimized_rect, minimized_rect],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(entrypoint, "resolve_ban_name_for_runtime", return_value=""),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(
+                entrypoint.time, "sleep", side_effect=fail_if_reserve_waits
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "outer cycle restarted after reserve dodge"
+            ),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(fake_lcu.position_calls, 1)
+        self.assertEqual(fake_lcu.phase_calls, 6)
+        self.assertEqual(len(fake_lcu.select_calls), 3)
         search.assert_not_called()
         click_relative.assert_not_called()
         click_screen.assert_not_called()
@@ -3326,6 +3550,119 @@ class CliLcuStateTests(unittest.TestCase):
                 self.assertEqual(result.outcome, f"phase_exit:{phase}")
                 self.assertEqual(fake.phase_calls, 1)
                 sleep.assert_not_called()
+
+    def test_champ_select_phase_guard_recovers_no_session_dodge_rematch_sequence(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeChampSelectPhaseGuardLcu(
+            [PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT]
+        )
+        entrypoint._last_lcu_ready_accept_at.clear()
+        wait_attempt = entrypoint.ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+            LcuOutcome.NO_SESSION.value,
+        )
+
+        guarded_attempts = []
+        handled = []
+        with mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0):
+            for _ in range(4):
+                guarded = entrypoint._guard_champ_select_phase_exit(
+                    wait_attempt, fake, "픽 준비", logger
+                )
+                guarded_attempts.append(guarded)
+                handled.append(
+                    entrypoint._handle_champ_select_phase_exit(
+                        guarded, fake, "픽 준비", logger
+                    )
+                )
+
+        self.assertEqual(
+            [attempt.outcome for attempt in guarded_attempts],
+            [
+                f"phase_exit:{PHASE_LOBBY}",
+                f"phase_exit:{PHASE_MATCHMAKING}",
+                f"phase_exit:{PHASE_READY_CHECK}",
+                LcuOutcome.NO_SESSION.value,
+            ],
+        )
+        self.assertEqual(handled, [True, True, True, False])
+        self.assertEqual(fake.accept_calls, 1)
+        self.assertEqual(fake.phase_calls, 4)
+
+    def test_champ_select_phase_guard_handles_direct_ready_check_after_no_current_action(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeChampSelectPhaseGuardLcu([PHASE_READY_CHECK])
+        entrypoint._last_lcu_ready_accept_at.clear()
+
+        with mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0):
+            guarded = entrypoint._guard_champ_select_phase_exit(
+                entrypoint.ChampSelectLcuAttempt(
+                    False,
+                    LcuLoopAction.WAIT_AUTHORITATIVE,
+                    LcuOutcome.NO_CURRENT_ACTION.value,
+                ),
+                fake,
+                "픽 준비",
+                logger,
+            )
+            handled = entrypoint._handle_champ_select_phase_exit(
+                guarded, fake, "픽 준비", logger
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(guarded.loop_action, LcuLoopAction.ACT_LCU)
+        self.assertEqual(guarded.outcome, f"phase_exit:{PHASE_READY_CHECK}")
+        self.assertEqual(fake.accept_calls, 1)
+
+    def test_champ_select_phase_guard_exits_reserve_pick_on_matchmaking(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakeChampSelectPhaseGuardLcu([PHASE_MATCHMAKING])
+
+        guarded = entrypoint._guard_champ_select_phase_exit(
+            entrypoint.ChampSelectLcuAttempt(
+                False,
+                LcuLoopAction.WAIT_AUTHORITATIVE,
+                LcuOutcome.NO_SESSION.value,
+            ),
+            fake,
+            "예비 픽 준비",
+            logger,
+        )
+
+        self.assertEqual(guarded.loop_action, LcuLoopAction.ACT_LCU)
+        self.assertEqual(guarded.outcome, f"phase_exit:{PHASE_MATCHMAKING}")
+
+    def test_champ_select_phase_guard_keeps_champ_select_and_only_falls_back_on_lcu_failure(
+        self,
+    ) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        wait_attempt = entrypoint.ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+            LcuOutcome.NO_CURRENT_ACTION.value,
+        )
+        fake = _FakeChampSelectPhaseGuardLcu(
+            [
+                PHASE_CHAMP_SELECT,
+                LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout"),
+            ]
+        )
+
+        still_waiting = entrypoint._guard_champ_select_phase_exit(
+            wait_attempt, fake, "픽 준비", logger
+        )
+        fallback = entrypoint._guard_champ_select_phase_exit(
+            wait_attempt, fake, "픽 준비", logger
+        )
+
+        self.assertEqual(still_waiting, wait_attempt)
+        self.assertEqual(fallback.loop_action, LcuLoopAction.FALLBACK_IMAGE)
+        self.assertEqual(fallback.outcome, "phase_probe:request_failed")
 
     def test_champ_select_phase_exit_handler_accepts_ready_check(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
