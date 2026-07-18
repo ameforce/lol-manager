@@ -103,6 +103,25 @@ scripts\build_exe.bat
 
 빌드가 끝나면 바탕화면과 시작 메뉴 바로가기를 갱신합니다.
 
+## 릴리스 빌드
+
+portable EXE, per-user installer, SHA-256 목록을 한 번에 생성합니다. installer 빌드에는 Inno Setup 6이 필요합니다.
+
+```bat
+winget install --exact --id JRSoftware.InnoSetup
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1
+```
+
+`dist\release` 결과:
+
+- `LOLManager-vX.Y.Z.exe`
+- `LOLManager-Setup-vX.Y.Z.exe`
+- `SHA256SUMS.txt`
+
+installer는 `%LOCALAPPDATA%\Programs\LOLManager`에 사용자 권한으로 설치합니다. 시작 메뉴 바로가기는 항상 만들고, 바탕 화면 바로가기는 기본 선택 항목입니다. 업그레이드와 제거 과정에서 `%APPDATA%\LOLManager`의 설정과 캐시는 삭제하지 않습니다.
+
+릴리스 바이너리는 코드 서명되지 않았으므로 Windows SmartScreen 경고가 표시될 수 있습니다. 다운로드한 파일은 함께 제공되는 `SHA256SUMS.txt`로 검증하세요.
+
 ## 바로가기
 
 ```bat
