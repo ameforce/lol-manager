@@ -31,7 +31,9 @@ def test_inno_installer_creates_required_shortcuts_and_launch_option() -> None:
 def test_inno_installer_does_not_delete_user_settings() -> None:
     script = (PROJECT_ROOT / "installer" / "LOLManager.iss").read_text("utf-8")
 
-    assert "[UninstallDelete]" not in script
+    assert "[UninstallDelete]" in script
+    assert 'Type: filesandordirs; Name: "{app}\\logs"' in script
+    assert script.count("Type: filesandordirs;") == 1
     assert "{userappdata}" not in script
     assert "%APPDATA%" not in script
 
@@ -56,4 +58,5 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "Assert-ShortcutTarget $startShortcut" in script
     assert "VersionInfo.FileVersion" in script
     assert "UseDefaultInstallPath" in script
+    assert "제거 후 설치 경로가 남아 있습니다." in script
     assert "settings preserved after reinstall/uninstall: yes" in script
