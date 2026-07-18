@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '1.1.12'
+    [string]$Version = '1.1.12',
+    [switch]$UseDefaultInstallPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,7 +29,16 @@ if (-not $verificationRootFull.StartsWith(
     throw "검증 경로가 허용된 per-user 임시 루트 밖입니다: $verificationRootFull"
 }
 
-$installDir = Join-Path $verificationRootFull 'LOLManager'
+$defaultInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\LOLManager'
+if ($UseDefaultInstallPath) {
+    if (Test-Path -LiteralPath $defaultInstallDir) {
+        throw "기본 설치 경로가 이미 존재해 안전한 검증을 시작할 수 없습니다: $defaultInstallDir"
+    }
+    $installDir = $defaultInstallDir
+}
+else {
+    $installDir = Join-Path $verificationRootFull 'LOLManager'
+}
 $testAppData = Join-Path $verificationRootFull 'AppData\Roaming'
 $settingsDir = Join-Path $testAppData 'LOLManager'
 $settingsMarker = Join-Path $settingsDir 'installer-preserve-check.txt'

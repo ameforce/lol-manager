@@ -55,4 +55,5 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "Assert-ShortcutTarget $desktopShortcut" in script
     assert "Assert-ShortcutTarget $startShortcut" in script
     assert "VersionInfo.FileVersion" in script
+    assert "UseDefaultInstallPath" in script
     assert "settings preserved after reinstall/uninstall: yes" in script
