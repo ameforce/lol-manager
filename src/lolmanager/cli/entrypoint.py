@@ -982,6 +982,44 @@ def _champ_select_action_attempt_via_lcu(
     return ChampSelectLcuAttempt(False, LcuLoopAction.WAIT_AUTHORITATIVE, "unknown")
 
 
+def _guard_champ_select_phase_exit(
+    attempt: ChampSelectLcuAttempt,
+    lcu: Optional[LcuClient],
+    stage: str,
+    logger: logging.Logger,
+) -> ChampSelectLcuAttempt:
+    if attempt.completed or attempt.loop_action != LcuLoopAction.WAIT_AUTHORITATIVE:
+        return attempt
+
+    phase_attempt = _poll_lcu_phase_attempt(lcu, logger, f"{stage} phase 확인")
+    if phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE:
+        logger.debug(
+            "LCU %s phase 확인 실패(outcome=%s). 이미지 fallback을 허용합니다.",
+            stage,
+            phase_attempt.outcome,
+        )
+        return ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.FALLBACK_IMAGE,
+            f"phase_probe:{phase_attempt.outcome}",
+        )
+    if (
+        phase_attempt.loop_action == LcuLoopAction.ACT_LCU
+        and phase_attempt.phase != PHASE_CHAMP_SELECT
+    ):
+        logger.info(
+            "LCU %s action 대기 중 ChampSelect 이탈 감지(phase=%s).",
+            stage,
+            phase_attempt.phase,
+        )
+        return ChampSelectLcuAttempt(
+            False,
+            LcuLoopAction.ACT_LCU,
+            f"phase_exit:{phase_attempt.phase}",
+        )
+    return attempt
+
+
 def _wait_champ_select_action_via_lcu(
     lcu: Optional[LcuClient],
     champion_name: object,
@@ -1009,21 +1047,11 @@ def _wait_champ_select_action_via_lcu(
         if attempt.completed or attempt.loop_action != LcuLoopAction.WAIT_AUTHORITATIVE:
             return attempt
 
-        phase_attempt = _poll_lcu_phase_attempt(lcu, logger, f"{stage} phase 확인")
-        if (
-            phase_attempt.loop_action == LcuLoopAction.ACT_LCU
-            and phase_attempt.phase != PHASE_CHAMP_SELECT
-        ):
-            logger.info(
-                "LCU %s action 대기 중 ChampSelect 이탈 감지(phase=%s).",
-                stage,
-                phase_attempt.phase,
-            )
-            return ChampSelectLcuAttempt(
-                False,
-                LcuLoopAction.ACT_LCU,
-                f"phase_exit:{phase_attempt.phase}",
-            )
+        guarded_attempt = _guard_champ_select_phase_exit(
+            attempt, lcu, stage, logger
+        )
+        if guarded_attempt is not attempt:
+            return guarded_attempt
 
         wait_count += 1
         now = time.monotonic()
@@ -3654,6 +3682,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     stage="픽 준비",
                     logger=logger,
                 )
+                lcu_pick_attempt = _guard_champ_select_phase_exit(
+                    lcu_pick_attempt, lcu, "픽 준비", logger
+                )
+                if _handle_champ_select_phase_exit(
+                    lcu_pick_attempt, lcu, "픽 준비", logger
+                ):
+                    restart_cycle = True
+                    break
                 if lcu_pick_attempt.completed:
                     _set_my_pick_turn(False, time.monotonic(), logger)
                     break
@@ -3678,6 +3714,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                             stage="예비 픽 준비",
                             logger=logger,
                         )
+                        reserve_lcu_attempt = _guard_champ_select_phase_exit(
+                            reserve_lcu_attempt, lcu, "예비 픽 준비", logger
+                        )
+                        if _handle_champ_select_phase_exit(
+                            reserve_lcu_attempt, lcu, "예비 픽 준비", logger
+                        ):
+                            restart_cycle = True
+                            break
                         if reserve_lcu_attempt.completed:
                             pick_index = next_idx
                             champion_name = next_champ
@@ -3716,6 +3760,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         )
                         break
 
+                    if restart_cycle:
+                        break
                     if switched:
                         break
                     if reserve_wait_authoritative:
@@ -3924,6 +3970,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                             stage="예비 픽 준비",
                             logger=logger,
                         )
+                        reserve_lcu_attempt = _guard_champ_select_phase_exit(
+                            reserve_lcu_attempt, lcu, "예비 픽 준비", logger
+                        )
+                        if _handle_champ_select_phase_exit(
+                            reserve_lcu_attempt, lcu, "예비 픽 준비", logger
+                        ):
+                            restart_cycle = True
+                            break
                         if reserve_lcu_attempt.completed:
                             pick_index = next_idx
                             champion_name = next_champ
@@ -4072,6 +4126,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                         switched = True
                         break
 
+                    if restart_cycle:
+                        break
                     if switched:
                         break
                     if reserve_wait_authoritative:
