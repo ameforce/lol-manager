@@ -45,7 +45,7 @@ from lolmanager.platform.external_apps import (
 )
 from lolmanager.platform.resolution_detector import (
     find_league_window_rect,
-    is_game_foreground,
+    is_game_client_active,
     is_league_client_foreground,
     is_rect_minimized,
 )
@@ -177,6 +177,16 @@ class _VirtualScreen:
     top: int
     right: int
     bottom: int
+
+
+@dataclass(frozen=True)
+class _ExternalSyncSnapshot:
+    config_mtime_ns: int
+    in_game: bool
+    rect: Optional[tuple[int, int, int, int]]
+    minimized: bool
+    league_running: bool
+    league_foreground: bool
 
 
 class _MONITORINFO(ctypes.Structure):
@@ -419,9 +429,11 @@ class LolManagerGui:
         self._ui_busy_until: float = 0.0
 
         self._external_sync_stop = threading.Event()
-        self._external_sync_q: "queue.Queue[dict[str, object]]" = queue.Queue(maxsize=1)
+        self._external_sync_q: "queue.Queue[_ExternalSyncSnapshot]" = queue.Queue(
+            maxsize=1
+        )
         self._external_sync_thread: Optional[threading.Thread] = None
-        self._external_sync_last: Optional[dict[str, object]] = None
+        self._external_sync_last: Optional[_ExternalSyncSnapshot] = None
         self._stop_requested_at: Optional[float] = None
         self._restart_after_exit = False
         self._unexpected_cli_restart_count = 0
@@ -437,7 +449,6 @@ class LolManagerGui:
         self._client_seen_once = False
         self._league_exit_guard = LeagueClientExitGuard(league_client_exe_path())
         self._auto_iconified = False
-        self._ingame_lock = False
         self._client_closed_at: Optional[float] = None
         self._last_client_rect: Optional[tuple[int, int, int, int]] = None
         self._last_geo_xy: Optional[tuple[int, int]] = None
@@ -1393,16 +1404,10 @@ class LolManagerGui:
         if "현재 상태 업데이트: client_state=" in line:
             try:
                 state = line.split("client_state=", 1)[1].strip()
-                prev = ""
-                try:
-                    prev = str(self.client_state_var.get() or "").strip()
-                except Exception:
-                    prev = ""
                 self.client_state_var.set(state)
                 if state in ROLE_CLEAR_STATES:
                     self._set_role(None)
                 self._on_client_state_for_match_timer(state)
-                self._on_client_state_for_windowing(prev, state)
             except Exception:
                 pass
         if "현재 상태 업데이트: is_my_pick_turn=" in line:
@@ -2095,10 +2100,45 @@ class LolManagerGui:
     def _external_sync_poll_sec(self, in_game: bool) -> float:
         return max(0.05, float(external_sync_delay_ms(in_game=in_game)) / 1000.0)
 
+    def _collect_external_sync_snapshot(self) -> _ExternalSyncSnapshot:
+        try:
+            st = self.config_path.stat()
+            config_mtime_ns = int(st.st_mtime_ns)
+        except OSError:
+            config_mtime_ns = 0
+
+        in_game = bool(is_game_client_active())
+
+        try:
+            rect = find_league_window_rect(visible_only=False)
+        except Exception:
+            rect = None
+        minimized = bool(rect is not None and is_rect_minimized(rect))
+
+        try:
+            league_running = bool(self._league_exit_guard.poll_is_running())
+        except Exception:
+            league_running = False
+
+        try:
+            league_foreground = bool(is_league_client_foreground())
+        except Exception:
+            league_foreground = False
+
+        return _ExternalSyncSnapshot(
+            config_mtime_ns=config_mtime_ns,
+            in_game=in_game,
+            rect=rect,
+            minimized=minimized,
+            league_running=league_running,
+            league_foreground=league_foreground,
+        )
+
     def _external_sync_worker(self) -> None:
         stop = self._external_sync_stop
         q = self._external_sync_q
         next_at = time.monotonic()
+        last_snapshot: Optional[_ExternalSyncSnapshot] = None
 
         while not stop.is_set():
             now = time.monotonic()
@@ -2106,61 +2146,25 @@ class LolManagerGui:
                 stop.wait(next_at - now)
                 continue
 
-            state: dict[str, object] = {"t": float(now)}
             try:
-                try:
-                    st = self.config_path.stat()
-                    state["config_mtime_ns"] = int(st.st_mtime_ns)
-                except OSError:
-                    state["config_mtime_ns"] = 0
-
-                try:
-                    st2 = self._match_stats_path.stat()
-                    state["match_stats_mtime_ns"] = int(st2.st_mtime_ns)
-                except OSError:
-                    state["match_stats_mtime_ns"] = 0
-
-                in_game = bool(getattr(self, "_ingame_lock", False))
-                try:
-                    in_game = bool(in_game or is_game_foreground())
-                except Exception:
-                    pass
-                state["in_game"] = bool(in_game)
-
-                rect = None
-                try:
-                    rect = find_league_window_rect(visible_only=False)
-                except Exception:
-                    rect = None
-                state["rect"] = rect
-                state["minimized"] = bool(rect is not None and is_rect_minimized(rect))
-
-                try:
-                    state["league_running"] = bool(
-                        self._league_exit_guard.poll_is_running()
-                    )
-                except Exception:
-                    state["league_running"] = False
-
-                try:
-                    state["league_foreground"] = bool(is_league_client_foreground())
-                except Exception:
-                    state["league_foreground"] = False
+                snapshot = self._collect_external_sync_snapshot()
             except Exception:
-                pass
+                snapshot = None
 
-            try:
-                while True:
-                    q.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                q.put_nowait(state)
-            except queue.Full:
-                pass
+            if snapshot is not None:
+                last_snapshot = snapshot
+                try:
+                    while True:
+                        q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(snapshot)
+                except queue.Full:
+                    pass
 
             next_at = now + self._external_sync_poll_sec(
-                bool(state.get("in_game", False))
+                bool(last_snapshot.in_game) if last_snapshot is not None else False
             )
 
     def _sync_external_state(self) -> None:
@@ -2171,15 +2175,12 @@ class LolManagerGui:
                 state = self._external_sync_q.get_nowait()
         except queue.Empty:
             state = state or getattr(self, "_external_sync_last", None)
-        if isinstance(state, dict):
-            self._external_sync_last = state
+        if not isinstance(state, _ExternalSyncSnapshot):
+            self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
+            return
+        self._external_sync_last = state
 
-        mtime_ns = 0
-        if isinstance(state, dict):
-            try:
-                mtime_ns = int(state.get("config_mtime_ns") or 0)
-            except Exception:
-                mtime_ns = 0
+        mtime_ns = int(state.config_mtime_ns)
 
         if mtime_ns and mtime_ns != self._last_config_mtime_ns:
             self._last_config_mtime_ns = mtime_ns
@@ -2210,17 +2211,7 @@ class LolManagerGui:
             self._match_stats_last_poll_at = float(now)
             self._refresh_match_stats(force=False)
 
-        in_game = bool(getattr(self, "_ingame_lock", False))
-        if isinstance(state, dict) and "in_game" in state:
-            try:
-                in_game = bool(state.get("in_game"))
-            except Exception:
-                pass
-        else:
-            try:
-                in_game = bool(in_game or is_game_foreground())
-            except Exception:
-                pass
+        in_game = bool(state.in_game)
 
         if in_game:
             try:
@@ -2234,6 +2225,13 @@ class LolManagerGui:
                     self._auto_iconified = True
                 except Exception:
                     pass
+            win = getattr(self, "_log_window", None)
+            if win is not None:
+                try:
+                    if str(win.state() or "").strip().casefold() != "iconic":
+                        win.iconify()
+                except Exception:
+                    pass
 
             want_topmost = False
             self._apply_lol_topmost(want_topmost)
@@ -2244,24 +2242,10 @@ class LolManagerGui:
             )
             return
 
-        rect = None
-        minimized = False
-        league_running = False
-        league_foreground = False
-        if isinstance(state, dict):
-            rect = state.get("rect")
-            try:
-                minimized = bool(state.get("minimized"))
-            except Exception:
-                minimized = False
-            try:
-                league_running = bool(state.get("league_running"))
-            except Exception:
-                league_running = False
-            try:
-                league_foreground = bool(state.get("league_foreground"))
-            except Exception:
-                league_foreground = False
+        rect = state.rect
+        minimized = bool(state.minimized)
+        league_running = bool(state.league_running)
+        league_foreground = bool(state.league_foreground)
         if rect is not None and not isinstance(rect, tuple):
             rect = None
         want_topmost = False
@@ -2392,41 +2376,6 @@ class LolManagerGui:
                 self.root.after(400, lambda: self._refresh_match_stats(force=False))
             except Exception:
                 pass
-
-    def _on_client_state_for_windowing(self, prev_state: str, curr_state: str) -> None:
-        prev = str(prev_state or "").strip().upper()
-        curr = str(curr_state or "").strip().upper()
-        if curr == "INGAME" and prev != "INGAME":
-            self._enter_ingame_lock()
-        elif prev == "INGAME" and curr != "INGAME":
-            self._leave_ingame_lock()
-
-    def _enter_ingame_lock(self) -> None:
-        if bool(getattr(self, "_ingame_lock", False)):
-            return
-        self._ingame_lock = True
-
-        prev_topmost = bool(getattr(self, "_lol_topmost_enabled", False))
-        self._apply_lol_topmost(False)
-        if prev_topmost:
-            self._restore_active_window_after_topmost_release()
-
-        if not self._is_root_iconic():
-            try:
-                self.root.iconify()
-                self._auto_iconified = True
-            except Exception:
-                pass
-        win = getattr(self, "_log_window", None)
-        if win is not None:
-            try:
-                if str(win.state() or "").strip().casefold() != "iconic":
-                    win.iconify()
-            except Exception:
-                pass
-
-    def _leave_ingame_lock(self) -> None:
-        self._ingame_lock = False
 
     def _tick_match_timer(self) -> None:
         try:
