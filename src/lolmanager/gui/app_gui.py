@@ -1818,6 +1818,12 @@ class LolManagerGui:
             cmd = [sys.executable, "--cli"]
         else:
             cmd = [sys.executable, "-m", "lolmanager", "--cli"]
+        cmd.extend(
+            [
+                "--continue-after-game-preference-path",
+                str(self.gui_preferences_path),
+            ]
+        )
         try:
             if bool(self.continue_after_game_var.get()):
                 cmd.append("--continue-after-game")
@@ -1848,10 +1854,6 @@ class LolManagerGui:
         self.running_var.set("Running")
         self.btn_start.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
-        try:
-            self.chk_continue.configure(state=tk.DISABLED)
-        except Exception:
-            pass
 
         self._reader_thread = threading.Thread(
             target=self._reader_loop, args=(self.proc,), daemon=True
