@@ -40,6 +40,7 @@ from lolmanager.core.lcu_client import (
     PHASE_RECONNECT,
     PHASE_WAITING_FOR_STATS,
     PHASE_WATCH_IN_PROGRESS,
+    champ_select_session_identity,
     champ_select_time_left_seconds,
     completed_champ_select_champion_ids,
     is_known_gameflow_phase,
@@ -109,7 +110,10 @@ DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
 DEFAULT_IMAGE_SET_WIDTH = 1280
 DEFAULT_IMAGE_SET_HEIGHT = 720
 DEFAULT_CONTINUE_AFTER_GAME = False
-BAN_COMMIT_WINDOW_SEC = 4.0
+BAN_COMPLETION_TARGET_SEC = 10.0
+# Two normal 2-second LCU confirmation waits plus request latency must finish
+# before the target. Start at 15 seconds remaining instead of gambling at 4.
+BAN_COMMIT_WINDOW_SEC = 15.0
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 
@@ -1142,11 +1146,30 @@ def _handle_champ_select_phase_exit(
     stage: str,
     logger: logging.Logger,
 ) -> bool:
+    global _my_pick_turn_miss_streak
+
+    session_reset_prefix = "session_reset:"
     prefix = "phase_exit:"
+    if attempt.outcome.startswith(session_reset_prefix):
+        reason = attempt.outcome.removeprefix(session_reset_prefix)
+        now = time.monotonic()
+        _my_pick_turn_miss_streak = 0
+        _set_my_pick_turn(False, now, logger)
+        _set_client_state(ClientState.UNKNOWN, now, logger)
+        logger.info(
+            "LCU ChampSelect 세션 초기화(%s,reason=%s). 외부 매칭 사이클로 복귀합니다.",
+            stage,
+            reason,
+        )
+        return True
     if not attempt.outcome.startswith(prefix):
         return False
 
     phase = attempt.outcome.removeprefix(prefix)
+    now = time.monotonic()
+    _my_pick_turn_miss_streak = 0
+    _set_my_pick_turn(False, now, logger)
+    _apply_lcu_phase_state(phase, now, logger)
     if phase == PHASE_READY_CHECK:
         _accept_ready_check_via_lcu(lcu, stage, logger)
     logger.info(
@@ -2790,6 +2813,7 @@ def _reconcile_pick_pool_availability(
     current_index: int,
     candidate_ids: Optional[dict[int, int]],
     logger: logging.Logger,
+    snapshot: Optional[object] = None,
 ) -> tuple[int, dict[int, int]]:
     """Read completed bans/picks even before the local pick action begins."""
     snapshot_fn = getattr(lcu, "get_champ_select_snapshot", None)
@@ -2799,14 +2823,16 @@ def _reconcile_pick_pool_availability(
         candidate_ids = _resolve_pick_pool_champion_ids(lcu, pick_pool, logger)
     if not candidate_ids:
         return current_index, candidate_ids
-    try:
-        result = snapshot_fn()
-    except Exception as exc:
-        logger.debug("LCU 밴/픽 가용성 조회 실패: %s", exc)
-        return current_index, candidate_ids
-    if not getattr(result, "ok", False):
-        return current_index, candidate_ids
-    raw = getattr(getattr(result, "value", None), "raw", None)
+    if snapshot is None:
+        try:
+            result = snapshot_fn()
+        except Exception as exc:
+            logger.debug("LCU 밴/픽 가용성 조회 실패: %s", exc)
+            return current_index, candidate_ids
+        if not getattr(result, "ok", False):
+            return current_index, candidate_ids
+        snapshot = getattr(result, "value", None)
+    raw = getattr(snapshot, "raw", None)
     if not isinstance(raw, dict):
         return current_index, candidate_ids
     selected = choose_available_pick_index(
@@ -2821,6 +2847,71 @@ def _reconcile_pick_pool_availability(
     return selected, candidate_ids
 
 
+def _champ_select_session_reset_attempt(reason: object) -> ChampSelectLcuAttempt:
+    detail = str(reason or "unavailable").strip().casefold().replace(" ", "_")
+    return ChampSelectLcuAttempt(
+        False,
+        LcuLoopAction.ACT_LCU,
+        f"session_reset:{detail or 'unavailable'}",
+    )
+
+
+def _commit_ban_with_timing(
+    lcu: Optional[LcuClient],
+    ban_name: str,
+    *,
+    logger: logging.Logger,
+    interval_sec: float,
+    time_left: Optional[float] = None,
+    expected_session_identity: Optional[str] = None,
+) -> ChampSelectLcuAttempt:
+    if expected_session_identity is not None:
+        snapshot_fn = getattr(lcu, "get_champ_select_snapshot", None)
+        if not callable(snapshot_fn):
+            return _champ_select_session_reset_attempt("snapshot_unavailable")
+        try:
+            latest_result = snapshot_fn()
+        except Exception:
+            return _champ_select_session_reset_attempt("snapshot_error")
+        if not getattr(latest_result, "ok", False):
+            outcome = getattr(getattr(latest_result, "status", None), "value", None)
+            return _champ_select_session_reset_attempt(outcome or "snapshot_unavailable")
+        latest_raw = getattr(getattr(latest_result, "value", None), "raw", None)
+        if not isinstance(latest_raw, dict):
+            return _champ_select_session_reset_attempt("malformed_snapshot")
+        latest_identity = champ_select_session_identity(latest_raw)
+        if latest_identity != expected_session_identity:
+            return _champ_select_session_reset_attempt("identity_changed")
+        latest_time_left = champ_select_time_left_seconds(latest_raw)
+        if latest_time_left is not None:
+            time_left = latest_time_left
+
+    started_at = time.monotonic()
+    logger.info(
+        "LCU 밴 실행 시작(time_left=%.1f,target_complete=%.1f,start_window=%.1f,champion=%s)",
+        time_left if time_left is not None else -1.0,
+        BAN_COMPLETION_TARGET_SEC,
+        BAN_COMMIT_WINDOW_SEC,
+        ban_name or "NONE",
+    )
+    attempt = _ban_champ_select_attempt_or_skip(
+        lcu, ban_name, logger=logger, interval_sec=interval_sec
+    )
+    timings = getattr(lcu, "last_champ_select_action_timings", {})
+    if not isinstance(timings, dict):
+        timings = {}
+    logger.info(
+        "LCU 밴 실행 결과(completed=%s,outcome=%s,elapsed=%.3f,assignment=%.3f,completion=%.3f,fallback_completion=%.3f)",
+        attempt.completed,
+        attempt.outcome,
+        max(0.0, time.monotonic() - started_at),
+        float(timings.get("assignment_elapsed_sec", -1.0)),
+        float(timings.get("completion_elapsed_sec", -1.0)),
+        float(timings.get("fallback_completion_elapsed_sec", -1.0)),
+    )
+    return attempt
+
+
 def _wait_for_late_ban_and_reconcile_pick_pool(
     lcu: Optional[LcuClient],
     pick_pool: Sequence[tuple[str, str]],
@@ -2832,13 +2923,13 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
     interval_sec: float,
     candidate_ids: Optional[dict[int, int]] = None,
 ) -> tuple[int, str, str, ChampSelectLcuAttempt, dict[int, int]]:
-    """Keep adapting the prepick, then commit the ban only near phase expiry."""
+    """Keep adapting the prepick, then commit early enough to finish by target."""
     if not pick_pool:
         return (
             current_index,
             "",
             "",
-            _ban_champ_select_attempt_or_skip(
+            _commit_ban_with_timing(
                 lcu, "", logger=logger, interval_sec=interval_sec
             ),
             {},
@@ -2858,20 +2949,72 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             current_index,
             champion_name,
             ban_name,
-            _ban_champ_select_attempt_or_skip(
+            _commit_ban_with_timing(
                 lcu, ban_name, logger=logger, interval_sec=interval_sec
             ),
             {},
         )
 
     last_delay_bucket: Optional[int] = None
+    session_identity: Optional[str] = None
     while True:
+        try:
+            snapshot_result = snapshot_fn()
+        except Exception as exc:
+            logger.debug("LCU 밴 단계 조회 실패: %s", exc)
+            return (
+                current_index,
+                pick_pool[current_index][0],
+                "",
+                _champ_select_session_reset_attempt("snapshot_error"),
+                candidate_ids or {},
+            )
+        if not getattr(snapshot_result, "ok", False):
+            outcome = getattr(getattr(snapshot_result, "status", None), "value", None)
+            return (
+                current_index,
+                pick_pool[current_index][0],
+                "",
+                _champ_select_session_reset_attempt(outcome or "snapshot_unavailable"),
+                candidate_ids or {},
+            )
+        snapshot = getattr(snapshot_result, "value", None)
+        raw = getattr(snapshot, "raw", None)
+        if not isinstance(raw, dict):
+            return (
+                current_index,
+                pick_pool[current_index][0],
+                "",
+                _champ_select_session_reset_attempt("malformed_snapshot"),
+                candidate_ids or {},
+            )
+        current_session_identity = champ_select_session_identity(raw)
+        if current_session_identity is None:
+            return (
+                current_index,
+                pick_pool[current_index][0],
+                "",
+                _champ_select_session_reset_attempt("missing_identity"),
+                candidate_ids or {},
+            )
+        if session_identity is None:
+            session_identity = current_session_identity
+        elif current_session_identity != session_identity:
+            return (
+                current_index,
+                pick_pool[current_index][0],
+                "",
+                _champ_select_session_reset_attempt("identity_changed"),
+                candidate_ids or {},
+            )
+
         next_index, candidate_ids = _reconcile_pick_pool_availability(
             lcu,
             pick_pool,
             current_index=current_index,
             candidate_ids=candidate_ids,
             logger=logger,
+            snapshot=snapshot,
         )
         if next_index != current_index:
             current_index = next_index
@@ -2898,18 +3041,7 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             configured_ban=configured_ban,
             logger=logger,
         )
-        try:
-            snapshot_result = snapshot_fn()
-        except Exception as exc:
-            logger.debug("LCU 밴 단계 조회 실패: %s", exc)
-            break
-        if not getattr(snapshot_result, "ok", False):
-            break
-        snapshot = getattr(snapshot_result, "value", None)
-        raw = getattr(snapshot, "raw", None)
         actions = getattr(snapshot, "actions", ())
-        if not isinstance(raw, dict):
-            break
         pick_in_progress = any(
             str(getattr(action, "type", "")).casefold() == "pick"
             and bool(getattr(action, "is_in_progress", False))
@@ -2956,8 +3088,9 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             bucket = int(time_left)
             if bucket != last_delay_bucket:
                 logger.info(
-                    "밴 단계 %.1fs 남음. 예비 픽 가용성을 계속 확인한 뒤 막판에 밴합니다.",
+                    "밴 단계 %.1fs 남음. 예비 픽 가용성을 확인하며 %.1fs부터 밴을 시작합니다.",
                     time_left,
+                    BAN_COMMIT_WINDOW_SEC,
                 )
                 last_delay_bucket = bucket
             time.sleep(min(interval_sec, max(0.05, time_left - BAN_COMMIT_WINDOW_SEC)))
@@ -2966,21 +3099,16 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             current_index,
             champion_name,
             ban_name,
-            _ban_champ_select_attempt_or_skip(
-                lcu, ban_name, logger=logger, interval_sec=interval_sec
+            _commit_ban_with_timing(
+                lcu,
+                ban_name,
+                logger=logger,
+                interval_sec=interval_sec,
+                time_left=time_left,
+                expected_session_identity=session_identity,
             ),
             candidate_ids or {},
         )
-
-    return (
-        current_index,
-        champion_name,
-        ban_name,
-        _ban_champ_select_attempt_or_skip(
-            lcu, ban_name, logger=logger, interval_sec=interval_sec
-        ),
-        candidate_ids or {},
-    )
 
 
 def cli_main(argv: Optional[list[str]] = None) -> None:

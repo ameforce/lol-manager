@@ -77,5 +77,9 @@ def champion_config_path() -> Path:
     return user_data_dir() / "champion_config.json"
 
 
+def gui_preferences_path() -> Path:
+    return user_data_dir() / "gui_preferences.json"
+
+
 def match_timing_stats_path() -> Path:
     return user_data_dir() / "match_timing_stats.json"
