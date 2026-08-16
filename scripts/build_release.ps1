@@ -39,6 +39,26 @@ $versionInfoFile = Join-Path $buildRoot 'version_info.txt'
 $pyInstallerWork = Join-Path $buildRoot 'pyinstaller'
 $specDir = Join-Path $buildRoot 'spec'
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($stream)
+        return ([BitConverter]::ToString($hashBytes)).Replace('-', '')
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 foreach ($path in @($releaseDir, $generatedPackageDir, $pyInstallerWork, $specDir)) {
     [IO.Directory]::CreateDirectory($path) | Out-Null
 }
@@ -142,7 +162,7 @@ if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
 }
 
 $checksumLines = foreach ($artifact in @($setupPath, $portablePath)) {
-    $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToUpperInvariant()
+    $hash = Get-Sha256Hex -Path $artifact
     "$hash  $([IO.Path]::GetFileName($artifact))"
 }
 [IO.File]::WriteAllLines($checksumPath, $checksumLines, $utf8NoBom)
