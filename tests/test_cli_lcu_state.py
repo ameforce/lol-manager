@@ -738,6 +738,29 @@ class _FakeCliChampSelectDodgeRematchLcu(_FakeCliReadyCheckRematchLcu):
         return LcuDecision(LcuOutcome.SUCCESS, value="mid")
 
 
+class _FakeCliChampSelectDodgeRematchBanLcu(
+    _FakeCliChampSelectDodgeRematchLcu
+):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_champ_select_action_timings = {
+            "assignment_elapsed_sec": 0.1,
+            "completion_elapsed_sec": 0.1,
+        }
+
+    def select_champ_select_champion_decision(
+        self, champion_name: object, *, action_type: str, complete: bool = False
+    ) -> LcuDecision:
+        self.select_calls.append(
+            {
+                "champion_name": champion_name,
+                "action_type": action_type,
+                "complete": complete,
+            }
+        )
+        return LcuDecision(LcuOutcome.SUCCESS, reason="fresh rematch action accepted")
+
+
 class _FakeCliFinalPickDodgeRematchLcu(_FakeCliChampSelectLcu):
     def __init__(self) -> None:
         super().__init__()
@@ -1321,6 +1344,78 @@ class CliLcuStateTests(unittest.TestCase):
             fake_lcu.select_calls,
             [
                 {"champion_name": "아리", "action_type": "pick", "complete": False},
+                {"champion_name": "아리", "action_type": "pick", "complete": True},
+            ],
+        )
+        search.assert_not_called()
+        click_relative.assert_not_called()
+        click_screen.assert_not_called()
+
+    def test_cli_main_dodge_rematch_runs_fresh_ban_before_final_pick(self) -> None:
+        fake_lcu = _FakeCliChampSelectDodgeRematchBanLcu()
+        minimized_rect = (-32000, -32000, -31900, -31900)
+        entrypoint._last_lcu_ready_accept_at.clear()
+
+        def stop_after_rematch_actions(_seconds: float) -> None:
+            if len(fake_lcu.select_calls) >= 3:
+                raise RuntimeError("stop after fresh rematch ban")
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                side_effect=[(0, 0, 1280, 720), minimized_rect, minimized_rect],
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(
+                entrypoint, "resolve_ban_name_for_runtime", return_value="제드"
+            ),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint, "click_relative") as click_relative,
+            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(
+                entrypoint.time,
+                "sleep",
+                side_effect=stop_after_rematch_actions,
+            ),
+            self.assertRaisesRegex(RuntimeError, "fresh rematch ban"),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(
+            fake_lcu.select_calls[:3],
+            [
+                {"champion_name": "아리", "action_type": "pick", "complete": False},
+                {"champion_name": "제드", "action_type": "ban", "complete": True},
                 {"champion_name": "아리", "action_type": "pick", "complete": True},
             ],
         )
@@ -3701,6 +3796,64 @@ class CliLcuStateTests(unittest.TestCase):
 
             self.assertTrue(handled)
             accept.assert_not_called()
+
+    def test_champ_select_phase_exit_clears_pick_turn_before_rematch(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = True
+        entrypoint.RUNTIME_STATE["my_pick_turn_updated_at"] = 1.0
+
+        try:
+            with mock.patch.object(entrypoint.time, "monotonic", return_value=25.0):
+                handled = entrypoint._handle_champ_select_phase_exit(
+                    entrypoint.ChampSelectLcuAttempt(
+                        False,
+                        LcuLoopAction.ACT_LCU,
+                        f"phase_exit:{PHASE_MATCHMAKING}",
+                    ),
+                    object(),
+                    "밴",
+                    logger,
+                )
+
+            self.assertTrue(handled)
+            self.assertFalse(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
+            self.assertEqual(
+                entrypoint.RUNTIME_STATE["my_pick_turn_updated_at"],
+                25.0,
+            )
+        finally:
+            entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+
+    def test_champ_select_session_reset_clears_stale_runtime_state(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.BANPICK
+        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = True
+        entrypoint._my_pick_turn_miss_streak = 2
+
+        try:
+            with mock.patch.object(entrypoint.time, "monotonic", return_value=30.0):
+                handled = entrypoint._handle_champ_select_phase_exit(
+                    entrypoint.ChampSelectLcuAttempt(
+                        False,
+                        LcuLoopAction.ACT_LCU,
+                        "session_reset:identity_changed",
+                    ),
+                    object(),
+                    "밴",
+                    logger,
+                )
+
+            self.assertTrue(handled)
+            self.assertEqual(
+                entrypoint.RUNTIME_STATE["client_state"],
+                entrypoint.ClientState.UNKNOWN,
+            )
+            self.assertFalse(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
+            self.assertEqual(entrypoint._my_pick_turn_miss_streak, 0)
+        finally:
+            entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+            entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+            entrypoint._my_pick_turn_miss_streak = 0
 
     def test_missing_ban_skips_ban_action_without_lcu_write(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")

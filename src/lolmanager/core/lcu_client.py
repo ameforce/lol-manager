@@ -433,6 +433,17 @@ def champ_select_time_left_seconds(session: Mapping[str, Any]) -> Optional[float
     return None
 
 
+def champ_select_session_identity(session: Mapping[str, Any]) -> Optional[str]:
+    """Return the LCU game identity that changes across dodge/rematch sessions."""
+    value = session.get("gameId")
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value) if value > 0 else None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass(frozen=True)
 class ChampSelectAction:
     id: int
