@@ -26,6 +26,7 @@ from lolmanager.platform.external_apps import (
     league_client_exe_path,
 )
 from lolmanager.core.match_timing import append_match_duration, format_duration_mmss
+from lolmanager.core.gui_preferences import load_continue_after_game_preference
 from lolmanager.core.lcu_client import (
     LcuClient,
     LcuLoopAction,
@@ -120,7 +121,36 @@ ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 
 def should_continue_after_game(value: object) -> bool:
     """The explicit UI/CLI opt-in is the only way to requeue after a match."""
+    if callable(value):
+        value = value()
     return bool(value)
+
+
+class ContinueAfterGamePolicy:
+    """Read the GUI preference at each game-boundary decision."""
+
+    def __init__(
+        self,
+        *,
+        initial_value: object,
+        preference_path: Optional[Path] = None,
+    ) -> None:
+        self.preference_path = Path(preference_path) if preference_path else None
+        self._last_value = bool(initial_value)
+
+    def current(self, logger: Optional[logging.Logger] = None) -> bool:
+        if self.preference_path is None:
+            return self._last_value
+        saved = load_continue_after_game_preference(self.preference_path)
+        if saved is None:
+            return self._last_value
+        if saved != self._last_value and logger is not None:
+            logger.info(
+                "다음 게임 자동 진행 설정 변경 감지: %s",
+                "활성" if saved else "비활성(한 게임 모드)",
+            )
+        self._last_value = saved
+        return self._last_value
 
 
 class LeagueWindowLookupTimeout(RuntimeError):
@@ -2393,17 +2423,23 @@ def process_postgame(
     interval_sec: float,
     logger: logging.Logger,
     lcu: Optional[LcuClient] = None,
-    continue_after_game: bool = True,
-) -> None:
-    if not should_continue_after_game(continue_after_game):
+    continue_after_game: object = True,
+) -> bool:
+    def continuation_enabled() -> bool:
+        return should_continue_after_game(continue_after_game)
+
+    if not continuation_enabled():
         logger.info("한 게임 모드: 다음 게임 자동 진행을 하지 않고 postgame 화면에서 종료합니다.")
-        return
+        return False
     _set_client_state(ClientState.POSTGAME_SCORE, time.monotonic(), logger)
     end_stats_dismissed = False
     play_again_attempted = False
     play_again_completed_at: Optional[float] = None
     pre_end_honor_attempted = False
     while True:
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         phase_attempt = _poll_lcu_phase_attempt(
             lcu, logger, "엔드 이후", max_age_sec=0.5
         )
@@ -2415,6 +2451,9 @@ def process_postgame(
             )
             time.sleep(interval_sec)
             continue
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         if phase in {
             PHASE_MATCHMAKING,
             PHASE_CHAMP_SELECT,
@@ -2423,7 +2462,7 @@ def process_postgame(
             PHASE_WATCH_IN_PROGRESS,
         }:
             logger.info("LCU postgame 종료 감지: phase=%s", phase)
-            return
+            return True
         if phase == PHASE_LOBBY:
             if play_again_completed_at is not None:
                 elapsed = time.monotonic() - play_again_completed_at
@@ -2438,7 +2477,7 @@ def process_postgame(
                 )
             start_attempt = _start_matchmaking_lcu_attempt(lcu, "엔드 이후", logger)
             if start_attempt.completed:
-                return
+                return True
             if play_again_completed_at is not None:
                 logger.debug(
                     "LCU 다음 게임 요청 후 Lobby 대전찾기 요청 보류"
@@ -2454,7 +2493,7 @@ def process_postgame(
         if phase == PHASE_READY_CHECK:
             _accept_ready_check_via_lcu(lcu, "엔드 이후", logger)
             logger.info("LCU ReadyCheck 감지로 postgame 처리를 종료합니다.")
-            return
+            return True
         if phase == PHASE_NONE:
             if play_again_completed_at is not None:
                 elapsed = time.monotonic() - play_again_completed_at
@@ -2491,7 +2530,7 @@ def process_postgame(
                     lcu, "엔드 이후", logger, allow_none_phase=True
                 )
                 if start_attempt.completed:
-                    return
+                    return True
                 logger.debug(
                     "LCU phase=None postgame 이후 대전찾기 요청 보류(outcome=%s,action=%s).",
                     start_attempt.outcome,
@@ -2583,6 +2622,9 @@ def process_postgame(
                     "LCU 엔드 통계 사용 가능(%s). 엔드 버튼 탐색을 계속합니다.", phase
                 )
 
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
         rect = _visible_rect_or_wait(logger, "엔드 이후", interval_sec)
         if rect is None:
@@ -2603,8 +2645,11 @@ def process_postgame(
         if detect_champion_select(
             rect, "엔드 이후", tpl_prepick, available_roles, threshold, logger, lcu=lcu
         ):
-            return
+            return True
 
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         clicked_any = False
         allow_end_button_images = (
             phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
@@ -2621,6 +2666,9 @@ def process_postgame(
                     rect, tpl_end_one_more, threshold=threshold, click=True
                 )
 
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         poll_attempt = poll_match_state(
             rect,
             "엔드 이후",
@@ -2637,19 +2685,25 @@ def process_postgame(
             time.sleep(interval_sec)
             continue
 
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         start_attempt = _start_matchmaking_lcu_attempt(lcu, "엔드 이후", logger)
         if start_attempt.completed:
-            return
+            return True
         if start_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
             time.sleep(interval_sec)
             continue
 
+        if not continuation_enabled():
+            logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
+            return False
         found_find_match = search_and_act(
             rect, tpl_find_match, threshold=threshold, click=True
         )
         if found_find_match:
             logger.info("엔드 이후 대전 찾기 버튼 클릭 완료.")
-            return
+            return True
 
         if clicked_any or finding or accepted:
             time.sleep(interval_sec)
@@ -2673,7 +2727,7 @@ def monitor_ingame_and_postgame(
     interval_sec: float,
     logger: logging.Logger,
     lcu: Optional[LcuClient] = None,
-    continue_after_game: bool = True,
+    continue_after_game: object = True,
 ) -> bool:
     logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
     skip_postgame = False
@@ -2724,13 +2778,14 @@ def monitor_ingame_and_postgame(
             continue
         break
 
+    continue_after_game_now = should_continue_after_game(continue_after_game)
     if skip_postgame:
-        if not should_continue_after_game(continue_after_game):
+        if not continue_after_game_now:
             logger.info("한 게임 모드: 인게임 종료 후 다음 매칭을 시작하지 않습니다.")
             return False
         return True
 
-    if not should_continue_after_game(continue_after_game):
+    if not continue_after_game_now:
         logger.info("한 게임 모드: 인게임 종료를 감지했으며 다음 매칭을 시작하지 않습니다.")
         return False
 
@@ -2738,7 +2793,7 @@ def monitor_ingame_and_postgame(
     for tpl in (tpl_end_next, tpl_end_one_more):
         if not tpl.exists():
             logger.warning("엔드 버튼 템플릿이 없습니다: %s", tpl)
-    process_postgame(
+    return process_postgame(
         tpl_end_next,
         tpl_end_one_more,
         tpl_find_match,
@@ -2754,7 +2809,6 @@ def monitor_ingame_and_postgame(
         lcu=lcu,
         continue_after_game=continue_after_game,
     )
-    return True
 
 
 def choose_available_pick_index(
@@ -3129,6 +3183,12 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         default=DEFAULT_CONTINUE_AFTER_GAME,
         help="명시적으로 켠 경우에만 게임 종료 뒤 다음 매칭을 계속 진행합니다.",
     )
+    parser.add_argument(
+        "--continue-after-game-preference-path",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     log_path = configure_runtime_logging(debug=bool(args.debug))
     install_exception_logger()
@@ -3146,7 +3206,15 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         run_config_gui()
         return
 
-    continue_after_game = should_continue_after_game(args.continue_after_game)
+    continue_after_game_policy = ContinueAfterGamePolicy(
+        initial_value=args.continue_after_game,
+        preference_path=args.continue_after_game_preference_path,
+    )
+
+    def current_continue_after_game() -> bool:
+        return continue_after_game_policy.current(logger)
+
+    continue_after_game = current_continue_after_game()
     logger.info(
         "다음 게임 자동 진행: %s",
         "활성" if continue_after_game else "비활성(한 게임 모드)",
@@ -3368,7 +3436,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 "LCU postgame 단계 감지(사이클 시작,phase=%s). 엔드 화면 처리로 전환합니다.",
                 phase_at_cycle,
             )
-            process_postgame(
+            should_continue = process_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
                 tpl_find_match,
@@ -3382,9 +3450,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
-                continue_after_game=continue_after_game,
+                continue_after_game=current_continue_after_game,
             )
-            if not continue_after_game:
+            if not should_continue:
                 logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
                 return
             logger.info("다음 매칭 사이클을 시작합니다.")
@@ -3408,7 +3476,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
-                continue_after_game=continue_after_game,
+                continue_after_game=current_continue_after_game,
             )
             if not should_continue:
                 logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
@@ -4720,7 +4788,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
-                continue_after_game=continue_after_game,
+                continue_after_game=current_continue_after_game,
             )
             if not should_continue:
                 logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
