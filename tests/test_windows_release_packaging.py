@@ -45,7 +45,8 @@ def test_release_build_outputs_versioned_unsigned_artifacts() -> None:
     assert '"LOLManager-Setup-v$Version.exe"' in script
     assert "SHA256SUMS.txt" in script
     assert "--version-file" in script
-    assert "Get-FileHash" in script
+    assert "[Security.Cryptography.SHA256]::Create()" in script
+    assert "Get-FileHash" not in script
     assert "signtool" not in script.lower()
 
 
