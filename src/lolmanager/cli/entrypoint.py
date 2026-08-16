@@ -40,6 +40,8 @@ from lolmanager.core.lcu_client import (
     PHASE_RECONNECT,
     PHASE_WAITING_FOR_STATS,
     PHASE_WATCH_IN_PROGRESS,
+    champ_select_time_left_seconds,
+    completed_champ_select_champion_ids,
     is_known_gameflow_phase,
     lcu_loop_action_for,
 )
@@ -106,8 +108,15 @@ DEFAULT_PICK_COORD = (386, 163)
 DEFAULT_LEAGUE_WINDOW_LOOKUP_TIMEOUT_SEC = 30.0
 DEFAULT_IMAGE_SET_WIDTH = 1280
 DEFAULT_IMAGE_SET_HEIGHT = 720
+DEFAULT_CONTINUE_AFTER_GAME = False
+BAN_COMMIT_WINDOW_SEC = 4.0
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
+
+
+def should_continue_after_game(value: object) -> bool:
+    """The explicit UI/CLI opt-in is the only way to requeue after a match."""
+    return bool(value)
 
 
 class LeagueWindowLookupTimeout(RuntimeError):
@@ -2361,7 +2370,11 @@ def process_postgame(
     interval_sec: float,
     logger: logging.Logger,
     lcu: Optional[LcuClient] = None,
+    continue_after_game: bool = True,
 ) -> None:
+    if not should_continue_after_game(continue_after_game):
+        logger.info("한 게임 모드: 다음 게임 자동 진행을 하지 않고 postgame 화면에서 종료합니다.")
+        return
     _set_client_state(ClientState.POSTGAME_SCORE, time.monotonic(), logger)
     end_stats_dismissed = False
     play_again_attempted = False
@@ -2637,7 +2650,8 @@ def monitor_ingame_and_postgame(
     interval_sec: float,
     logger: logging.Logger,
     lcu: Optional[LcuClient] = None,
-) -> None:
+    continue_after_game: bool = True,
+) -> bool:
     logger.info("인게임 상태 감시 시작. 게임 종료까지 대기합니다.")
     skip_postgame = False
     while True:
@@ -2688,7 +2702,14 @@ def monitor_ingame_and_postgame(
         break
 
     if skip_postgame:
-        return
+        if not should_continue_after_game(continue_after_game):
+            logger.info("한 게임 모드: 인게임 종료 후 다음 매칭을 시작하지 않습니다.")
+            return False
+        return True
+
+    if not should_continue_after_game(continue_after_game):
+        logger.info("한 게임 모드: 인게임 종료를 감지했으며 다음 매칭을 시작하지 않습니다.")
+        return False
 
     logger.info("엔드 화면 처리 시작.")
     for tpl in (tpl_end_next, tpl_end_one_more):
@@ -2708,6 +2729,257 @@ def monitor_ingame_and_postgame(
         interval_sec,
         logger,
         lcu=lcu,
+        continue_after_game=continue_after_game,
+    )
+    return True
+
+
+def choose_available_pick_index(
+    *,
+    pick_pool: Sequence[tuple[str, str]],
+    candidate_ids: dict[int, int],
+    unavailable_ids: frozenset[int],
+    current_index: int,
+) -> Optional[int]:
+    """Prefer the first configured champion not already banned or locked."""
+    if not pick_pool or not candidate_ids:
+        return current_index if 0 <= current_index < len(pick_pool) else None
+    for index, _candidate in enumerate(pick_pool):
+        champion_id = candidate_ids.get(index)
+        if champion_id is not None and champion_id > 0 and champion_id not in unavailable_ids:
+            return index
+    return None
+
+
+def _resolve_pick_pool_champion_ids(
+    lcu: Optional[LcuClient],
+    pick_pool: Sequence[tuple[str, str]],
+    logger: logging.Logger,
+) -> dict[int, int]:
+    resolver = getattr(lcu, "resolve_champ_select_champion_id_decision", None)
+    if not callable(resolver):
+        return {}
+    resolved: dict[int, int] = {}
+    for index, (champion_name, _configured_ban) in enumerate(pick_pool):
+        try:
+            result = resolver(champion_name)
+        except Exception as exc:
+            logger.debug("LCU 예비 픽 ID 조회 실패(%s): %s", champion_name, exc)
+            return {}
+        if not getattr(result, "ok", False):
+            logger.debug(
+                "LCU 예비 픽 ID 조회 미완료(%s,outcome=%s).",
+                champion_name,
+                _lcu_status_label(result),
+            )
+            return {}
+        try:
+            champion_id = int(getattr(result, "value", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        if champion_id <= 0:
+            return {}
+        resolved[index] = champion_id
+    return resolved
+
+
+def _reconcile_pick_pool_availability(
+    lcu: Optional[LcuClient],
+    pick_pool: Sequence[tuple[str, str]],
+    *,
+    current_index: int,
+    candidate_ids: Optional[dict[int, int]],
+    logger: logging.Logger,
+) -> tuple[int, dict[int, int]]:
+    """Read completed bans/picks even before the local pick action begins."""
+    snapshot_fn = getattr(lcu, "get_champ_select_snapshot", None)
+    if not callable(snapshot_fn):
+        return current_index, candidate_ids or {}
+    if candidate_ids is None:
+        candidate_ids = _resolve_pick_pool_champion_ids(lcu, pick_pool, logger)
+    if not candidate_ids:
+        return current_index, candidate_ids
+    try:
+        result = snapshot_fn()
+    except Exception as exc:
+        logger.debug("LCU 밴/픽 가용성 조회 실패: %s", exc)
+        return current_index, candidate_ids
+    if not getattr(result, "ok", False):
+        return current_index, candidate_ids
+    raw = getattr(getattr(result, "value", None), "raw", None)
+    if not isinstance(raw, dict):
+        return current_index, candidate_ids
+    selected = choose_available_pick_index(
+        pick_pool=pick_pool,
+        candidate_ids=candidate_ids,
+        unavailable_ids=completed_champ_select_champion_ids(raw),
+        current_index=current_index,
+    )
+    if selected is None:
+        logger.warning("설정된 모든 픽 후보가 이미 밴 또는 확정 픽 상태입니다.")
+        return current_index, candidate_ids
+    return selected, candidate_ids
+
+
+def _wait_for_late_ban_and_reconcile_pick_pool(
+    lcu: Optional[LcuClient],
+    pick_pool: Sequence[tuple[str, str]],
+    *,
+    current_index: int,
+    counter_cache_path: Path,
+    role: str,
+    logger: logging.Logger,
+    interval_sec: float,
+    candidate_ids: Optional[dict[int, int]] = None,
+) -> tuple[int, str, str, ChampSelectLcuAttempt, dict[int, int]]:
+    """Keep adapting the prepick, then commit the ban only near phase expiry."""
+    if not pick_pool:
+        return (
+            current_index,
+            "",
+            "",
+            _ban_champ_select_attempt_or_skip(
+                lcu, "", logger=logger, interval_sec=interval_sec
+            ),
+            {},
+        )
+
+    snapshot_fn = getattr(lcu, "get_champ_select_snapshot", None)
+    if not callable(snapshot_fn):
+        champion_name, configured_ban = pick_pool[current_index]
+        ban_name = resolve_ban_name_for_runtime(
+            counter_cache_path,
+            role=role,
+            champion_name=champion_name,
+            configured_ban=configured_ban,
+            logger=logger,
+        )
+        return (
+            current_index,
+            champion_name,
+            ban_name,
+            _ban_champ_select_attempt_or_skip(
+                lcu, ban_name, logger=logger, interval_sec=interval_sec
+            ),
+            {},
+        )
+
+    last_delay_bucket: Optional[int] = None
+    while True:
+        next_index, candidate_ids = _reconcile_pick_pool_availability(
+            lcu,
+            pick_pool,
+            current_index=current_index,
+            candidate_ids=candidate_ids,
+            logger=logger,
+        )
+        if next_index != current_index:
+            current_index = next_index
+            champion_name, _configured_ban = pick_pool[current_index]
+            logger.info(
+                "내 차례 전 밴/확정 픽을 감지해 예비 픽으로 전환합니다: #%d %s",
+                current_index + 1,
+                champion_name,
+            )
+            _champ_select_action_attempt_via_lcu(
+                lcu,
+                champion_name,
+                action_type="pick",
+                complete=False,
+                stage="사전 예비 픽",
+                logger=logger,
+            )
+
+        champion_name, configured_ban = pick_pool[current_index]
+        ban_name = resolve_ban_name_for_runtime(
+            counter_cache_path,
+            role=role,
+            champion_name=champion_name,
+            configured_ban=configured_ban,
+            logger=logger,
+        )
+        try:
+            snapshot_result = snapshot_fn()
+        except Exception as exc:
+            logger.debug("LCU 밴 단계 조회 실패: %s", exc)
+            break
+        if not getattr(snapshot_result, "ok", False):
+            break
+        snapshot = getattr(snapshot_result, "value", None)
+        raw = getattr(snapshot, "raw", None)
+        actions = getattr(snapshot, "actions", ())
+        if not isinstance(raw, dict):
+            break
+        pick_in_progress = any(
+            str(getattr(action, "type", "")).casefold() == "pick"
+            and bool(getattr(action, "is_in_progress", False))
+            and not bool(getattr(action, "completed", False))
+            for action in actions
+        )
+        if pick_in_progress:
+            return (
+                current_index,
+                champion_name,
+                ban_name,
+                ChampSelectLcuAttempt(
+                    False, LcuLoopAction.WAIT_AUTHORITATIVE, "superseded_by_pick"
+                ),
+                candidate_ids or {},
+            )
+        ban_in_progress = any(
+            str(getattr(action, "type", "")).casefold() == "ban"
+            and bool(getattr(action, "is_in_progress", False))
+            and not bool(getattr(action, "completed", False))
+            for action in actions
+        )
+        if not ban_in_progress:
+            phase_attempt = _poll_lcu_phase_attempt(lcu, logger, "밴 대기", max_age_sec=0.5)
+            if (
+                phase_attempt.loop_action == LcuLoopAction.ACT_LCU
+                and phase_attempt.phase != PHASE_CHAMP_SELECT
+            ):
+                return (
+                    current_index,
+                    champion_name,
+                    ban_name,
+                    ChampSelectLcuAttempt(
+                        False,
+                        LcuLoopAction.ACT_LCU,
+                        f"phase_exit:{phase_attempt.phase}",
+                    ),
+                    candidate_ids or {},
+                )
+            time.sleep(interval_sec)
+            continue
+        time_left = champ_select_time_left_seconds(raw)
+        if time_left is not None and time_left > BAN_COMMIT_WINDOW_SEC:
+            bucket = int(time_left)
+            if bucket != last_delay_bucket:
+                logger.info(
+                    "밴 단계 %.1fs 남음. 예비 픽 가용성을 계속 확인한 뒤 막판에 밴합니다.",
+                    time_left,
+                )
+                last_delay_bucket = bucket
+            time.sleep(min(interval_sec, max(0.05, time_left - BAN_COMMIT_WINDOW_SEC)))
+            continue
+        return (
+            current_index,
+            champion_name,
+            ban_name,
+            _ban_champ_select_attempt_or_skip(
+                lcu, ban_name, logger=logger, interval_sec=interval_sec
+            ),
+            candidate_ids or {},
+        )
+
+    return (
+        current_index,
+        champion_name,
+        ban_name,
+        _ban_champ_select_attempt_or_skip(
+            lcu, ban_name, logger=logger, interval_sec=interval_sec
+        ),
+        candidate_ids or {},
     )
 
 
@@ -2722,6 +2994,12 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         "--config-gui",
         action="store_true",
         help="설정(champion/ban/pick_coord/reserve_picks)을 GUI로 편집하고 종료합니다.",
+    )
+    parser.add_argument(
+        "--continue-after-game",
+        action="store_true",
+        default=DEFAULT_CONTINUE_AFTER_GAME,
+        help="명시적으로 켠 경우에만 게임 종료 뒤 다음 매칭을 계속 진행합니다.",
     )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     log_path = configure_runtime_logging(debug=bool(args.debug))
@@ -2739,6 +3017,12 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             return
         run_config_gui()
         return
+
+    continue_after_game = should_continue_after_game(args.continue_after_game)
+    logger.info(
+        "다음 게임 자동 진행: %s",
+        "활성" if continue_after_game else "비활성(한 게임 모드)",
+    )
 
     ensure_external_apps_running_once(logger=logger)
     global _LEAGUE_EXIT_GUARD
@@ -2970,7 +3254,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
+                continue_after_game=continue_after_game,
             )
+            if not continue_after_game:
+                logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
+                return
             logger.info("다음 매칭 사이클을 시작합니다.")
             continue
 
@@ -2978,7 +3266,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             logger.info(
                 "이미 인게임 상태 감지(사이클 시작). 게임 종료 감시로 전환합니다."
             )
-            monitor_ingame_and_postgame(
+            should_continue = monitor_ingame_and_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
                 tpl_find_match,
@@ -2992,7 +3280,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
+                continue_after_game=continue_after_game,
             )
+            if not should_continue:
+                logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
+                return
             logger.info("다음 매칭 사이클을 시작합니다.")
             continue
 
@@ -3398,6 +3690,24 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             champion_name = pick_pool[0][0]
             ban_name = pick_pool[0][1]
 
+            # A ban or completed pick may already have happened by the time role
+            # detection finishes.  Reconcile before the first prepick rather than
+            # waiting until our own action is available.
+            pick_index, availability_candidate_ids = _reconcile_pick_pool_availability(
+                lcu,
+                pick_pool,
+                current_index=pick_index,
+                candidate_ids=None,
+                logger=logger,
+            )
+            champion_name, ban_name = pick_pool[pick_index]
+            if pick_index:
+                logger.info(
+                    "프리픽 전 밴/확정 픽을 감지해 예비 픽으로 시작합니다: #%d %s",
+                    pick_index + 1,
+                    champion_name,
+                )
+
             restart_cycle = False
 
             prepick_lcu_attempt = _wait_champ_select_action_via_lcu(
@@ -3513,19 +3823,21 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             tpl_banpick_search = selected / "banpick_search-text.png"
             tpl_ban_button = selected / "banpick_ban-button.png"
 
-            ban_name = resolve_ban_name_for_runtime(
-                counter_cache_path,
-                role=role or "",
-                champion_name=champion_name,
-                configured_ban=ban_name,
-                logger=logger,
-            )
-
-            ban_lcu_attempt = _ban_champ_select_attempt_or_skip(
-                lcu,
+            (
+                pick_index,
+                champion_name,
                 ban_name,
+                ban_lcu_attempt,
+                availability_candidate_ids,
+            ) = _wait_for_late_ban_and_reconcile_pick_pool(
+                lcu,
+                pick_pool,
+                current_index=pick_index,
+                counter_cache_path=counter_cache_path,
+                role=role or "",
                 logger=logger,
                 interval_sec=interval_sec,
+                candidate_ids=availability_candidate_ids,
             )
             if _handle_champ_select_phase_exit(ban_lcu_attempt, lcu, "밴", logger):
                 continue
@@ -3674,6 +3986,30 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
 
             disabled_ready_signal_streak = 0
             while True:
+                next_pick_index, availability_candidate_ids = (
+                    _reconcile_pick_pool_availability(
+                        lcu,
+                        pick_pool,
+                        current_index=pick_index,
+                        candidate_ids=availability_candidate_ids,
+                        logger=logger,
+                    )
+                )
+                if next_pick_index != pick_index:
+                    pick_index = next_pick_index
+                    champion_name, next_ban = pick_pool[pick_index]
+                    ban_name = resolve_ban_name_for_runtime(
+                        counter_cache_path,
+                        role=role or "",
+                        champion_name=champion_name,
+                        configured_ban=next_ban,
+                        logger=logger,
+                    )
+                    logger.info(
+                        "내 차례 전 밴/확정 픽을 감지해 픽 후보를 즉시 전환합니다: #%d %s",
+                        pick_index + 1,
+                        champion_name,
+                    )
                 lcu_pick_attempt = _champ_select_action_attempt_via_lcu(
                     lcu,
                     champion_name,
@@ -4242,7 +4578,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             if restart_cycle:
                 continue
 
-            monitor_ingame_and_postgame(
+            should_continue = monitor_ingame_and_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
                 tpl_find_match,
@@ -4256,7 +4592,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
+                continue_after_game=continue_after_game,
             )
+            if not should_continue:
+                logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
+                return
 
         logger.info("다음 매칭 사이클을 시작합니다.")
 
