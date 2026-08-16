@@ -150,6 +150,33 @@ class _FakePopen:
         self.alive = False
 
 
+class _FakePsProcess:
+    def __init__(
+        self,
+        children: list["_FakePsProcess"] | None = None,
+        *,
+        name: str = "process",
+        termination_order: list[str] | None = None,
+    ) -> None:
+        self._children = list(children or [])
+        self.name = name
+        self.termination_order = termination_order
+        self.terminated = False
+        self.killed = False
+
+    def children(self, *, recursive: bool) -> list["_FakePsProcess"]:
+        assert recursive is True
+        return list(self._children)
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if self.termination_order is not None:
+            self.termination_order.append(self.name)
+
+    def kill(self) -> None:
+        self.killed = True
+
+
 def test_ensure_external_apps_records_owned_opgg_only_when_this_run_starts_it(
     monkeypatch,
     tmp_path: Path,
@@ -181,6 +208,36 @@ def test_ensure_external_apps_records_owned_opgg_only_when_this_run_starts_it(
     assert session.owned_opgg is not None
     assert session.owned_opgg.process is proc
     assert external_apps.current_external_apps_session() is session
+
+
+def test_ensure_external_apps_starts_league_client_directly_not_riot_launcher(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    started: list[str] = []
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): False for path in paths},
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "start_exe_process_once",
+        lambda exe_path, *, logger=None: started.append(str(exe_path)) or _FakePopen(),
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "riot_client_services_exe_path",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("Riot launcher used")),
+    )
+
+    external_apps.ensure_external_apps_running_once(league_exe=str(league))
+
+    assert started == [str(league)]
 
 
 def test_ensure_external_apps_resets_session_and_does_not_own_preexisting_opgg(
@@ -237,6 +294,38 @@ def test_close_owned_opgg_terminates_then_kills_after_timeout() -> None:
     assert session.close_owned_opgg(timeout_sec=0.25) is True
 
     assert proc.calls == ["terminate", "wait:0.25", "kill", "wait:0.25"]
+    assert session.owned_opgg is None
+
+
+def test_close_owned_opgg_terminates_only_the_owned_process_tree(monkeypatch) -> None:
+    proc = _FakePopen()
+    proc.pid = 123
+    termination_order: list[str] = []
+    child = _FakePsProcess(name="child", termination_order=termination_order)
+    root = _FakePsProcess(
+        [child],
+        name="root",
+        termination_order=termination_order,
+    )
+    monkeypatch.setattr(external_apps.psutil, "Process", lambda pid: root)
+    monkeypatch.setattr(
+        external_apps.psutil,
+        "wait_procs",
+        lambda processes, timeout: (list(processes), []),
+    )
+    session = external_apps.ExternalAppsSession(
+        owned_opgg=external_apps.OwnedExternalProcess(
+            exe_path=r"C:\Users\me\AppData\Local\Programs\OP.GG\OP.GG.exe",
+            process=proc,
+        )
+    )
+
+    assert session.close_owned_opgg(timeout_sec=0.25) is True
+
+    assert child.terminated is True
+    assert root.terminated is True
+    assert termination_order == ["child", "root"]
+    assert proc.calls == []
     assert session.owned_opgg is None
 
 
