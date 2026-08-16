@@ -65,6 +65,9 @@ EXTERNAL_SYNC_MS = 250
 EXTERNAL_SYNC_INGAME_MS = 1500
 CONFIG_APPLY_DEBOUNCE_SEC = 0.6
 AUTO_EXIT_AFTER_CLIENT_CLOSED_SEC = 0.8
+# The CLI owns an OP.GG process it launched.  Give it enough time to observe
+# LeagueClient's exit and close that child before the GUI force-stops the CLI.
+CLI_CLIENT_CLOSE_CLEANUP_GRACE_SEC = 3.0
 CLI_UNEXPECTED_RESTART_LIMIT = 1
 CLI_UNEXPECTED_RESTART_DELAY_MS = 1000
 APP_USER_MODEL_ID = "LOLManager"
@@ -90,6 +93,33 @@ class _GuiWarningLogger:
 
 def external_sync_delay_ms(*, in_game: bool) -> int:
     return EXTERNAL_SYNC_INGAME_MS if in_game else EXTERNAL_SYNC_MS
+
+
+def should_auto_iconify_ingame(*, manager_has_focus: bool, root_iconic: bool) -> bool:
+    """Keep an explicitly focused LOLManager usable while a game is active."""
+    return not bool(manager_has_focus) and not bool(root_iconic)
+
+
+def normalize_process_cpu_percent(
+    total_cpu_percent: float,
+    *,
+    logical_cpu_count: Optional[int] = None,
+) -> float:
+    """Convert psutil's per-logical-CPU process total to a 0-100 display value."""
+    try:
+        total = float(total_cpu_percent)
+    except (TypeError, ValueError):
+        total = 0.0
+    if logical_cpu_count is None:
+        try:
+            logical_cpu_count = psutil.cpu_count(logical=True)
+        except Exception:
+            logical_cpu_count = None
+    try:
+        capacity = max(1, int(logical_cpu_count or 1))
+    except (TypeError, ValueError):
+        capacity = 1
+    return max(0.0, min(100.0, total / float(capacity)))
 
 
 def should_recover_cli_exit(
@@ -450,9 +480,12 @@ class LolManagerGui:
         self._league_exit_guard = LeagueClientExitGuard(league_client_exe_path())
         self._auto_iconified = False
         self._client_closed_at: Optional[float] = None
+        self._client_close_cleanup_deadline: Optional[float] = None
         self._last_client_rect: Optional[tuple[int, int, int, int]] = None
         self._last_geo_xy: Optional[tuple[int, int]] = None
         self._outer_wh: Optional[tuple[int, int]] = None
+        self._compact_root_size: Optional[tuple[int, int]] = None
+        self._closing = False
 
         self._is_frameless: bool = False
         self._snap_gap_px: int = 0
@@ -470,6 +503,7 @@ class LolManagerGui:
         )
         self.role_key: Optional[str] = None
         self.role_var = tk.StringVar(value="미감지")
+        self.continue_after_game_var = tk.BooleanVar(value=False)
 
         self._proc_usage_after_id: Optional[str] = None
         self._proc_usage_procs: dict[int, psutil.Process] = {}
@@ -509,6 +543,7 @@ class LolManagerGui:
             self.root.geometry(f"{req_w}x{req_h}")
             self.root.minsize(req_w, req_h)
             self.root.maxsize(req_w, req_h)
+            self._compact_root_size = (req_w, req_h)
         except Exception:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -598,6 +633,11 @@ class LolManagerGui:
 
         self._start_external_sync_worker()
 
+        try:
+            self.root.after_idle(self._enforce_compact_root_size)
+        except Exception:
+            pass
+
         if auto_start:
             self.root.after(250, self.start)
 
@@ -644,6 +684,51 @@ class LolManagerGui:
             return str(self.root.state() or "").strip().casefold() == "iconic"
         except Exception:
             return False
+
+    def _is_manager_window_foreground(self) -> bool:
+        if os.name != "nt":
+            return False
+        foreground = _get_foreground_hwnd()
+        if not foreground:
+            return False
+
+        handles: set[int] = set()
+        try:
+            handles.add(_top_hwnd(int(self.root.winfo_id())))
+        except Exception:
+            pass
+        win = getattr(self, "_log_window", None)
+        if win is not None:
+            try:
+                handles.add(_top_hwnd(int(win.winfo_id())))
+            except Exception:
+                pass
+        return int(foreground) in handles
+
+    def _enforce_compact_root_size(self) -> None:
+        target = getattr(self, "_compact_root_size", None)
+        if not target or self._is_root_iconic():
+            return
+        try:
+            if str(self.root.state() or "").strip().casefold() == "zoomed":
+                self.root.state("normal")
+            width, height = (int(target[0]), int(target[1]))
+            current_width = int(self.root.winfo_width())
+            current_height = int(self.root.winfo_height())
+        except Exception:
+            return
+        if width <= 0 or height <= 0:
+            return
+        if current_width == width and current_height == height:
+            self._outer_wh = (width, height)
+            return
+        try:
+            self.root.geometry(f"{width}x{height}")
+            self.root.minsize(width, height)
+            self.root.maxsize(width, height)
+            self._outer_wh = (width, height)
+        except Exception:
+            pass
 
     def _apply_lol_topmost(self, enabled: bool) -> None:
         want = bool(enabled)
@@ -804,11 +889,17 @@ class LolManagerGui:
         )
         self.btn_config = ttk.Button(btns, text="Config", command=self.open_config)
         self.btn_log = ttk.Button(btns, text="Log", command=self.toggle_log_window)
+        self.chk_continue = ttk.Checkbutton(
+            btns,
+            text="다음 게임 계속",
+            variable=self.continue_after_game_var,
+        )
 
         self.btn_start.pack(side=tk.LEFT)
         self.btn_stop.pack(side=tk.LEFT, padx=6)
         self.btn_config.pack(side=tk.LEFT, padx=6)
         self.btn_log.pack(side=tk.LEFT)
+        self.chk_continue.pack(side=tk.LEFT, padx=(14, 0))
 
         ttk.Separator(root).pack(side=tk.TOP, fill=tk.X, pady=(10, 8))
 
@@ -1688,6 +1779,11 @@ class LolManagerGui:
             cmd = [sys.executable, "--cli"]
         else:
             cmd = [sys.executable, "-m", "lolmanager", "--cli"]
+        try:
+            if bool(self.continue_after_game_var.get()):
+                cmd.append("--continue-after-game")
+        except Exception:
+            pass
         flags = _windows_create_no_window_flag()
 
         try:
@@ -1713,6 +1809,10 @@ class LolManagerGui:
         self.running_var.set("Running")
         self.btn_start.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
+        try:
+            self.chk_continue.configure(state=tk.DISABLED)
+        except Exception:
+            pass
 
         self._reader_thread = threading.Thread(
             target=self._reader_loop, args=(self.proc,), daemon=True
@@ -1733,6 +1833,10 @@ class LolManagerGui:
         self._stop_requested_at = time.monotonic()
         self.running_var.set("Stopping...")
         self.btn_stop.configure(state=tk.DISABLED)
+        try:
+            self.chk_continue.configure(state=tk.NORMAL)
+        except Exception:
+            pass
 
     def open_config(self) -> None:
         if is_frozen():
@@ -1905,6 +2009,11 @@ class LolManagerGui:
 
         self.running_var.set(status)
         self.btn_start.configure(state=tk.NORMAL)
+        try:
+            self.chk_continue.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+        self._enforce_compact_root_size()
         self._append_log(
             "[GUI] Automation process ended "
             f"(exit_code={code}, reason={reason}, league_running={league_running}).\n"
@@ -2054,8 +2163,9 @@ class LolManagerGui:
                 total_cpu += cpu
                 total_rss += rss
 
+            display_cpu = normalize_process_cpu_percent(total_cpu)
             self.proc_usage_var.set(
-                f"CPU {total_cpu:.1f}%  MEM {self._format_bytes_mb(total_rss)}"
+                f"CPU {display_cpu:.1f}%  MEM {self._format_bytes_mb(total_rss)}"
             )
         finally:
             try:
@@ -2168,6 +2278,8 @@ class LolManagerGui:
             )
 
     def _sync_external_state(self) -> None:
+        if bool(getattr(self, "_closing", False)):
+            return
         prev_topmost = bool(getattr(self, "_lol_topmost_enabled", False))
         state = None
         try:
@@ -2212,21 +2324,72 @@ class LolManagerGui:
             self._refresh_match_stats(force=False)
 
         in_game = bool(state.in_game)
+        league_running = bool(state.league_running)
+
+        # `is_game_client_active()` can remain true briefly after LeagueClient has
+        # exited.  The process guard is authoritative for our shutdown sequence.
+        if not league_running:
+            self.client_visible_var.set("Closed")
+            want_topmost = False
+            if self._client_seen_once:
+                now = time.monotonic()
+                if self._client_closed_at is None:
+                    self._client_closed_at = now
+                    self._client_close_cleanup_deadline = None
+                elif (
+                    now - self._client_closed_at
+                ) >= AUTO_EXIT_AFTER_CLIENT_CLOSED_SEC:
+                    proc = self.proc
+                    proc_running = bool(proc is not None and proc.poll() is None)
+                    if proc_running:
+                        deadline = getattr(
+                            self, "_client_close_cleanup_deadline", None
+                        )
+                        if deadline is None:
+                            deadline = now + CLI_CLIENT_CLOSE_CLEANUP_GRACE_SEC
+                            self._client_close_cleanup_deadline = deadline
+                            self._append_log(
+                                "[GUI] LoL client closed. Waiting for CLI to close owned OP.GG.\n"
+                            )
+                        if now < deadline:
+                            self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
+                            return
+                        self._append_log(
+                            "[GUI] CLI cleanup wait timed out; forcing shutdown.\n"
+                        )
+                    self._append_log("[GUI] LoL client closed. Exiting.\n")
+                    self._on_close(close_owned_opgg=True)
+                    return
+            else:
+                self._client_closed_at = None
+                self._client_close_cleanup_deadline = None
+            if not self._is_ui_busy():
+                self._apply_lol_topmost(want_topmost)
+            if prev_topmost:
+                self._restore_active_window_after_topmost_release()
+            self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
+            return
 
         if in_game:
+            self._client_closed_at = None
+            self._client_close_cleanup_deadline = None
             try:
                 self.client_visible_var.set("InGame")
             except Exception:
                 pass
 
-            if not self._is_root_iconic():
+            manager_has_focus = self._is_manager_window_foreground()
+            if should_auto_iconify_ingame(
+                manager_has_focus=manager_has_focus,
+                root_iconic=self._is_root_iconic(),
+            ):
                 try:
                     self.root.iconify()
                     self._auto_iconified = True
                 except Exception:
                     pass
             win = getattr(self, "_log_window", None)
-            if win is not None:
+            if win is not None and not manager_has_focus:
                 try:
                     if str(win.state() or "").strip().casefold() != "iconic":
                         win.iconify()
@@ -2244,7 +2407,6 @@ class LolManagerGui:
 
         rect = state.rect
         minimized = bool(state.minimized)
-        league_running = bool(state.league_running)
         league_foreground = bool(state.league_foreground)
         if rect is not None and not isinstance(rect, tuple):
             rect = None
@@ -2253,6 +2415,7 @@ class LolManagerGui:
         if rect is not None:
             self._client_seen_once = True
             self._client_closed_at = None
+            self._client_close_cleanup_deadline = None
 
             if minimized:
                 self.client_visible_var.set("Minimized")
@@ -2269,6 +2432,7 @@ class LolManagerGui:
                 if self._auto_iconified:
                     self._show_root_noactivate()
                     self._auto_iconified = False
+                    self._enforce_compact_root_size()
                 if not self._is_ui_busy():
                     self._snap_to_client(rect)
         else:
@@ -2283,27 +2447,7 @@ class LolManagerGui:
                     except Exception:
                         pass
                 self._client_closed_at = None
-            else:
-                self.client_visible_var.set("Closed")
-                want_topmost = False
-                if self._client_seen_once:
-                    now = time.monotonic()
-                    if self._client_closed_at is None:
-                        self._client_closed_at = now
-                    elif (
-                        now - self._client_closed_at
-                    ) >= AUTO_EXIT_AFTER_CLIENT_CLOSED_SEC:
-                        self._append_log("[GUI] LoL client closed. Exiting.\n")
-                        close_owned_opgg_for_current_session(
-                            logger=logging.getLogger("lolmanager")
-                        )
-                        try:
-                            if self.proc and self.proc.poll() is None:
-                                self.proc.terminate()
-                        except Exception:
-                            pass
-                        self.root.after(250, self.root.destroy)
-
+                self._client_close_cleanup_deadline = None
         if not self._is_ui_busy():
             self._apply_lol_topmost(want_topmost)
         if prev_topmost and not want_topmost:
@@ -2513,7 +2657,10 @@ class LolManagerGui:
             self._last_geo_xy = xy
             self._last_client_rect = rect
 
-    def _on_close(self) -> None:
+    def _on_close(self, *, close_owned_opgg: bool = False) -> None:
+        if bool(getattr(self, "_closing", False)):
+            return
+        self._closing = True
         try:
             refresher = getattr(self, "_auto_ban_refresher", None)
             if refresher is not None:
@@ -2530,6 +2677,13 @@ class LolManagerGui:
             self._external_sync_stop.set()
         except Exception:
             pass
+        if close_owned_opgg:
+            try:
+                close_owned_opgg_for_current_session(
+                    logger=logging.getLogger("lolmanager")
+                )
+            except Exception:
+                pass
         proc = self.proc
         if proc and proc.poll() is None:
             try:
@@ -2541,6 +2695,10 @@ class LolManagerGui:
             except Exception:
                 try:
                     proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=0.4)
                 except Exception:
                     pass
         try:

@@ -24,7 +24,9 @@ from lolmanager.core.opgg_counter_recommendations import (
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 AUTO_BAN_REFRESH_SUCCESS_MS = DEFAULT_MAX_AGE_SEC * 1000
-AUTO_BAN_REFRESH_RETRY_MS = 30 * 1000
+# Counter recommendations are slow-moving.  A failed refresh should not retry
+# aggressively enough to repeatedly wake the UI or hammer the same source.
+AUTO_BAN_REFRESH_RETRY_MS = 60 * 60 * 1000
 
 
 @dataclass(frozen=True)
@@ -228,7 +230,8 @@ class AutoBanRefreshCoordinator:
                 return
 
             self._logger.warning(
-                "auto ban refresh will retry in 30 seconds for %s/%s",
+                "auto ban refresh will retry in %d minutes for %s/%s",
+                AUTO_BAN_REFRESH_RETRY_MS // (60 * 1000),
                 target.role,
                 target.champion_name,
             )

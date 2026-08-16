@@ -19,6 +19,8 @@ from lolmanager.gui.app_gui import (
     _ExternalSyncSnapshot,
     LolManagerGui,
     external_sync_delay_ms,
+    normalize_process_cpu_percent,
+    should_auto_iconify_ingame,
     should_recover_cli_exit,
 )
 
@@ -144,6 +146,31 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             external_sync_delay_ms(in_game=False),
         )
 
+    def test_ingame_focus_policy_keeps_user_forced_manager_focus_visible(self) -> None:
+        self.assertFalse(
+            should_auto_iconify_ingame(
+                manager_has_focus=True,
+                root_iconic=False,
+            )
+        )
+        self.assertTrue(
+            should_auto_iconify_ingame(
+                manager_has_focus=False,
+                root_iconic=False,
+            )
+        )
+        self.assertFalse(
+            should_auto_iconify_ingame(
+                manager_has_focus=False,
+                root_iconic=True,
+            )
+        )
+
+    def test_process_cpu_display_is_normalized_to_total_machine_capacity(self) -> None:
+        self.assertEqual(normalize_process_cpu_percent(250.0, logical_cpu_count=4), 62.5)
+        self.assertEqual(normalize_process_cpu_percent(900.0, logical_cpu_count=4), 100.0)
+        self.assertEqual(normalize_process_cpu_percent(-5.0, logical_cpu_count=4), 0.0)
+
     def test_recover_cli_exit_only_for_unexpected_live_client_exit(self) -> None:
         self.assertTrue(
             should_recover_cli_exit(
@@ -192,9 +219,10 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         close_source = inspect.getsource(LolManagerGui._on_close)
 
         self.assertIn("LoL client closed. Exiting.", sync_source)
-        self.assertIn("close_owned_opgg_for_current_session", sync_source)
+        self.assertIn("self._on_close(close_owned_opgg=True)", sync_source)
         self.assertNotIn("close_owned_opgg_for_current_session", stop_source)
-        self.assertNotIn("close_owned_opgg_for_current_session", close_source)
+        self.assertIn("if close_owned_opgg:", close_source)
+        self.assertIn("close_owned_opgg_for_current_session", close_source)
 
     def test_stop_terminates_only_cli_process(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
@@ -278,6 +306,59 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             gui.root.after_calls[-1][0],
             external_sync_delay_ms(in_game=False),
         )
+
+    def test_user_focused_manager_is_not_iconified_during_game(self) -> None:
+        gui = self._make_windowing_gui()
+        gui._is_manager_window_foreground = mock.Mock(return_value=True)
+        gui._external_sync_q.put(self._snapshot(in_game=True))
+
+        gui._sync_external_state()
+
+        self.assertEqual(gui.client_visible_var.value, "InGame")
+        self.assertEqual(gui.root.iconify_calls, 0)
+        self.assertEqual(gui._log_window.iconify_calls, 0)
+
+    def test_closed_league_process_wins_over_stale_ingame_snapshot(self) -> None:
+        gui = self._make_windowing_gui()
+        gui._client_seen_once = True
+        gui._client_closed_at = 10.0
+        gui._on_close = mock.Mock()
+        gui._external_sync_q.put(
+            self._snapshot(in_game=True, league_running=False)
+        )
+
+        with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.0):
+            gui._sync_external_state()
+
+        gui._on_close.assert_called_once_with(close_owned_opgg=True)
+        self.assertEqual(gui.root.iconify_calls, 0)
+
+    def test_client_close_waits_for_cli_owned_opgg_cleanup_before_forcing_exit(self) -> None:
+        gui = self._make_windowing_gui()
+        gui._client_seen_once = True
+        gui._client_closed_at = 10.0
+        gui.proc = mock.Mock()
+        gui.proc.poll.return_value = None
+        gui._on_close = mock.Mock()
+        gui._external_sync_q.put(
+            self._snapshot(in_game=True, league_running=False)
+        )
+
+        with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.0):
+            gui._sync_external_state()
+
+        gui._on_close.assert_not_called()
+        self.assertEqual(gui._client_close_cleanup_deadline, 23.0)
+        self.assertEqual(gui.root.after_calls[-1][0], EXTERNAL_SYNC_MS)
+
+        gui.proc.poll.return_value = 0
+        gui._external_sync_q.put(
+            self._snapshot(in_game=True, league_running=False)
+        )
+        with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.1):
+            gui._sync_external_state()
+
+        gui._on_close.assert_called_once_with(close_owned_opgg=True)
 
     def test_user_minimized_window_is_not_auto_restored_after_game(self) -> None:
         gui = self._make_windowing_gui()
