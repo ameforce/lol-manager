@@ -1,0 +1,111 @@
+name: Publish Windows release artifacts
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build and publish Windows artifacts
+    runs-on: windows-latest
+
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # astral-sh/setup-uv v6
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+
+      - name: Verify semver tag and package version
+        shell: pwsh
+        env:
+          LOLMANAGER_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:LOLMANAGER_RELEASE_TAG
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Only semantic version tags may publish a release: $tag"
+          }
+          $version = $Matches['version']
+          $projectText = [IO.File]::ReadAllText('pyproject.toml', [Text.Encoding]::UTF8)
+          $versionMatch = [regex]::Match(
+            $projectText,
+            '(?ms)^\[project\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+          )
+          if (-not $versionMatch.Success) {
+            throw 'Unable to read [project].version from pyproject.toml.'
+          }
+          if ($versionMatch.Groups['version'].Value -ne $version) {
+            throw "Tag/package version mismatch: tag=$tag, package=$($versionMatch.Groups['version'].Value)"
+          }
+          "LOLMANAGER_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install the locked Python runtime
+        shell: pwsh
+        run: uv python install 3.14
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Validate source and package
+        shell: pwsh
+        run: |
+          uv lock --check
+          uv sync --locked --group dev
+          uv run --group dev python -m pytest -q
+          uv build
+
+      - name: Build release installer and checksums
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 -Version $env:LOLMANAGER_VERSION
+          $artifacts = @(
+            "dist\release\LOLManager-v$env:LOLMANAGER_VERSION.exe",
+            "dist\release\LOLManager-Setup-v$env:LOLMANAGER_VERSION.exe",
+            'dist\release\SHA256SUMS.txt'
+          )
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+              throw "Expected release artifact is missing: $artifact"
+            }
+          }
+
+      - name: Publish immutable public GitHub Release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOLMANAGER_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:LOLMANAGER_RELEASE_TAG
+          $artifacts = @(
+            "dist\release\LOLManager-v$env:LOLMANAGER_VERSION.exe",
+            "dist\release\LOLManager-Setup-v$env:LOLMANAGER_VERSION.exe",
+            'dist\release\SHA256SUMS.txt'
+          )
+          $releaseJson = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $publishedNames = @(
+              ($releaseJson | ConvertFrom-Json).assets | ForEach-Object { $_.name }
+            )
+            $missingNames = @(
+              $artifacts | ForEach-Object { [IO.Path]::GetFileName($_) } |
+                Where-Object { $_ -notin $publishedNames }
+            )
+            if ($missingNames.Count -ne 0) {
+              throw "GitHub Release $tag already exists but is incomplete; refusing to replace public assets: $($missingNames -join ', ')"
+            }
+            Write-Host "GitHub Release $tag required assets are already published; leaving them unchanged."
+          }
+          else {
+            gh release create $tag @artifacts --repo $env:GITHUB_REPOSITORY --title "LOLManager $tag" --generate-notes --verify-tag
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create GitHub Release $tag."
+            }
+          }
