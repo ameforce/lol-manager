@@ -22,6 +22,10 @@ from tkinter.scrolledtext import ScrolledText
 from lolmanager.core.auto_ban_refresh import AutoBanRefreshCoordinator
 from lolmanager.core.app_version import format_app_version_label, get_app_version
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.gui_preferences import (
+    load_continue_after_game_preference,
+    save_continue_after_game_preference,
+)
 from lolmanager.core.role_setting_data import load_role_setting_data
 from lolmanager.core.match_timing import format_duration_mmss, load_match_timing_stats
 from lolmanager.gui.log_view_model import (
@@ -32,6 +36,7 @@ from lolmanager.gui.log_view_model import (
 )
 from lolmanager.platform.paths import (
     champion_config_path,
+    gui_preferences_path,
     match_timing_stats_path,
     resource_path,
     resource_root,
@@ -93,6 +98,13 @@ class _GuiWarningLogger:
 
 def external_sync_delay_ms(*, in_game: bool) -> int:
     return EXTERNAL_SYNC_INGAME_MS if in_game else EXTERNAL_SYNC_MS
+
+
+def should_schedule_initial_auto_start(
+    *, auto_start_requested: bool, saved_continue_after_game: Optional[bool]
+) -> bool:
+    """Wait for an explicit continuation choice on the first GUI launch."""
+    return bool(auto_start_requested and saved_continue_after_game is not None)
 
 
 def should_auto_iconify_ingame(*, manager_has_focus: bool, root_iconic: bool) -> bool:
@@ -438,6 +450,13 @@ class LolManagerGui:
             pass
 
         self.config_path = champion_config_path()
+        self.gui_preferences_path = gui_preferences_path()
+        saved_continue_after_game = load_continue_after_game_preference(
+            self.gui_preferences_path
+        )
+        self._continue_after_game_preference_initialized = (
+            saved_continue_after_game is not None
+        )
         _apply_window_icon(self.root)
 
         self._ui_theme = apply_modern_theme(self.root)
@@ -473,7 +492,10 @@ class LolManagerGui:
         except OSError:
             self._last_config_mtime_ns = 0
         self._pending_config_apply_at: Optional[float] = None
-        self._auto_start_pending = bool(auto_start)
+        self._auto_start_pending = should_schedule_initial_auto_start(
+            auto_start_requested=auto_start,
+            saved_continue_after_game=saved_continue_after_game,
+        )
         self._auto_ban_refresher: Optional[AutoBanRefreshCoordinator] = None
 
         self._client_seen_once = False
@@ -503,7 +525,9 @@ class LolManagerGui:
         )
         self.role_key: Optional[str] = None
         self.role_var = tk.StringVar(value="미감지")
-        self.continue_after_game_var = tk.BooleanVar(value=False)
+        self.continue_after_game_var = tk.BooleanVar(
+            value=bool(saved_continue_after_game)
+        )
 
         self._proc_usage_after_id: Optional[str] = None
         self._proc_usage_procs: dict[int, psutil.Process] = {}
@@ -638,7 +662,7 @@ class LolManagerGui:
         except Exception:
             pass
 
-        if auto_start:
+        if self._auto_start_pending:
             self.root.after(250, self.start)
 
     def _schedule_auto_ban_refresh(
@@ -893,6 +917,7 @@ class LolManagerGui:
             btns,
             text="다음 게임 계속",
             variable=self.continue_after_game_var,
+            command=self._on_continue_after_game_changed,
         )
 
         self.btn_start.pack(side=tk.LEFT)
@@ -1765,9 +1790,23 @@ class LolManagerGui:
             return False
         return True
 
+    def _persist_continue_after_game_preference(self) -> None:
+        try:
+            value = bool(self.continue_after_game_var.get())
+            save_continue_after_game_preference(self.gui_preferences_path, value)
+        except Exception as exc:
+            self._append_log(f"[GUI] 다음 게임 계속 설정 저장 실패: {exc}\n")
+            return
+        self._continue_after_game_preference_initialized = True
+
+    def _on_continue_after_game_changed(self) -> None:
+        self._persist_continue_after_game_preference()
+
     def start(self, *, _auto_recover: bool = False) -> None:
         if self.proc and self.proc.poll() is None:
             return
+        if not _auto_recover:
+            self._persist_continue_after_game_preference()
         if not self._check_config_ready():
             self._auto_start_pending = True
             return
