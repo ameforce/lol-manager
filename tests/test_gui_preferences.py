@@ -145,7 +145,6 @@ def test_start_keeps_continuation_checkbox_enabled_and_passes_live_path(
     gui.btn_start = _Widget()
     gui.btn_stop = _Widget()
     gui.chk_continue = _Widget()
-    gui._persist_continue_after_game_preference = lambda: None
     gui._check_config_ready = lambda: True
     gui._reset_match_timer_ui = lambda: None
     gui._reader_loop = lambda _proc: None
@@ -167,6 +166,31 @@ def test_start_keeps_continuation_checkbox_enabled_and_passes_live_path(
             "--cli",
             "--continue-after-game-preference-path",
             str(gui.gui_preferences_path),
+            "--continue-after-game",
+        ]
+    ]
+
+    gui.proc = None
+    commands.clear()
+    save_continue_after_game_preference(gui.gui_preferences_path, False)
+    monkeypatch.setattr(
+        app_gui,
+        "save_continue_after_game_preference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
+    )
+
+    gui.continue_after_game_var.set(False)
+    gui._on_continue_after_game_changed()
+    assert gui.continue_after_game_var.get() is True
+
+    gui.start()
+
+    assert commands == [
+        [
+            app_gui.sys.executable,
+            "-m",
+            "lolmanager",
+            "--cli",
             "--continue-after-game",
         ]
     ]

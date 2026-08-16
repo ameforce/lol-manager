@@ -528,6 +528,7 @@ class LolManagerGui:
         self.continue_after_game_var = tk.BooleanVar(
             value=bool(saved_continue_after_game)
         )
+        self._last_saved_continue_after_game = saved_continue_after_game
 
         self._proc_usage_after_id: Optional[str] = None
         self._proc_usage_procs: dict[int, psutil.Process] = {}
@@ -1790,23 +1791,31 @@ class LolManagerGui:
             return False
         return True
 
-    def _persist_continue_after_game_preference(self) -> None:
+    def _persist_continue_after_game_preference(self) -> bool:
         try:
             value = bool(self.continue_after_game_var.get())
             save_continue_after_game_preference(self.gui_preferences_path, value)
         except Exception as exc:
             self._append_log(f"[GUI] 다음 게임 계속 설정 저장 실패: {exc}\n")
-            return
+            return False
         self._continue_after_game_preference_initialized = True
+        self._last_saved_continue_after_game = value
+        return True
 
     def _on_continue_after_game_changed(self) -> None:
-        self._persist_continue_after_game_preference()
+        if self._persist_continue_after_game_preference():
+            return
+        last_saved = getattr(self, "_last_saved_continue_after_game", None)
+        if isinstance(last_saved, bool):
+            self.continue_after_game_var.set(last_saved)
+            self._append_log(
+                "[GUI] 저장되지 않은 다음 게임 계속 변경을 이전 값으로 되돌렸습니다.\n"
+            )
 
     def start(self, *, _auto_recover: bool = False) -> None:
         if self.proc and self.proc.poll() is None:
             return
-        if not _auto_recover:
-            self._persist_continue_after_game_preference()
+        preference_saved = self._persist_continue_after_game_preference()
         if not self._check_config_ready():
             self._auto_start_pending = True
             return
@@ -1818,12 +1827,13 @@ class LolManagerGui:
             cmd = [sys.executable, "--cli"]
         else:
             cmd = [sys.executable, "-m", "lolmanager", "--cli"]
-        cmd.extend(
-            [
-                "--continue-after-game-preference-path",
-                str(self.gui_preferences_path),
-            ]
-        )
+        if preference_saved:
+            cmd.extend(
+                [
+                    "--continue-after-game-preference-path",
+                    str(self.gui_preferences_path),
+                ]
+            )
         try:
             if bool(self.continue_after_game_var.get()):
                 cmd.append("--continue-after-game")
