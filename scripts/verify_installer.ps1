@@ -1,12 +1,27 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [string]$Version = '1.1.12',
+    [string]$Version,
     [switch]$UseDefaultInstallPath
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
+$pyprojectPath = Join-Path $repoRoot 'pyproject.toml'
+$projectText = [IO.File]::ReadAllText($pyprojectPath, [Text.Encoding]::UTF8)
+$versionMatch = [regex]::Match(
+    $projectText,
+    '(?ms)^\[project\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+)
+if (-not $Version) {
+    if (-not $versionMatch.Success) {
+        throw 'pyproject.toml에서 [project].version을 찾지 못했습니다.'
+    }
+    $Version = $versionMatch.Groups['version'].Value
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "검증할 버전은 X.Y.Z 형식이어야 합니다: $Version"
+}
 $releaseDir = Join-Path $repoRoot 'dist\release'
 $setupPath = Join-Path $releaseDir "LOLManager-Setup-v$Version.exe"
 $versionQuad = "$Version.0"
