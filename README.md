@@ -23,6 +23,26 @@ OP.GG 데이터를 주기적으로 캐싱해 내가 픽하려는 챔피언 기�
 - 설정 GUI 자동 저장 및 오래된 추천 캐시 자동 갱신
 - PyInstaller 기반 단일 `LOLManager.exe` 빌드
 
+## Windows 로컬 빌드와 설치 (권장)
+
+터미널 명령을 따로 입력할 필요 없이 Windows Explorer에서 프로젝트 루트의
+`build_and_install.bat`를 더블 클릭하세요. 창은 완료 또는 실패 메시지와 함께
+열린 상태로 남으며, `LOLMANAGER_NO_PAUSE=1` 환경 변수는 자동화 테스트에서만
+대기 화면을 생략합니다.
+
+이 진입점은 기존 공통 릴리스 빌더로 현재 `pyproject.toml` 버전의 portable EXE와
+installer를 만든 뒤, `%LOCALAPPDATA%\Programs\LOLManager`에 사용자 권한으로
+조용히 설치하고 바탕 화면/시작 메뉴 바로가기를 갱신합니다. 완료 전에는 설치된
+`LOLManager.exe` 경로와 파일 버전을 다시 확인합니다.
+
+사전 요구 사항은 `uv`와 Inno Setup 6입니다. 런처는 개발 도구를 자동 설치하지
+않으며, 둘 중 하나가 없으면 `logs\build_and_install_last.log`에 해결 방법을 남기고
+중단합니다. Inno Setup 6은 한 번만 설치하면 됩니다.
+
+```bat
+winget install --exact --id JRSoftware.InnoSetup
+```
+
 ## 빠른 시작
 
 요구사항:
@@ -103,6 +123,9 @@ OP.GG 추천 캐시:
 
 ## EXE 빌드
 
+개발용 portable EXE와 프로젝트 루트 바로가기만 갱신하려면 아래 고급 명령을
+사용합니다. 일반적인 로컬 설치에는 위의 `build_and_install.bat`를 사용하세요.
+
 ```bat
 scripts\build_exe.bat
 ```
@@ -117,6 +140,12 @@ scripts\build_exe.bat
 ## 릴리스 빌드
 
 portable EXE, per-user installer, SHA-256 목록을 한 번에 생성합니다. installer 빌드에는 Inno Setup 6이 필요합니다.
+
+`vX.Y.Z` 형식의 새 hotfix/release 태그가 GitHub에 push되면 Windows GitHub Actions가
+태그와 패키지 버전을 검증하고, 전체 테스트·패키지 빌드·installer 빌드를 통과한
+뒤 portable EXE, installer, `SHA256SUMS.txt`를 해당 GitHub Release에 생성합니다.
+같은 태그의 공개 자산은 재실행으로 교체하지 않으며, 기존 태그를 소급 배포하지도
+않습니다.
 
 ```bat
 winget install --exact --id JRSoftware.InnoSetup
