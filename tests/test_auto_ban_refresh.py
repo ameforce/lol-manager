@@ -123,7 +123,7 @@ def test_refresh_coordinator_forces_startup_refresh_and_schedules_success(
     assert updated == [True]
 
 
-def test_refresh_coordinator_retries_failed_refresh_after_30_seconds(
+def test_refresh_coordinator_retries_failed_refresh_after_a_long_interval(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "champion_config.json"
@@ -162,6 +162,7 @@ def test_refresh_coordinator_retries_failed_refresh_after_30_seconds(
     coordinator.start()
 
     assert scheduled_ms == [0, AUTO_BAN_REFRESH_RETRY_MS]
+    assert AUTO_BAN_REFRESH_RETRY_MS >= 60 * 60 * 1000
 
 
 def test_refresh_coordinator_treats_missing_href_as_retryable_failure(

@@ -106,12 +106,12 @@ def _first_endpoint_call_index(
     raise AssertionError(f"{method} {suffix} was not called")
 
 
-def _pick_order_decline_calls(session: _FakeSession) -> list[_FakeRequestCall]:
+def _pick_order_accept_calls(session: _FakeSession) -> list[_FakeRequestCall]:
     return [
         call
         for call in session.calls
         if "/lol-champ-select/v1/session/pick-order-swaps/" in call["url"]
-        and call["url"].endswith("/decline")
+        and call["url"].endswith("/accept")
     ]
 
 
@@ -605,7 +605,7 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.UNSUPPORTED)
 
-    def test_dismiss_blocking_modal_declines_received_pick_order_swap(
+    def test_dismiss_blocking_modal_accepts_received_pick_order_swap(
         self,
     ) -> None:
         session = _FakeSession(
@@ -631,11 +631,11 @@ class LcuClientTests(unittest.TestCase):
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/session/pick-order-swaps/42/decline",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/42/accept",
             )
         )
 
-    def test_dismiss_blocking_modal_declines_received_pick_order_swap_from_session(
+    def test_dismiss_blocking_modal_accepts_received_pick_order_swap_from_session(
         self,
     ) -> None:
         session = _FakeSession(
@@ -675,11 +675,11 @@ class LcuClientTests(unittest.TestCase):
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/23/accept",
             )
         )
 
-    def test_dismiss_blocking_modal_clears_ongoing_when_session_decline_unsupported(
+    def test_dismiss_blocking_modal_accepts_ongoing_when_session_accept_unsupported(
         self,
     ) -> None:
         session = _FakeSession(
@@ -705,26 +705,26 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 5)
-        session_decline = _first_endpoint_call_index(
+        session_accept = _first_endpoint_call_index(
             session,
             method="POST",
-            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/accept",
         )
         ongoing_lookup = _first_endpoint_call_index(
             session,
             method="GET",
             suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
         )
-        self.assertLess(session_decline, ongoing_lookup)
+        self.assertLess(session_accept, ongoing_lookup)
         self.assertTrue(
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/accept",
             )
         )
 
-    def test_dismiss_blocking_modal_clears_ongoing_when_collection_decline_unsupported(
+    def test_dismiss_blocking_modal_accepts_ongoing_when_collection_accept_unsupported(
         self,
     ) -> None:
         session = _FakeSession(
@@ -741,26 +741,26 @@ class LcuClientTests(unittest.TestCase):
         result = client.dismiss_blocking_modal_decision()
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
-        collection_decline = _first_endpoint_call_index(
+        collection_accept = _first_endpoint_call_index(
             session,
             method="POST",
-            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/decline",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/23/accept",
         )
         ongoing_lookup = _first_endpoint_call_index(
             session,
             method="GET",
             suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
         )
-        self.assertLess(collection_decline, ongoing_lookup)
+        self.assertLess(collection_accept, ongoing_lookup)
         self.assertTrue(
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/accept",
             )
         )
 
-    def test_dismiss_blocking_modal_declines_pick_order_swap_from_session_after_empty_collection(
+    def test_dismiss_blocking_modal_accepts_pick_order_swap_from_session_after_empty_collection(
         self,
     ) -> None:
         session = _FakeSession(
@@ -792,15 +792,15 @@ class LcuClientTests(unittest.TestCase):
         session_lookup = _first_endpoint_call_index(
             session, method="GET", suffix="/lol-champ-select/v1/session"
         )
-        session_decline = _first_endpoint_call_index(
+        session_accept = _first_endpoint_call_index(
             session,
             method="POST",
-            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/decline",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/accept",
         )
         self.assertLess(collection_lookup, session_lookup)
-        self.assertLess(session_lookup, session_decline)
+        self.assertLess(session_lookup, session_accept)
 
-    def test_dismiss_blocking_modal_clears_ongoing_after_empty_collection_and_unsupported_session_decline(
+    def test_dismiss_blocking_modal_accepts_ongoing_after_empty_collection_and_unsupported_session_accept(
         self,
     ) -> None:
         session = _FakeSession(
@@ -826,26 +826,26 @@ class LcuClientTests(unittest.TestCase):
 
         self.assertEqual(result.status, LcuOutcome.SUCCESS)
         self.assertEqual(len(session.calls), 5)
-        session_decline = _first_endpoint_call_index(
+        session_accept = _first_endpoint_call_index(
             session,
             method="POST",
-            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/decline",
+            suffix="/lol-champ-select/v1/session/pick-order-swaps/25/accept",
         )
         ongoing_lookup = _first_endpoint_call_index(
             session,
             method="GET",
             suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
         )
-        self.assertLess(session_decline, ongoing_lookup)
+        self.assertLess(session_accept, ongoing_lookup)
         self.assertTrue(
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/26/clear",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/26/accept",
             )
         )
 
-    def test_dismiss_blocking_modal_declines_ongoing_pick_order_swap_notification(
+    def test_dismiss_blocking_modal_accepts_ongoing_pick_order_swap_notification(
         self,
     ) -> None:
         session = _FakeSession(
@@ -885,14 +885,14 @@ class LcuClientTests(unittest.TestCase):
             _has_endpoint_call(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/clear",
+                suffix="/lol-champ-select/v1/ongoing-pick-order-swap/24/accept",
             )
         )
         self.assertFalse(
             _endpoint_calls(
                 session,
                 method="POST",
-                suffix="/lol-champ-select/v1/session/pick-order-swaps/24/decline",
+                suffix="/lol-champ-select/v1/session/pick-order-swaps/24/accept",
             )
         )
 
@@ -919,7 +919,7 @@ class LcuClientTests(unittest.TestCase):
                 suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertFalse(_pick_order_decline_calls(session))
+        self.assertFalse(_pick_order_accept_calls(session))
 
     def test_dismiss_blocking_modal_ignores_pick_order_swap_without_received_state(
         self,
@@ -960,7 +960,7 @@ class LcuClientTests(unittest.TestCase):
                 suffix="/lol-champ-select/v1/session/pick-order-swaps",
             )
         )
-        self.assertFalse(_pick_order_decline_calls(session))
+        self.assertFalse(_pick_order_accept_calls(session))
 
     def test_dismiss_blocking_modal_ignores_ongoing_pick_order_swap_without_received_state(
         self,
@@ -1003,7 +1003,7 @@ class LcuClientTests(unittest.TestCase):
                         suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
                     )
                 )
-                self.assertFalse(_pick_order_decline_calls(session))
+                self.assertFalse(_pick_order_accept_calls(session))
 
     def test_dismiss_blocking_modal_treats_ongoing_pick_order_swap_204_as_no_current_action(
         self,
@@ -1038,7 +1038,7 @@ class LcuClientTests(unittest.TestCase):
                 suffix="/lol-champ-select/v1/ongoing-pick-order-swap",
             )
         )
-        self.assertFalse(_pick_order_decline_calls(session))
+        self.assertFalse(_pick_order_accept_calls(session))
 
     def test_dismiss_blocking_modal_reports_malformed_pick_order_swap_response(
         self,

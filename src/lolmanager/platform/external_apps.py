@@ -263,6 +263,58 @@ class OwnedExternalProcess:
     process: object
 
 
+def _terminate_owned_process_tree(
+    process: object,
+    *,
+    timeout_sec: float,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    """Stop only descendants of the process this session launched."""
+    try:
+        pid = int(getattr(process, "pid", 0) or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid <= 0:
+        return False
+
+    try:
+        root = psutil.Process(pid)
+        targets = [*root.children(recursive=True), root]
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+    if not targets:
+        return False
+
+    try:
+        # Stop descendants before their owning launcher so no child is orphaned
+        # while the process tree is being cleaned up.
+        for target in targets:
+            try:
+                target.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        _gone, alive = psutil.wait_procs(
+            targets, timeout=max(0.0, float(timeout_sec))
+        )
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return False
+    if alive and logger:
+        logger.warning("OP.GG 소유 프로세스 트리 종료 대기 시간 초과. 강제 종료합니다.")
+    for target in alive:
+        try:
+            target.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    if alive:
+        try:
+            _gone, alive = psutil.wait_procs(
+                alive, timeout=max(0.0, float(timeout_sec))
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            return False
+    return not alive
+
+
 @dataclass
 class ExternalAppsSession:
     owned_opgg: Optional[OwnedExternalProcess] = None
@@ -283,6 +335,15 @@ class ExternalAppsSession:
             if callable(poll) and poll() is not None:
                 self.owned_opgg = None
                 return False
+
+            if _terminate_owned_process_tree(
+                proc,
+                timeout_sec=timeout_sec,
+                logger=logger,
+            ):
+                if logger:
+                    logger.info("OP.GG 소유 프로세스 트리 종료 완료: %s", owned.exe_path)
+                return True
 
             if logger:
                 logger.info("OP.GG 자동 종료 요청: %s", owned.exe_path)
@@ -404,6 +465,12 @@ def ensure_external_apps_running_once(
     session = set_current_external_apps_session(ExternalAppsSession())
     league_exe = str(league_exe or league_client_exe_path())
     opgg_exe = str(opgg_exe or opgg_exe_path())
+    valid_league_exe = _validate_app_exe_path(
+        league_exe,
+        expected_name=LEAGUE_CLIENT_EXE_NAME,
+        env_name=ENV_LEAGUE_CLIENT_EXE,
+        logger=logger,
+    )
     valid_opgg_exe = _validate_app_exe_path(
         opgg_exe,
         expected_name=OPGG_EXE_NAME,
@@ -413,8 +480,8 @@ def ensure_external_apps_running_once(
         logger=logger,
     )
 
-    status = running_status_for_exe_paths([league_exe, valid_opgg_exe])
-    league_running = bool(status.get(league_exe, False))
+    status = running_status_for_exe_paths([valid_league_exe, valid_opgg_exe])
+    league_running = bool(valid_league_exe and status.get(valid_league_exe, False))
     opgg_running = bool(valid_opgg_exe and status.get(valid_opgg_exe, False))
 
     if logger:
@@ -425,24 +492,14 @@ def ensure_external_apps_running_once(
         )
 
     if not league_running:
-        riot_exe = riot_client_services_exe_path(league_exe=league_exe)
-        valid_riot_exe = _validate_app_exe_path(
-            riot_exe,
-            expected_name=RIOT_CLIENT_SERVICES_EXE_NAME,
-            env_name=ENV_RIOT_CLIENT_SERVICES_EXE,
-            logger=logger,
-        )
         ok = False
-        if valid_riot_exe:
-            ok = start_cmd_once(
-                [valid_riot_exe, *LEAGUE_RIOT_LAUNCH_ARGS],
-                logger=logger,
-            )
+        if valid_league_exe:
+            ok = start_exe_once(valid_league_exe, logger=logger)
         if not ok and logger:
             logger.warning(
-                "LoL 자동 실행 실패. Riot Client 설치 경로가 다르면 환경 변수 %s에 "
-                "RiotClientServices.exe 경로를 지정하세요.",
-                ENV_RIOT_CLIENT_SERVICES_EXE,
+                "LoL 자동 실행 실패. LeagueClient 설치 경로가 다르면 환경 변수 %s에 "
+                "LeagueClient.exe 경로를 지정하세요.",
+                ENV_LEAGUE_CLIENT_EXE,
             )
     if valid_opgg_exe and not opgg_running:
         opgg_proc = start_exe_process_once(valid_opgg_exe, logger=logger)

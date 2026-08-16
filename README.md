@@ -11,7 +11,7 @@
 
 ## 소개
 
-LOLManager는 Windows LoL 클라이언트를 감지해 대전 수락, 챔피언 픽, 밴, 게임 종료 후 다음 큐 흐름을 자동화합니다.
+LOLManager는 Windows LoL 클라이언트를 감지해 대전 수락, 챔피언 픽, 밴을 자동화합니다. 기본값은 한 게임만 진행하며, 메인 GUI에서 `다음 게임 계속`을 켠 실행만 게임 종료 후 다음 큐까지 이어집니다.
 
 OP.GG 데이터를 주기적으로 캐싱해 내가 픽하려는 챔피언 기준 추천 밴을 계산하고, 설정 GUI에서 티어, 상대 승률, score를 함께 확인할 수 있습니다. `자동 추천 (최고 score)`를 선택하면 밴 단계마다 캐시의 최고 추천 챔피언명만 입력합니다.
 
@@ -37,11 +37,17 @@ uv sync
 uv run lolmanager
 ```
 
-메인 GUI의 `Start`와 `Stop`은 매칭 자동화 프로세스만 제어합니다. LoL
+메인 GUI의 `Start`와 `Stop`은 매칭 자동화 프로세스만 제어합니다. `다음 게임
+계속`은 `Start` 전에 명시적으로 켠 실행에만 적용되며 기본값은 꺼짐입니다. LoL
 클라이언트에 따른 창 위치, 표시/숨김, topmost, 종료 감시는 LOLManager GUI가
-열려 있는 동안 계속 동작합니다. 인게임 중 자동화를 중지해도 GUI는 게임이
-끝날 때까지 숨김 상태를 유지하고, LoL 클라이언트가 다시 표시되면 자동으로
-복원되어 클라이언트 옆에 배치됩니다.
+열려 있는 동안 계속 동작합니다. 인게임 중에는 GUI가 자동으로 숨겨지지만,
+Alt+Tab이나 마우스로 LOLManager에 직접 포커스를 주면 계속 표시되고 포커스를
+다른 창으로 옮기면 다시 숨겨집니다. LoL 클라이언트가 다시 표시되면 GUI도
+컴팩트한 고정 크기로 복원되어 클라이언트 옆에 배치됩니다.
+
+LoL이 실행 중이 아니면 Riot Client 홈 화면이 아니라 설정된
+`LeagueClient.exe`를 직접 실행합니다. LOLManager가 시작한 OP.GG는 LoL
+클라이언트 종료 시 자식 프로세스까지 정리한 후 LOLManager가 종료됩니다.
 
 설정만 열려면:
 
@@ -92,7 +98,6 @@ OP.GG 추천 캐시:
 | --- | --- | --- |
 | `LOLMANAGER_CHAMPSELECT_ACTION_CONFIRM_TIMEOUT_SEC` | `2.0` | LCU 픽/밴 선택 및 완료 확인 대기 시간(초) |
 | `LOLMANAGER_LEAGUE_CLIENT_EXE` | `C:\Riot Games\League of Legends\LeagueClient.exe` | LeagueClient 실행 파일 경로 |
-| `LOLMANAGER_RIOT_CLIENT_SERVICES_EXE` | 자동 탐지 | RiotClientServices 실행 파일 경로 |
 | `LOLMANAGER_OPGG_EXE` | 자동 탐지 | OP.GG 실행 파일 경로. `%LOCALAPPDATA%\Programs\OP.GG\OP.GG.exe` 등을 먼저 찾습니다. |
 | `LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS` | 비활성 | `LOLMANAGER_OPGG_EXE`가 표준 설치 위치 밖의 `OP.GG.exe`를 가리킬 때 `1`로 명시 허용 |
 
