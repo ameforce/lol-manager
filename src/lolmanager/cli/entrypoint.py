@@ -21,7 +21,7 @@ if __package__ in (None, ""):
 
 from lolmanager.platform.external_apps import (
     LeagueClientExitGuard,
-    close_owned_opgg_for_current_session,
+    close_running_opgg,
     ensure_external_apps_running_once,
     league_client_exe_path,
 )
@@ -180,7 +180,7 @@ _last_restore_wait_log_state: dict[str, LeagueWindowVisibility] = {}
 
 def _exit_after_league_client_closed(logger: logging.Logger) -> None:
     logger.info("LeagueClient.exe 종료 감지. lolmanager를 종료합니다.")
-    close_owned_opgg_for_current_session(logger=logger)
+    close_running_opgg(logger=logger)
     raise SystemExit(0)
 
 
