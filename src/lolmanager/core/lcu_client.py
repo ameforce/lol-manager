@@ -53,6 +53,8 @@ HONOR_VOTE_ENDPOINT = "/lol-honor/v1/honor"
 HONOR_BALLOT_SUBMIT_ENDPOINT = "/lol-honor/v1/ballot"
 END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
 LOBBY_PLAY_AGAIN_ENDPOINT = "/lol-lobby/v2/play-again"
+LOBBY_CREATE_ENDPOINT = "/lol-lobby/v2/lobby"
+RANKED_SOLO_DUO_QUEUE_ID = 420
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
 REMEDY_NOTIFICATIONS_ENDPOINT = "/lol-remedy/v1/remedy-notifications"
 REMEDY_NOTIFICATION_ACK_ENDPOINT = "/lol-remedy/v1/ack-remedy-notification"
@@ -684,6 +686,23 @@ class LcuClient:
             result,
             success_reason="matchmaking search accepted",
             rejected_reason="matchmaking search rejected",
+        )
+
+    def create_lobby(self, queue_id: int = RANKED_SOLO_DUO_QUEUE_ID) -> bool:
+        return self.create_lobby_decision(queue_id).ok
+
+    def create_lobby_decision(
+        self, queue_id: int = RANKED_SOLO_DUO_QUEUE_ID
+    ) -> LcuDecision:
+        result = self.request(
+            "POST",
+            LOBBY_CREATE_ENDPOINT,
+            json_body={"queueId": int(queue_id)},
+        )
+        return _write_result_decision(
+            result,
+            success_reason="lobby created",
+            rejected_reason="lobby create rejected",
         )
 
     def show_ux_decision(self) -> LcuDecision:

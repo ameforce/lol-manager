@@ -4209,3 +4209,81 @@ class CliLcuStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoLobbyCreatePolicyTests(unittest.TestCase):
+    def test_should_click_popup_confirm_only_in_lobby_phase(self) -> None:
+        self.assertTrue(
+            entrypoint._should_click_popup_confirm_at_cycle_start(PHASE_LOBBY)
+        )
+        self.assertFalse(
+            entrypoint._should_click_popup_confirm_at_cycle_start(None)
+        )
+        self.assertFalse(
+            entrypoint._should_click_popup_confirm_at_cycle_start(PHASE_NONE)
+        )
+        self.assertFalse(
+            entrypoint._should_click_popup_confirm_at_cycle_start(PHASE_CHAMP_SELECT)
+        )
+
+    def test_should_attempt_auto_lobby_create_requires_home_screen_and_interval(
+        self,
+    ) -> None:
+        self.assertTrue(entrypoint._should_attempt_auto_lobby_create(None, 10.0))
+        self.assertTrue(
+            entrypoint._should_attempt_auto_lobby_create(PHASE_NONE, 10.0)
+        )
+        self.assertFalse(entrypoint._should_attempt_auto_lobby_create(None, 5.0))
+        self.assertFalse(
+            entrypoint._should_attempt_auto_lobby_create(PHASE_LOBBY, 999.0)
+        )
+        self.assertFalse(
+            entrypoint._should_attempt_auto_lobby_create(PHASE_CHAMP_SELECT, 999.0)
+        )
+
+    def test_maybe_auto_create_lobby_creates_once_per_interval(self) -> None:
+        class _FakeCreateLcu:
+            def __init__(self) -> None:
+                self.create_calls = 0
+
+            def create_lobby_decision(self) -> LcuDecision:
+                self.create_calls += 1
+                return LcuDecision(LcuOutcome.SUCCESS, reason="created")
+
+        fake = _FakeCreateLcu()
+        entrypoint._last_auto_lobby_create_at = 0.0
+
+        with mock.patch.object(entrypoint.time, "monotonic", return_value=100.0):
+            entrypoint._maybe_auto_create_lobby_for_home_screen(
+                cast(Any, fake), None, logging.getLogger("test")
+            )
+            self.assertEqual(fake.create_calls, 1)
+
+            entrypoint._maybe_auto_create_lobby_for_home_screen(
+                cast(Any, fake), None, logging.getLogger("test")
+            )
+            self.assertEqual(fake.create_calls, 1)
+
+        with mock.patch.object(entrypoint.time, "monotonic", return_value=115.0):
+            entrypoint._maybe_auto_create_lobby_for_home_screen(
+                cast(Any, fake), None, logging.getLogger("test")
+            )
+            self.assertEqual(fake.create_calls, 2)
+
+    def test_maybe_auto_create_lobby_skips_non_home_phases(self) -> None:
+        class _FakeCreateLcu:
+            def __init__(self) -> None:
+                self.create_calls = 0
+
+            def create_lobby_decision(self) -> LcuDecision:
+                self.create_calls += 1
+                return LcuDecision(LcuOutcome.SUCCESS, reason="created")
+
+        fake = _FakeCreateLcu()
+        entrypoint._last_auto_lobby_create_at = 0.0
+
+        entrypoint._maybe_auto_create_lobby_for_home_screen(
+            cast(Any, fake), PHASE_LOBBY, logging.getLogger("test")
+        )
+
+        self.assertEqual(fake.create_calls, 0)
