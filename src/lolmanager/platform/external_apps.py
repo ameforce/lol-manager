@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import secrets
@@ -7,6 +8,7 @@ import socket
 import subprocess
 import time
 import warnings
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -24,6 +26,7 @@ ENV_LEAGUE_CLIENT_EXE = "LOLMANAGER_LEAGUE_CLIENT_EXE"
 ENV_RIOT_CLIENT_SERVICES_EXE = "LOLMANAGER_RIOT_CLIENT_SERVICES_EXE"
 ENV_OPGG_EXE = "LOLMANAGER_OPGG_EXE"
 ENV_ALLOW_UNTRUSTED_APP_PATHS = "LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS"
+ENV_KEEP_RIOT_CLIENT_WINDOW = "LOLMANAGER_KEEP_RIOT_CLIENT_WINDOW"
 
 LEAGUE_CLIENT_EXE_NAME = "LeagueClient.exe"
 RIOT_CLIENT_SERVICES_EXE_NAME = "RiotClientServices.exe"
@@ -46,6 +49,10 @@ RIOT_API_ACCEPTED_STATUS_CODES = frozenset({200, 201, 202, 204})
 
 LEAGUE_LAUNCH_VERIFY_TIMEOUT_SEC = 10.0
 LEAGUE_LAUNCH_VERIFY_POLL_SEC = 1.0
+
+RIOT_CLIENT_WINDOW_TITLE = "Riot Client"
+RIOT_CLIENT_CLOSE_DELAY_SEC = 3.0
+WM_CLOSE = 0x0010
 
 
 def _norm_exe_path(path: str) -> str:
@@ -658,6 +665,69 @@ def start_league_client_once(
     return start_exe_once(valid_league_exe, logger=logger)
 
 
+def _riot_client_window_handles() -> list[int]:
+    user32 = ctypes.windll.user32
+    handles: list[int] = []
+
+    def _on_window(handle: int, _lparam: int) -> int:
+        try:
+            if not user32.IsWindowVisible(int(handle)):
+                return 1
+            length = user32.GetWindowTextLengthW(int(handle))
+            if length <= 0:
+                return 1
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(int(handle), buffer, length + 1)
+            if buffer.value == RIOT_CLIENT_WINDOW_TITLE:
+                handles.append(int(handle))
+        except Exception:
+            return 1
+        return 1
+
+    prototype = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    try:
+        user32.EnumWindows(prototype(_on_window), 0)
+    except Exception:
+        return []
+    return handles
+
+
+def _post_close_message(handle: int) -> None:
+    ctypes.windll.user32.PostMessageW(int(handle), WM_CLOSE, 0, 0)
+
+
+def close_riot_client_windows_after_launch(
+    *,
+    logger: Optional[logging.Logger] = None,
+    settle_sec: float = RIOT_CLIENT_CLOSE_DELAY_SEC,
+) -> int:
+    if _truthy_env(ENV_KEEP_RIOT_CLIENT_WINDOW):
+        if logger:
+            logger.info(
+                "환경 변수 %s 설정으로 Riot Client 창을 열어 둡니다.",
+                ENV_KEEP_RIOT_CLIENT_WINDOW,
+            )
+        return 0
+
+    time.sleep(max(0.0, float(settle_sec)))
+    handles = _riot_client_window_handles()
+    for handle in handles:
+        try:
+            _post_close_message(handle)
+        except Exception as exc:
+            if logger:
+                logger.warning("Riot Client 창 종료 메시지 전송 실패: %s", exc)
+    if logger:
+        if handles:
+            logger.info(
+                "LeagueClient 기동 확인 후 Riot Client 창 %d개에 종료를 요청했습니다.",
+                len(handles),
+            )
+        else:
+            logger.debug("종료할 Riot Client 창이 없습니다.")
+    return len(handles)
+
+
 def ensure_external_apps_running_once(
     *,
     league_exe: Optional[str] = None,
@@ -696,7 +766,9 @@ def ensure_external_apps_running_once(
     if not league_running:
         ok = start_league_client_once(league_exe=str(league_exe), logger=logger)
         if ok:
-            verify_league_client_started(logger=logger)
+            verified = verify_league_client_started(logger=logger)
+            if verified:
+                close_riot_client_windows_after_launch(logger=logger)
         elif logger:
             logger.warning(
                 "LoL 자동 실행 실패. 설치 경로가 다르면 환경 변수 %s에 "
