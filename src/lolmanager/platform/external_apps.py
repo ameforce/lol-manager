@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import socket
 import subprocess
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
 import psutil
+import requests
+from urllib3.exceptions import InsecureRequestWarning
 
 
 DEFAULT_LEAGUE_CLIENT_EXE = r"C:\Riot Games\League of Legends\LeagueClient.exe"
@@ -29,6 +34,15 @@ LEAGUE_RIOT_LAUNCH_ARGS: tuple[str, ...] = (
     "--launch-product=league_of_legends",
     "--launch-patchline=live",
 )
+
+RIOT_PRODUCT_ID = "league_of_legends"
+RIOT_PATCHLINE_ID = "live"
+RIOT_PRODUCT_LAUNCH_PATH = (
+    f"/product-launcher/v1/products/{RIOT_PRODUCT_ID}/patchlines/{RIOT_PATCHLINE_ID}"
+)
+RIOT_CLIENT_API_READY_TIMEOUT_SEC = 15.0
+RIOT_CLIENT_API_REQUEST_TIMEOUT_SEC = (3.0, 5.0)
+RIOT_API_ACCEPTED_STATUS_CODES = frozenset({200, 201, 202, 204})
 
 LEAGUE_LAUNCH_VERIFY_TIMEOUT_SEC = 10.0
 LEAGUE_LAUNCH_VERIFY_POLL_SEC = 1.0
@@ -474,6 +488,110 @@ def _league_client_process_seen() -> bool:
     return False
 
 
+def _find_running_riot_client_api() -> Optional[tuple[str, tuple[str, str]]]:
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            if str(proc.info.get("name") or "").casefold() != RIOT_CLIENT_SERVICES_EXE_NAME.casefold():
+                continue
+            cmdline = proc.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        token = port = ""
+        for arg in cmdline:
+            text = str(arg)
+            if text.startswith("--remoting-auth-token="):
+                token = text.split("=", 1)[1]
+            elif text.startswith("--app-port="):
+                port = text.split("=", 1)[1]
+        if token and port:
+            return f"https://127.0.0.1:{port}", ("riot", token)
+    return None
+
+
+def _free_localhost_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _start_riot_client_services_with_api(*, logger: Optional[logging.Logger] = None) -> bool:
+    riot_exe = riot_client_services_exe_path()
+    valid_riot_exe = _validate_app_exe_path(
+        riot_exe,
+        expected_name=RIOT_CLIENT_SERVICES_EXE_NAME,
+        env_name=ENV_RIOT_CLIENT_SERVICES_EXE,
+        logger=logger,
+    )
+    if not valid_riot_exe:
+        return False
+
+    cmd = [
+        valid_riot_exe,
+        f"--remoting-auth-token={secrets.token_hex(16)}",
+        f"--app-port={_free_localhost_port()}",
+    ]
+    return start_cmd_process_once(
+        cmd,
+        cwd=str(Path(valid_riot_exe).parent),
+        logger=logger,
+    ) is not None
+
+
+def launch_league_via_riot_client_api(
+    *,
+    logger: Optional[logging.Logger] = None,
+    ready_timeout_sec: float = RIOT_CLIENT_API_READY_TIMEOUT_SEC,
+) -> bool:
+    endpoint = _find_running_riot_client_api()
+    if endpoint is None:
+        if not _start_riot_client_services_with_api(logger=logger):
+            return False
+        deadline = time.monotonic() + max(0.0, float(ready_timeout_sec))
+        while endpoint is None:
+            endpoint = _find_running_riot_client_api()
+            if endpoint or time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        if endpoint is None:
+            if logger:
+                logger.warning(
+                    "Riot Client API 준비 대기 시간 초과(%.1fs). 기존 실행 경로로 대체합니다.",
+                    float(ready_timeout_sec),
+                )
+            return False
+
+    base_url, auth = endpoint
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            response = requests.post(
+                base_url + RIOT_PRODUCT_LAUNCH_PATH,
+                auth=auth,
+                verify=False,
+                timeout=RIOT_CLIENT_API_REQUEST_TIMEOUT_SEC,
+            )
+    except requests.ReadTimeout:
+        if logger:
+            logger.info(
+                "Riot Client 실행 요청이 처리 중입니다(응답 지연). 실행 결과를 별도 확인합니다."
+            )
+        return True
+    except requests.RequestException as exc:
+        if logger:
+            logger.warning("Riot Client 실행 API 호출 실패: %s", type(exc).__name__)
+        return False
+
+    accepted = response.status_code in RIOT_API_ACCEPTED_STATUS_CODES
+    if logger:
+        level = logging.INFO if accepted else logging.WARNING
+        logger.log(
+            level,
+            "Riot Client 실행 API 응답: %s",
+            response.status_code,
+        )
+    return accepted
+
+
 def verify_league_client_started(
     *,
     timeout_sec: float = LEAGUE_LAUNCH_VERIFY_TIMEOUT_SEC,
@@ -506,6 +624,9 @@ def start_league_client_once(
     league_exe: str,
     logger: Optional[logging.Logger] = None,
 ) -> bool:
+    if launch_league_via_riot_client_api(logger=logger):
+        return True
+
     riot_exe = riot_client_services_exe_path(league_exe=league_exe)
     valid_riot_exe = _validate_app_exe_path(
         riot_exe,
