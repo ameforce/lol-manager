@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lolmanager"
-version = "1.1.17"
+version = "1.1.18"
 description = "League of Legends 클라이언트 창 크기 기반 이미지 세트 선택 유틸리티"
 requires-python = ">=3.14"
 dependencies = [
