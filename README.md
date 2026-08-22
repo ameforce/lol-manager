@@ -75,7 +75,10 @@ LoL 클라이언트가 바로 기동됩니다. Riot Client 서비스가 아직 �
 호출합니다. 이 경로를 사용할 수 없으면 `--launch-product` 실행 인자,
 그다음에는 설정된 `LeagueClient.exe` 직접 실행으로 대체(fallback)합니다.
 실행 후에는 짧은 대기 시간 동안 LeagueClient 프로세스 기동 여부를 확인하고
-그 결과를 로그로 남깁니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트
+그 결과를 로그로 남깁니다. LOLManager가 직접 실행에 성공하면 화면에 남은
+Riot Client 창에 정상 종료 메시지를 보내 창을 닫습니다(백그라운드 서비스는
+유지되며 롤 클라이언트에는 영향이 없습니다). `LOLMANAGER_KEEP_RIOT_CLIENT_WINDOW=1`
+로 이 동작을 끌 수 있습니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트
 종료 시 자식 프로세스까지 정리한 후 LOLManager가 종료됩니다.
 
 설정만 열려면:
@@ -130,6 +133,7 @@ OP.GG 추천 캐시:
 | `LOLMANAGER_RIOT_CLIENT_SERVICES_EXE` | 자동 탐지 | RiotClientServices 실행 파일 경로. 기본 경로와 League 설치 위치 인접 경로를 먼저 찾습니다. |
 | `LOLMANAGER_OPGG_EXE` | 자동 탐지 | OP.GG 실행 파일 경로. `%LOCALAPPDATA%\Programs\OP.GG\OP.GG.exe` 등을 먼저 찾습니다. |
 | `LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS` | 비활성 | `LOLMANAGER_OPGG_EXE`가 표준 설치 위치 밖의 `OP.GG.exe`를 가리킬 때 `1`로 명시 허용 |
+| `LOLMANAGER_KEEP_RIOT_CLIENT_WINDOW` | 비활성 | 롤 클라이언트 직접 실행 후 Riot Client 창 자동 종료를 끄려면 `1` |
 
 ## EXE 빌드
 
