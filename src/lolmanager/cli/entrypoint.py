@@ -1547,6 +1547,61 @@ def _should_scan_popup_confirm_during_match_poll(phase: Optional[str]) -> bool:
     }
 
 
+AUTO_LOBBY_CREATE_RETRY_SEC = 10.0
+_last_auto_lobby_create_at: float = 0.0
+
+
+def _should_click_popup_confirm_at_cycle_start(phase: Optional[str]) -> bool:
+    return phase == PHASE_LOBBY
+
+
+def _should_attempt_auto_lobby_create(
+    phase: Optional[str],
+    seconds_since_last_attempt: float,
+) -> bool:
+    if phase not in {None, PHASE_NONE}:
+        return False
+    return seconds_since_last_attempt >= AUTO_LOBBY_CREATE_RETRY_SEC
+
+
+def _maybe_auto_create_lobby_for_home_screen(
+    lcu: Optional[LcuClient],
+    phase: Optional[str],
+    logger: logging.Logger,
+) -> None:
+    global _last_auto_lobby_create_at
+
+    now = time.monotonic()
+    if not _should_attempt_auto_lobby_create(phase, now - _last_auto_lobby_create_at):
+        return
+
+    _last_auto_lobby_create_at = now
+    if lcu is None:
+        return
+
+    try:
+        result = lcu.create_lobby_decision()
+    except RequestException as exc:
+        logger.debug("LCU 로비 생성 요청 실패: %s", exc)
+        return
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 로비 생성 중 예상하지 못한 오류.")
+        raise
+
+    outcome = str(getattr(getattr(result, "status", None), "value", "unknown"))
+    if getattr(result, "ok", False):
+        logger.info(
+            "홈 화면 감지로 로비 생성을 요청했습니다(queue=ranked solo/duo, outcome=%s).",
+            outcome,
+        )
+    else:
+        logger.warning(
+            "홈 화면에서 로비 생성이 보류되었습니다(outcome=%s). "
+            "Riot Client 로그인 상태를 확인하세요.",
+            outcome,
+        )
+
+
 def ensure_active_rect(
     logger: logging.Logger,
     poll: float = 0.5,
@@ -2539,22 +2594,7 @@ def process_postgame(
                 time.sleep(interval_sec)
                 continue
 
-            modal_attempt = _dismiss_blocking_modal_lcu_attempt(
-                lcu, "엔드 이후", logger
-            )
-            if not modal_attempt.completed and tpl_confirm_templates:
-                rect = _visible_rect_or_wait(logger, "엔드 이후", interval_sec)
-                if rect is None:
-                    continue
-                if _dismiss_blocking_modal_ui_fallback(
-                    rect,
-                    tpl_confirm_templates,
-                    threshold,
-                    "엔드 이후",
-                    logger,
-                ):
-                    time.sleep(interval_sec)
-                    continue
+            _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
             logger.debug(
                 "LCU phase=None 상태입니다. 엔드 버튼 이미지를 탐색하지 않습니다."
             )
@@ -2625,22 +2665,9 @@ def process_postgame(
         if not continuation_enabled():
             logger.info("다음 게임 계속 해제 감지. postgame 자동 처리를 중단합니다.")
             return False
-        modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
+        _dismiss_blocking_modal_lcu_attempt(lcu, "엔드 이후", logger)
         rect = _visible_rect_or_wait(logger, "엔드 이후", interval_sec)
         if rect is None:
-            continue
-        if (
-            not modal_attempt.completed
-            and tpl_confirm_templates
-            and _dismiss_blocking_modal_ui_fallback(
-                rect,
-                tpl_confirm_templates,
-                threshold,
-                "엔드 이후",
-                logger,
-            )
-        ):
-            time.sleep(interval_sec)
             continue
         if detect_champion_select(
             rect, "엔드 이후", tpl_prepick, available_roles, threshold, logger, lcu=lcu
@@ -3485,7 +3512,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             continue
 
         modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "사이클 시작", logger)
-        if not modal_attempt.completed and tpl_confirm_templates:
+        if (
+            not modal_attempt.completed
+            and _should_click_popup_confirm_at_cycle_start(phase_at_cycle)
+            and tpl_confirm_templates
+        ):
             rect_for_modal = _visible_rect_for_image_scan(logger, "사이클 시작")
             if rect_for_modal is not None:
                 if _dismiss_blocking_modal_ui_fallback(
@@ -3497,6 +3528,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 ):
                     time.sleep(confirm_check_interval)
                     continue
+
+        if phase_at_cycle in {None, PHASE_NONE}:
+            _maybe_auto_create_lobby_for_home_screen(
+                lcu, phase_at_cycle, logger
+            )
 
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
