@@ -219,10 +219,10 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         close_source = inspect.getsource(LolManagerGui._on_close)
 
         self.assertIn("LoL client closed. Exiting.", sync_source)
-        self.assertIn("self._on_close(close_owned_opgg=True)", sync_source)
-        self.assertNotIn("close_owned_opgg_for_current_session", stop_source)
-        self.assertIn("if close_owned_opgg:", close_source)
-        self.assertIn("close_owned_opgg_for_current_session", close_source)
+        self.assertIn("self._on_close(close_opgg=True)", sync_source)
+        self.assertNotIn("close_running_opgg", stop_source)
+        self.assertIn("if close_opgg:", close_source)
+        self.assertIn("close_running_opgg", close_source)
 
     def test_stop_terminates_only_cli_process(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
@@ -330,7 +330,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.0):
             gui._sync_external_state()
 
-        gui._on_close.assert_called_once_with(close_owned_opgg=True)
+        gui._on_close.assert_called_once_with(close_opgg=True)
         self.assertEqual(gui.root.iconify_calls, 0)
 
     def test_client_close_waits_for_cli_owned_opgg_cleanup_before_forcing_exit(self) -> None:
@@ -358,7 +358,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.1):
             gui._sync_external_state()
 
-        gui._on_close.assert_called_once_with(close_owned_opgg=True)
+        gui._on_close.assert_called_once_with(close_opgg=True)
 
     def test_user_minimized_window_is_not_auto_restored_after_game(self) -> None:
         gui = self._make_windowing_gui()

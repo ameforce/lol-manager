@@ -288,6 +288,47 @@ class OwnedExternalProcess:
     process: object
 
 
+def _terminate_psutil_process_targets(
+    targets: list,
+    *,
+    timeout_sec: float,
+    timeout_warning: str,
+    logger: Optional[logging.Logger] = None,
+) -> list:
+    """Terminate targets, wait, then force-kill survivors. Returns survivors."""
+    if not targets:
+        return []
+    alive = list(targets)
+    try:
+        # Stop descendants before their owning launcher so no child is orphaned
+        # while the process tree is being cleaned up.
+        for target in targets:
+            try:
+                target.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        _gone, alive = psutil.wait_procs(
+            targets, timeout=max(0.0, float(timeout_sec))
+        )
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return list(targets)
+    if alive and logger and timeout_warning:
+        logger.warning(timeout_warning)
+    for target in alive:
+        try:
+            target.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    if alive:
+        try:
+            _gone, alive = psutil.wait_procs(
+                alive, timeout=max(0.0, float(timeout_sec))
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            return list(alive)
+    return list(alive)
+
+
 def _terminate_owned_process_tree(
     process: object,
     *,
@@ -310,34 +351,13 @@ def _terminate_owned_process_tree(
     if not targets:
         return False
 
-    try:
-        # Stop descendants before their owning launcher so no child is orphaned
-        # while the process tree is being cleaned up.
-        for target in targets:
-            try:
-                target.terminate()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        _gone, alive = psutil.wait_procs(
-            targets, timeout=max(0.0, float(timeout_sec))
-        )
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-        return False
-    if alive and logger:
-        logger.warning("OP.GG 소유 프로세스 트리 종료 대기 시간 초과. 강제 종료합니다.")
-    for target in alive:
-        try:
-            target.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-    if alive:
-        try:
-            _gone, alive = psutil.wait_procs(
-                alive, timeout=max(0.0, float(timeout_sec))
-            )
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-            return False
-    return not alive
+    survivors = _terminate_psutil_process_targets(
+        targets,
+        timeout_sec=timeout_sec,
+        timeout_warning="OP.GG 소유 프로세스 트리 종료 대기 시간 초과. 강제 종료합니다.",
+        logger=logger,
+    )
+    return not survivors
 
 
 @dataclass
@@ -418,6 +438,104 @@ def close_owned_opgg_for_current_session(
         timeout_sec=timeout_sec,
         logger=logger,
     )
+
+
+def _running_opgg_processes(opgg_exe: str) -> list:
+    """Return live OP.GG processes (roots first) whose exe path matches."""
+    norm_target = _norm_exe_path(opgg_exe)
+    name_cf = OPGG_EXE_NAME.casefold()
+    matches: list = []
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            name = proc.info.get("name") or ""
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if not name or str(name).casefold() != name_cf:
+            continue
+        try:
+            exe = proc.exe()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if exe and _norm_exe_path(exe) == norm_target:
+            matches.append(proc)
+
+    match_pids = {getattr(proc, "pid", None) for proc in matches}
+    roots: list = []
+    for proc in matches:
+        try:
+            parent = proc.parent()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            parent = None
+        if parent is None or getattr(parent, "pid", None) not in match_pids:
+            roots.append(proc)
+
+    targets: list = []
+    seen: set = set()
+    for root in roots:
+        candidates = [root]
+        try:
+            candidates.extend(root.children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            pass
+        for target in candidates:
+            pid = getattr(target, "pid", None)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            targets.append(target)
+    return targets
+
+
+def close_running_opgg(
+    *,
+    timeout_sec: float = OPGG_SHUTDOWN_TIMEOUT_SEC,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    """Terminate every running OP.GG from the trusted install location.
+
+    Unlike close_owned_opgg this also adopts OP.GG instances earlier
+    lolmanager sessions started but never cleaned up.
+    """
+    raw_path = opgg_exe_path()
+    if not raw_path:
+        return 0
+    opgg_exe = _validate_app_exe_path(
+        raw_path,
+        expected_name=OPGG_EXE_NAME,
+        trusted_roots=_known_opgg_install_roots(),
+        require_trusted_root=True,
+        env_name=ENV_OPGG_EXE,
+        logger=logger,
+    )
+    if not opgg_exe:
+        return 0
+
+    closed = 0
+    for _attempt in range(2):
+        targets = _running_opgg_processes(opgg_exe)
+        if not targets:
+            break
+        if logger:
+            logger.info(
+                "OP.GG 실행 중 종료 요청: %s (%d개 프로세스)",
+                opgg_exe,
+                len(targets),
+            )
+        survivors = _terminate_psutil_process_targets(
+            targets,
+            timeout_sec=timeout_sec,
+            timeout_warning="OP.GG 프로세스 종료 대기 시간 초과. 강제 종료합니다.",
+            logger=logger,
+        )
+        closed += len(targets)
+        if not survivors:
+            break
+    remaining = _running_opgg_processes(opgg_exe)
+    if remaining and logger:
+        logger.warning(
+            "OP.GG 종료 후에도 %d개 프로세스가 실행 중입니다.", len(remaining)
+        )
+    return closed
 
 
 def start_cmd_process_once(
