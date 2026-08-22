@@ -25,6 +25,7 @@ from lolmanager.core.lcu_client import (
     LcuDecision,
     LcuLoopAction,
     LcuOutcome,
+    RANKED_SOLO_DUO_QUEUE_ID,
     _default_lcu_connection_validator,
     champ_select_action_confirm_timeout_sec,
     lcu_loop_action_for,
@@ -542,6 +543,34 @@ class LcuClientTests(unittest.TestCase):
         self.assertTrue(
             str(session.calls[0]["url"]).endswith("/lol-lobby/v2/play-again")
         )
+
+    def test_create_lobby_posts_ranked_solo_duo_queue_by_default(self) -> None:
+        session = _FakeSession([_FakeResponse(200)])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.create_lobby_decision()
+
+        self.assertEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertEqual(session.calls[0]["method"], "POST")
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith("/lol-lobby/v2/lobby")
+        )
+        self.assertEqual(
+            session.calls[0]["kwargs"]["json"],
+            {"queueId": RANKED_SOLO_DUO_QUEUE_ID},
+        )
+
+    def test_create_lobby_rejects_error_response(self) -> None:
+        session = _FakeSession(
+            [_FakeResponse(400, {"message": "rejected"}), _FakeResponse(400)]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.create_lobby_decision()
+
+        self.assertNotEqual(result.status, LcuOutcome.SUCCESS)
+        self.assertFalse(client.create_lobby())
+
 
     def test_honor_random_eligible_teammate_votes_random_ally_and_submits(
         self,
