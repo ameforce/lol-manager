@@ -401,6 +401,96 @@ def test_verify_league_client_started_times_out_without_process(
     assert external_apps.verify_league_client_started(timeout_sec=0.05) is False
 
 
+def test_close_riot_client_windows_after_launch_posts_close_messages(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        external_apps, "_riot_client_window_handles", lambda: [111, 222]
+    )
+    posted: list[int] = []
+    monkeypatch.setattr(
+        external_apps, "_post_close_message", posted.append
+    )
+
+    closed = external_apps.close_riot_client_windows_after_launch(settle_sec=0)
+
+    assert closed == 2
+    assert posted == [111, 222]
+
+
+def test_close_riot_client_windows_after_launch_respects_keep_env(
+    monkeypatch,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    monkeypatch.setenv(external_apps.ENV_KEEP_RIOT_CLIENT_WINDOW, "1")
+    monkeypatch.setattr(
+        external_apps,
+        "_riot_client_window_handles",
+        lambda: (_ for _ in ()).throw(AssertionError("windows scanned")),
+    )
+
+    assert external_apps.close_riot_client_windows_after_launch(settle_sec=0) == 0
+
+
+def test_ensure_external_apps_closes_riot_client_window_after_own_launch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    monkeypatch.setenv(external_apps.ENV_LEAGUE_CLIENT_EXE, str(league))
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): False for path in paths},
+    )
+    monkeypatch.setattr(
+        external_apps, "launch_league_via_riot_client_api", lambda **_kw: True
+    )
+    monkeypatch.setattr(
+        external_apps, "verify_league_client_started", lambda **_kw: True
+    )
+    close_calls: list[dict] = []
+    monkeypatch.setattr(
+        external_apps,
+        "close_riot_client_windows_after_launch",
+        lambda **kwargs: close_calls.append(kwargs) or 1,
+    )
+
+    external_apps.ensure_external_apps_running_once(league_exe=str(league))
+
+    assert len(close_calls) == 1
+
+
+def test_ensure_external_apps_keeps_riot_client_when_league_pre_running(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    monkeypatch.setenv(external_apps.ENV_LEAGUE_CLIENT_EXE, str(league))
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): True for path in paths},
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "close_riot_client_windows_after_launch",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("close called")),
+    )
+
+    session = external_apps.ensure_external_apps_running_once(
+        league_exe=str(league)
+    )
+
+    assert session.owned_opgg is None
+
+
 class _FakeApiProcess:
     def __init__(self, info: dict) -> None:
         self.info = info
