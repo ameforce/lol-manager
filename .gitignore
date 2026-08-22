@@ -27,8 +27,6 @@ LOLManager.spec
 *.spec
 _internal/
 
-.omx/
-
 /champion_config.json
 /opgg_champion_list_cache.json
 /match_timing_stats.json
