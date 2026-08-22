@@ -32,8 +32,6 @@ package = true
 
 [tool.hatch.build.targets.sdist]
 exclude = [
-    "/.codegraph",
-    "/.omo",
     "/.pytest_cache",
     "/.ruff_cache",
     "/.venv",
