@@ -67,13 +67,16 @@ Alt+Tab이나 마우스로 LOLManager에 직접 포커스를 주면 계속 표�
 다른 창으로 옮기면 다시 숨겨집니다. LoL 클라이언트가 다시 표시되면 GUI도
 컴팩트한 고정 크기로 복원되어 클라이언트 옆에 배치됩니다.
 
-LoL이 실행 중이 아니면 Riot Client의 지원 실행 경로인
-`RiotClientServices.exe --launch-product=league_of_legends --launch-patchline=live`로
-실행합니다. Riot Client를 찾지 못하거나 실행에 실패하면 설정된
-`LeagueClient.exe` 직접 실행으로 대체(fallback)합니다. 실행 후에는 짧은
-대기 시간 동안 LeagueClient 프로세스 기동 여부를 확인하고 그 결과를 로그로
-남깁니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트 종료 시 자식
-프로세스까지 정리한 후 LOLManager가 종료됩니다.
+LoL이 실행 중이 아니면 Riot Client가 Play 버튼에 사용하는 로컬 API
+(`POST /product-launcher/v1/products/league_of_legends/patchlines/live`)로
+클라이언트를 직접 실행합니다. Play 버튼을 누를 필요 없이 로그인 세션이 있으면
+LoL 클라이언트가 바로 기동됩니다. Riot Client 서비스가 아직 떠 있지 않으면
+임시 토큰/포트를 지정해 Riot Client 서비스를 먼저 기동한 후 같은 API를
+호출합니다. 이 경로를 사용할 수 없으면 `--launch-product` 실행 인자,
+그다음에는 설정된 `LeagueClient.exe` 직접 실행으로 대체(fallback)합니다.
+실행 후에는 짧은 대기 시간 동안 LeagueClient 프로세스 기동 여부를 확인하고
+그 결과를 로그로 남깁니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트
+종료 시 자식 프로세스까지 정리한 후 LOLManager가 종료됩니다.
 
 설정만 열려면:
 
