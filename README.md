@@ -78,8 +78,10 @@ LoL 클라이언트가 바로 기동됩니다. Riot Client 서비스가 아직 �
 그 결과를 로그로 남깁니다. LOLManager가 직접 실행에 성공하면 화면에 남은
 Riot Client 창에 정상 종료 메시지를 보내 창을 닫습니다(백그라운드 서비스는
 유지되며 롤 클라이언트에는 영향이 없습니다). `LOLMANAGER_KEEP_RIOT_CLIENT_WINDOW=1`
-로 이 동작을 끌 수 있습니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트
-종료 시 자식 프로세스까지 정리한 후 LOLManager가 종료됩니다.
+로 이 동작을 끌 수 있습니다. LoL 클라이언트가 종료되면 LOLManager는 신뢰된
+설치 경로에서 실행 중인 OP.GG를 자식 프로세스까지 함께 종료한 뒤 자신도
+종료합니다. LOLManager가 직접 실행하지 않은 OP.GG도 함께 종료되며,
+LOLManager 창을 직접 닫을 때는 OP.GG를 종료하지 않습니다.
 
 설정만 열려면:
 

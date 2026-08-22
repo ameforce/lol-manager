@@ -45,7 +45,7 @@ from lolmanager.platform.paths import (
 from lolmanager.platform.runtime import is_frozen
 from lolmanager.platform.external_apps import (
     LeagueClientExitGuard,
-    close_owned_opgg_for_current_session,
+    close_running_opgg,
     league_client_exe_path,
 )
 from lolmanager.platform.resolution_detector import (
@@ -2399,9 +2399,9 @@ class LolManagerGui:
                         if deadline is None:
                             deadline = now + CLI_CLIENT_CLOSE_CLEANUP_GRACE_SEC
                             self._client_close_cleanup_deadline = deadline
-                            self._append_log(
-                                "[GUI] LoL client closed. Waiting for CLI to close owned OP.GG.\n"
-                            )
+                        self._append_log(
+                            "[GUI] LoL client closed. Waiting for CLI to close OP.GG.\n"
+                        )
                         if now < deadline:
                             self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
                             return
@@ -2409,7 +2409,7 @@ class LolManagerGui:
                             "[GUI] CLI cleanup wait timed out; forcing shutdown.\n"
                         )
                     self._append_log("[GUI] LoL client closed. Exiting.\n")
-                    self._on_close(close_owned_opgg=True)
+                    self._on_close(close_opgg=True)
                     return
             else:
                 self._client_closed_at = None
@@ -2708,7 +2708,7 @@ class LolManagerGui:
             self._last_geo_xy = xy
             self._last_client_rect = rect
 
-    def _on_close(self, *, close_owned_opgg: bool = False) -> None:
+    def _on_close(self, *, close_opgg: bool = False) -> None:
         if bool(getattr(self, "_closing", False)):
             return
         self._closing = True
@@ -2728,11 +2728,9 @@ class LolManagerGui:
             self._external_sync_stop.set()
         except Exception:
             pass
-        if close_owned_opgg:
+        if close_opgg:
             try:
-                close_owned_opgg_for_current_session(
-                    logger=logging.getLogger("lolmanager")
-                )
+                close_running_opgg(logger=logging.getLogger("lolmanager"))
             except Exception:
                 pass
         proc = self.proc

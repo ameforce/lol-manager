@@ -808,3 +808,162 @@ def test_close_owned_opgg_noops_without_owned_process() -> None:
     session = external_apps.ExternalAppsSession()
 
     assert session.close_owned_opgg(timeout_sec=0.25) is False
+
+
+class _FakeOpggPsProcess:
+    def __init__(
+        self,
+        pid: int,
+        *,
+        name: str = "OP.GG.exe",
+        exe: str = "",
+        parent: "_FakeOpggPsProcess | None" = None,
+        children: list["_FakeOpggPsProcess"] | None = None,
+    ) -> None:
+        self.pid = pid
+        self.info = {"pid": pid, "name": name}
+        self._exe = exe
+        self._parent = parent
+        self._children = list(children or [])
+        self.terminated = False
+        self.killed = False
+
+    def exe(self) -> str:
+        return self._exe
+
+    def parent(self) -> "_FakeOpggPsProcess | None":
+        return self._parent
+
+    def children(self, *, recursive: bool) -> list["_FakeOpggPsProcess"]:
+        assert recursive is True
+        return list(self._children)
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_running_opgg_processes_matches_only_target_exe_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    target = tmp_path / "LocalAppData" / "Programs" / "OP.GG" / "OP.GG.exe"
+    child = _FakeOpggPsProcess(101, exe=str(target))
+    root = _FakeOpggPsProcess(100, exe=str(target).upper(), children=[child])
+    child._parent = root
+    other_path = _FakeOpggPsProcess(
+        200, exe=str(tmp_path / "Elsewhere" / "OP.GG.exe")
+    )
+    other_name = _FakeOpggPsProcess(201, name="Other.exe", exe=str(target))
+    monkeypatch.setattr(
+        external_apps.psutil,
+        "process_iter",
+        lambda attrs: iter([root, child, other_path, other_name]),
+    )
+
+    targets = external_apps._running_opgg_processes(str(target))
+
+    assert targets == [root, child]
+
+
+def test_close_running_opgg_terminates_unowned_processes_by_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    local_app_data = tmp_path / "LocalAppData"
+    opgg = _touch_exe(local_app_data / "Programs" / "OP.GG" / "OP.GG.exe")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    child = _FakeOpggPsProcess(101, exe=str(opgg))
+    root = _FakeOpggPsProcess(100, exe=str(opgg), children=[child])
+    child._parent = root
+    scans: list[list[_FakeOpggPsProcess]] = [[root, child], []]
+    monkeypatch.setattr(
+        external_apps,
+        "_running_opgg_processes",
+        lambda exe: scans.pop(0) if scans else [],
+    )
+    monkeypatch.setattr(
+        external_apps.psutil,
+        "wait_procs",
+        lambda processes, timeout: (list(processes), []),
+    )
+
+    closed = external_apps.close_running_opgg(timeout_sec=0.25)
+
+    assert closed == 2
+    assert root.terminated is True
+    assert child.terminated is True
+    assert root.killed is False
+    assert child.killed is False
+
+
+def test_close_running_opgg_kills_survivors_and_rescans(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    local_app_data = tmp_path / "LocalAppData"
+    opgg = _touch_exe(local_app_data / "Programs" / "OP.GG" / "OP.GG.exe")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    root = _FakeOpggPsProcess(100, exe=str(opgg))
+    scans: list[list[_FakeOpggPsProcess]] = [[root], [], []]
+    monkeypatch.setattr(
+        external_apps,
+        "_running_opgg_processes",
+        lambda exe: scans.pop(0) if scans else [],
+    )
+    monkeypatch.setattr(
+        external_apps.psutil,
+        "wait_procs",
+        lambda processes, timeout: ([], list(processes)),
+    )
+
+    closed = external_apps.close_running_opgg(timeout_sec=0.25)
+
+    assert closed == 1
+    assert root.terminated is True
+    assert root.killed is True
+
+
+def test_close_running_opgg_noops_when_opgg_not_installed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "missing-local"))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "missing-pf"))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "missing-pf-x86"))
+    monkeypatch.setattr(
+        external_apps,
+        "_running_opgg_processes",
+        lambda exe: (_ for _ in ()).throw(AssertionError("scan used")),
+    )
+
+    assert external_apps.close_running_opgg() == 0
+
+
+def test_close_running_opgg_skips_untrusted_opgg_override(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    opgg = _touch_exe(tmp_path / "Downloads" / "OP.GG.exe")
+    monkeypatch.setenv(external_apps.ENV_OPGG_EXE, str(opgg))
+    monkeypatch.setattr(
+        external_apps,
+        "_running_opgg_processes",
+        lambda exe: (_ for _ in ()).throw(AssertionError("scan used")),
+    )
+    caplog.set_level(logging.WARNING)
+
+    closed = external_apps.close_running_opgg(
+        logger=logging.getLogger("test.external_apps")
+    )
+
+    assert closed == 0
+    assert external_apps.ENV_ALLOW_UNTRUSTED_APP_PATHS in caplog.text
