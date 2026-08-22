@@ -210,7 +210,47 @@ def test_ensure_external_apps_records_owned_opgg_only_when_this_run_starts_it(
     assert external_apps.current_external_apps_session() is session
 
 
-def test_ensure_external_apps_launches_league_via_riot_client_services(
+def test_ensure_external_apps_launches_league_via_riot_client_api(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    monkeypatch.setenv(external_apps.ENV_LEAGUE_CLIENT_EXE, str(league))
+    monkeypatch.setattr(
+        external_apps,
+        "running_status_for_exe_paths",
+        lambda paths: {str(path): False for path in paths},
+    )
+    launched: list[dict] = []
+    monkeypatch.setattr(
+        external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **kwargs: launched.append(kwargs) or True,
+    )
+    verified: list[dict] = []
+    monkeypatch.setattr(
+        external_apps,
+        "verify_league_client_started",
+        lambda **kwargs: verified.append(kwargs) or True,
+    )
+    legacy_cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        external_apps,
+        "start_cmd_once",
+        lambda cmd, **_kwargs: legacy_cmds.append([str(x) for x in cmd]) or True,
+    )
+
+    external_apps.ensure_external_apps_running_once(league_exe=str(league))
+
+    assert len(launched) == 1
+    assert len(verified) == 1
+    assert legacy_cmds == []
+
+
+def test_ensure_external_apps_falls_back_to_launch_args_when_api_unavailable(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -225,6 +265,11 @@ def test_ensure_external_apps_launches_league_via_riot_client_services(
         external_apps,
         "running_status_for_exe_paths",
         lambda paths: {str(path): False for path in paths},
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **_kwargs: False,
     )
     cmds: list[list[str]] = []
     monkeypatch.setattr(
@@ -261,6 +306,11 @@ def test_start_league_client_once_falls_back_to_direct_leagueclient_without_riot
     )
     monkeypatch.setattr(
         external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        external_apps,
         "riot_client_services_exe_path",
         lambda **_kwargs: "",
     )
@@ -291,6 +341,11 @@ def test_start_league_client_once_falls_back_when_riot_launch_fails(
     rcs = _touch_exe(tmp_path / "Riot Games" / "Riot Client" / "RiotClientServices.exe")
     monkeypatch.setenv(external_apps.ENV_LEAGUE_CLIENT_EXE, str(league))
     monkeypatch.setenv(external_apps.ENV_RIOT_CLIENT_SERVICES_EXE, str(rcs))
+    monkeypatch.setattr(
+        external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **_kwargs: False,
+    )
     monkeypatch.setattr(external_apps, "start_cmd_once", lambda cmd, **_kw: False)
     started: list[str] = []
     monkeypatch.setattr(
@@ -308,6 +363,11 @@ def test_start_league_client_once_returns_false_without_any_valid_exe(
     tmp_path: Path,
 ) -> None:
     _isolate_app_env(monkeypatch)
+    monkeypatch.setattr(
+        external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **_kwargs: False,
+    )
     monkeypatch.setattr(
         external_apps,
         "riot_client_services_exe_path",
@@ -339,6 +399,230 @@ def test_verify_league_client_started_times_out_without_process(
     )
 
     assert external_apps.verify_league_client_started(timeout_sec=0.05) is False
+
+
+class _FakeApiProcess:
+    def __init__(self, info: dict) -> None:
+        self.info = info
+
+
+def test_find_running_riot_client_api_parses_cmdline(monkeypatch) -> None:
+    processes = [
+        _FakeApiProcess({"name": "explorer.exe", "cmdline": None}),
+        _FakeApiProcess(
+            {
+                "name": "RiotClientServices.exe",
+                "cmdline": [
+                    r"C:\Riot Games\Riot Client\RiotClientServices.exe",
+                    "--remoting-auth-token=abc123",
+                    "--app-port=29543",
+                ],
+            }
+        ),
+    ]
+    monkeypatch.setattr(
+        external_apps.psutil, "process_iter", lambda attrs: iter(processes)
+    )
+
+    endpoint = external_apps._find_running_riot_client_api()
+
+    assert endpoint == ("https://127.0.0.1:29543", ("riot", "abc123"))
+
+
+def test_find_running_riot_client_api_returns_none_without_credentials(
+    monkeypatch,
+) -> None:
+    processes = [
+        _FakeApiProcess(
+            {
+                "name": "RiotClientServices.exe",
+                "cmdline": [r"C:\Riot Games\Riot Client\RiotClientServices.exe"],
+            }
+        )
+    ]
+    monkeypatch.setattr(
+        external_apps.psutil, "process_iter", lambda attrs: iter(processes)
+    )
+
+    assert external_apps._find_running_riot_client_api() is None
+
+
+def test_free_localhost_port_returns_bindable_port() -> None:
+    import socket
+
+    port = external_apps._free_localhost_port()
+
+    assert isinstance(port, int)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", port))
+
+
+def test_launch_league_via_riot_client_api_posts_product_launch(monkeypatch) -> None:
+    endpoint = ("https://127.0.0.1:29543", ("riot", "tok123"))
+    monkeypatch.setattr(external_apps, "_find_running_riot_client_api", lambda: endpoint)
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 200
+
+    def fake_post(url, *, auth, verify, timeout):
+        calls.append({"url": url, "auth": auth, "verify": verify})
+        return _Response()
+
+    monkeypatch.setattr(external_apps.requests, "post", fake_post)
+
+    assert external_apps.launch_league_via_riot_client_api() is True
+    assert calls == [
+        {
+            "url": "https://127.0.0.1:29543"
+            + external_apps.RIOT_PRODUCT_LAUNCH_PATH,
+            "auth": ("riot", "tok123"),
+            "verify": False,
+        }
+    ]
+
+
+def test_launch_league_via_riot_client_api_treats_read_timeout_as_dispatched(
+    monkeypatch,
+) -> None:
+    endpoint = ("https://127.0.0.1:29543", ("riot", "tok123"))
+    monkeypatch.setattr(external_apps, "_find_running_riot_client_api", lambda: endpoint)
+
+    def fake_post(url, *, auth, verify, timeout):
+        raise external_apps.requests.ReadTimeout("slow launcher")
+
+    monkeypatch.setattr(external_apps.requests, "post", fake_post)
+
+    assert external_apps.launch_league_via_riot_client_api() is True
+
+
+def test_launch_league_via_riot_client_api_rejects_error_status(monkeypatch) -> None:
+    endpoint = ("https://127.0.0.1:29543", ("riot", "tok123"))
+    monkeypatch.setattr(external_apps, "_find_running_riot_client_api", lambda: endpoint)
+
+    class _Response:
+        status_code = 403
+
+    monkeypatch.setattr(
+        external_apps.requests, "post", lambda url, **_kw: _Response()
+    )
+
+    assert external_apps.launch_league_via_riot_client_api() is False
+
+
+def test_launch_league_via_riot_client_api_fails_on_connection_error(
+    monkeypatch,
+) -> None:
+    endpoint = ("https://127.0.0.1:29543", ("riot", "tok123"))
+    monkeypatch.setattr(external_apps, "_find_running_riot_client_api", lambda: endpoint)
+
+    def fake_post(url, *, auth, verify, timeout):
+        raise external_apps.requests.ConnectionError("api down")
+
+    monkeypatch.setattr(external_apps.requests, "post", fake_post)
+
+    assert external_apps.launch_league_via_riot_client_api() is False
+
+
+def test_launch_league_via_riot_client_api_starts_services_when_absent(
+    monkeypatch,
+) -> None:
+    started_cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        external_apps,
+        "_start_riot_client_services_with_api",
+        lambda *, logger=None: (
+            started_cmds.append(["started"]) or True
+        ),
+    )
+    endpoint = ("https://127.0.0.1:29543", ("riot", "tok123"))
+    findings: list[object] = [None, None, endpoint]
+    monkeypatch.setattr(
+        external_apps,
+        "_find_running_riot_client_api",
+        lambda: findings.pop(0),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(external_apps.time, "sleep", sleeps.append)
+
+    class _Response:
+        status_code = 200
+
+    monkeypatch.setattr(
+        external_apps.requests, "post", lambda url, **_kw: _Response()
+    )
+
+    assert external_apps.launch_league_via_riot_client_api() is True
+    assert started_cmds == [["started"]]
+    assert len(sleeps) == 1
+
+
+def test_start_riot_client_services_with_api_builds_credential_args(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    rcs = _touch_exe(tmp_path / "Riot Client" / "RiotClientServices.exe")
+    monkeypatch.setenv(external_apps.ENV_RIOT_CLIENT_SERVICES_EXE, str(rcs))
+    cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        external_apps,
+        "start_cmd_process_once",
+        lambda cmd, *, cwd=None, logger=None: cmds.append([str(x) for x in cmd])
+        or _FakePopen(),
+    )
+
+    assert external_apps._start_riot_client_services_with_api() is True
+    assert len(cmds) == 1
+    cmd = cmds[0]
+    assert cmd[0] == str(rcs)
+    assert cmd[1].startswith("--remoting-auth-token=")
+    assert len(cmd[1].split("=", 1)[1]) >= 16
+    assert cmd[2].startswith("--app-port=")
+    assert int(cmd[2].split("=", 1)[1]) > 0
+
+
+def test_start_riot_client_services_with_api_fails_without_valid_exe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_app_env(monkeypatch)
+    monkeypatch.setenv(
+        external_apps.ENV_RIOT_CLIENT_SERVICES_EXE,
+        str(tmp_path / "missing" / "RiotClientServices.exe"),
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "start_cmd_process_once",
+        lambda cmd, **_kwargs: (_ for _ in ()).throw(AssertionError("started")),
+    )
+
+    assert external_apps._start_riot_client_services_with_api() is False
+
+
+def test_start_league_client_once_prefers_riot_client_api(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    league = _touch_exe(
+        tmp_path / "Riot Games" / "League of Legends" / "LeagueClient.exe"
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "launch_league_via_riot_client_api",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "start_cmd_once",
+        lambda cmd, **_kwargs: (_ for _ in ()).throw(AssertionError("cmd used")),
+    )
+    monkeypatch.setattr(
+        external_apps,
+        "start_exe_process_once",
+        lambda exe_path, **_kw: (_ for _ in ()).throw(AssertionError("direct used")),
+    )
+
+    assert external_apps.start_league_client_once(league_exe=str(league)) is True
 
 
 def test_ensure_external_apps_resets_session_and_does_not_own_preexisting_opgg(
