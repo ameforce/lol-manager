@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -28,6 +29,9 @@ LEAGUE_RIOT_LAUNCH_ARGS: tuple[str, ...] = (
     "--launch-product=league_of_legends",
     "--launch-patchline=live",
 )
+
+LEAGUE_LAUNCH_VERIFY_TIMEOUT_SEC = 10.0
+LEAGUE_LAUNCH_VERIFY_POLL_SEC = 1.0
 
 
 def _norm_exe_path(path: str) -> str:
@@ -456,6 +460,83 @@ def start_exe_once(exe_path: str, *, logger: Optional[logging.Logger] = None) ->
     return start_exe_process_once(exe_path, logger=logger) is not None
 
 
+def _league_client_process_seen() -> bool:
+    target = LEAGUE_CLIENT_EXE_NAME.casefold()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            name = str(proc.info.get("name") or "")
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception:
+            continue
+        if name.casefold() == target:
+            return True
+    return False
+
+
+def verify_league_client_started(
+    *,
+    timeout_sec: float = LEAGUE_LAUNCH_VERIFY_TIMEOUT_SEC,
+    poll_sec: float = LEAGUE_LAUNCH_VERIFY_POLL_SEC,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while True:
+        if _league_client_process_seen():
+            if logger:
+                logger.info("LeagueClient 실행 확인 완료.")
+            return True
+
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        time.sleep(min(float(poll_sec), max(0.0, deadline - now)))
+
+    if logger:
+        logger.warning(
+            "LeagueClient 실행 확인 대기 시간 초과(%.1fs). "
+            "Riot Client 로그인 상태 또는 클라이언트 업데이트 진행 여부를 확인하세요.",
+            float(timeout_sec),
+        )
+    return False
+
+
+def start_league_client_once(
+    *,
+    league_exe: str,
+    logger: Optional[logging.Logger] = None,
+) -> bool:
+    riot_exe = riot_client_services_exe_path(league_exe=league_exe)
+    valid_riot_exe = _validate_app_exe_path(
+        riot_exe,
+        expected_name=RIOT_CLIENT_SERVICES_EXE_NAME,
+        env_name=ENV_RIOT_CLIENT_SERVICES_EXE,
+        logger=logger,
+    )
+    if valid_riot_exe:
+        if start_cmd_once(
+            [valid_riot_exe, *LEAGUE_RIOT_LAUNCH_ARGS], logger=logger
+        ):
+            return True
+    elif logger and str(riot_exe or "").strip():
+        logger.warning("Riot Client 실행 파일을 찾지 못했습니다: %s", riot_exe)
+
+    valid_league_exe = _validate_app_exe_path(
+        league_exe,
+        expected_name=LEAGUE_CLIENT_EXE_NAME,
+        env_name=ENV_LEAGUE_CLIENT_EXE,
+        logger=logger,
+    )
+    if not valid_league_exe:
+        return False
+
+    if logger:
+        logger.warning(
+            "Riot Client 경로로 실행하지 못해 LeagueClient를 직접 실행합니다(fallback)."
+        )
+    return start_exe_once(valid_league_exe, logger=logger)
+
+
 def ensure_external_apps_running_once(
     *,
     league_exe: Optional[str] = None,
@@ -492,14 +573,16 @@ def ensure_external_apps_running_once(
         )
 
     if not league_running:
-        ok = False
-        if valid_league_exe:
-            ok = start_exe_once(valid_league_exe, logger=logger)
-        if not ok and logger:
+        ok = start_league_client_once(league_exe=str(league_exe), logger=logger)
+        if ok:
+            verify_league_client_started(logger=logger)
+        elif logger:
             logger.warning(
-                "LoL 자동 실행 실패. LeagueClient 설치 경로가 다르면 환경 변수 %s에 "
-                "LeagueClient.exe 경로를 지정하세요.",
+                "LoL 자동 실행 실패. 설치 경로가 다르면 환경 변수 %s에 "
+                "LeagueClient.exe 경로를, %s에 RiotClientServices.exe 경로를 "
+                "지정하세요.",
                 ENV_LEAGUE_CLIENT_EXE,
+                ENV_RIOT_CLIENT_SERVICES_EXE,
             )
     if valid_opgg_exe and not opgg_running:
         opgg_proc = start_exe_process_once(valid_opgg_exe, logger=logger)

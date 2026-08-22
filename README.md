@@ -67,9 +67,13 @@ Alt+Tab이나 마우스로 LOLManager에 직접 포커스를 주면 계속 표�
 다른 창으로 옮기면 다시 숨겨집니다. LoL 클라이언트가 다시 표시되면 GUI도
 컴팩트한 고정 크기로 복원되어 클라이언트 옆에 배치됩니다.
 
-LoL이 실행 중이 아니면 Riot Client 홈 화면이 아니라 설정된
-`LeagueClient.exe`를 직접 실행합니다. LOLManager가 시작한 OP.GG는 LoL
-클라이언트 종료 시 자식 프로세스까지 정리한 후 LOLManager가 종료됩니다.
+LoL이 실행 중이 아니면 Riot Client의 지원 실행 경로인
+`RiotClientServices.exe --launch-product=league_of_legends --launch-patchline=live`로
+실행합니다. Riot Client를 찾지 못하거나 실행에 실패하면 설정된
+`LeagueClient.exe` 직접 실행으로 대체(fallback)합니다. 실행 후에는 짧은
+대기 시간 동안 LeagueClient 프로세스 기동 여부를 확인하고 그 결과를 로그로
+남깁니다. LOLManager가 시작한 OP.GG는 LoL 클라이언트 종료 시 자식
+프로세스까지 정리한 후 LOLManager가 종료됩니다.
 
 설정만 열려면:
 
@@ -120,6 +124,7 @@ OP.GG 추천 캐시:
 | --- | --- | --- |
 | `LOLMANAGER_CHAMPSELECT_ACTION_CONFIRM_TIMEOUT_SEC` | `2.0` | LCU 픽/밴 선택 및 완료 확인 대기 시간(초) |
 | `LOLMANAGER_LEAGUE_CLIENT_EXE` | `C:\Riot Games\League of Legends\LeagueClient.exe` | LeagueClient 실행 파일 경로 |
+| `LOLMANAGER_RIOT_CLIENT_SERVICES_EXE` | 자동 탐지 | RiotClientServices 실행 파일 경로. 기본 경로와 League 설치 위치 인접 경로를 먼저 찾습니다. |
 | `LOLMANAGER_OPGG_EXE` | 자동 탐지 | OP.GG 실행 파일 경로. `%LOCALAPPDATA%\Programs\OP.GG\OP.GG.exe` 등을 먼저 찾습니다. |
 | `LOLMANAGER_ALLOW_UNTRUSTED_APP_PATHS` | 비활성 | `LOLMANAGER_OPGG_EXE`가 표준 설치 위치 밖의 `OP.GG.exe`를 가리킬 때 `1`로 명시 허용 |
 
