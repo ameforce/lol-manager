@@ -109,10 +109,10 @@ def test_project_and_lock_versions_are_bumped_together() -> None:
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text("utf-8")
     lockfile = (PROJECT_ROOT / "uv.lock").read_text("utf-8")
 
-    assert 'version = "1.1.23"' in pyproject
+    assert 'version = "1.1.24"' in pyproject
     package_match = re.search(
         r'(?ms)^\[\[package\]\]\nname = "lolmanager"\nversion = "(?P<version>[^"]+)"',
         lockfile,
     )
     assert package_match
-    assert package_match.group("version") == "1.1.23"
+    assert package_match.group("version") == "1.1.24"

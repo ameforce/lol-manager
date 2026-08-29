@@ -55,6 +55,10 @@ END_OF_GAME_DISMISS_STATS_ENDPOINT = "/lol-end-of-game/v1/state/dismiss-stats"
 LOBBY_PLAY_AGAIN_ENDPOINT = "/lol-lobby/v2/play-again"
 LOBBY_CREATE_ENDPOINT = "/lol-lobby/v2/lobby"
 RANKED_SOLO_DUO_QUEUE_ID = 420
+RANKED_FLEX_QUEUE_ID = 440
+ARAM_QUEUE_IDS = frozenset({450, 2400})
+RANKED_QUEUE_IDS = frozenset({RANKED_SOLO_DUO_QUEUE_ID, RANKED_FLEX_QUEUE_ID})
+GAMEFLOW_SESSION_ENDPOINT = "/lol-gameflow/v1/session"
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
 REMEDY_NOTIFICATIONS_ENDPOINT = "/lol-remedy/v1/remedy-notifications"
 REMEDY_NOTIFICATION_ACK_ENDPOINT = "/lol-remedy/v1/ack-remedy-notification"
@@ -339,6 +343,12 @@ class LcuOutcome(str, Enum):
     ACTION_REJECTED = "action_rejected"
 
 
+class GameMode(str, Enum):
+    RANKED = "ranked"
+    ARAM = "aram"
+    UNSUPPORTED = "unsupported"
+
+
 class LcuLoopAction(str, Enum):
     ACT_LCU = "act_lcu"
     WAIT_AUTHORITATIVE = "wait_authoritative"
@@ -358,6 +368,88 @@ class LcuDecision:
     @property
     def ok(self) -> bool:
         return self.status == LcuOutcome.SUCCESS
+
+
+@dataclass(frozen=True)
+class GameModeSnapshot:
+    mode: GameMode
+    queue_id: Optional[int]
+    map_id: Optional[int]
+    raw_game_mode: Optional[str]
+    is_ranked: Optional[bool]
+
+
+def game_mode_snapshot_from_session(
+    session: Mapping[str, Any],
+) -> Optional[GameModeSnapshot]:
+    """Classify the active gameflow session without assuming a ranked queue."""
+
+    game_data_raw = session.get("gameData")
+    game_data = game_data_raw if isinstance(game_data_raw, Mapping) else {}
+    queue_raw = game_data.get("queue")
+    queue = queue_raw if isinstance(queue_raw, Mapping) else {}
+    game_client_raw = session.get("gameClient")
+    game_client = game_client_raw if isinstance(game_client_raw, Mapping) else {}
+
+    queue_id = None
+    for value in (
+        queue.get("id"),
+        game_data.get("queueId"),
+        session.get("queueId"),
+    ):
+        queue_id = _parse_optional_int(value)
+        if queue_id is not None:
+            break
+
+    map_id = None
+    for value in (
+        queue.get("mapId"),
+        game_client.get("mapId"),
+        game_data.get("mapId"),
+        session.get("mapId"),
+    ):
+        map_id = _parse_optional_int(value)
+        if map_id is not None:
+            break
+
+    raw_game_mode = None
+    for value in (
+        queue.get("gameMode"),
+        game_client.get("gameMode"),
+        game_data.get("gameMode"),
+        session.get("gameMode"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            raw_game_mode = text
+            break
+
+    ranked_value = queue.get("isRanked")
+    is_ranked = ranked_value if isinstance(ranked_value, bool) else None
+
+    if (
+        raw_game_mode is None
+        and queue_id is None
+        and map_id is None
+        and is_ranked is None
+    ):
+        return None
+
+    normalized_mode = _normalize_lookup_key(raw_game_mode)
+    if normalized_mode == "aram" or queue_id in ARAM_QUEUE_IDS:
+        mode = GameMode.ARAM
+    elif is_ranked is True or queue_id in RANKED_QUEUE_IDS:
+        mode = GameMode.RANKED
+    else:
+        mode = GameMode.UNSUPPORTED
+
+    return GameModeSnapshot(
+        mode=mode,
+        queue_id=queue_id,
+        map_id=map_id,
+        raw_game_mode=raw_game_mode,
+        is_ranked=is_ranked,
+    )
 
 
 def _pick_order_swap_payloads(
@@ -656,6 +748,40 @@ class LcuClient:
             )
         self._phase_cache = (now, decision)
         return decision
+
+    def get_game_mode_decision(self) -> LcuDecision:
+        result = self.request("GET", GAMEFLOW_SESSION_ENDPOINT)
+        if result.error:
+            return LcuDecision(
+                _connection_outcome_for_error(result.error),
+                reason=result.error,
+                status_code=result.status_code,
+                error=result.error,
+            )
+        if not result.ok:
+            return LcuDecision(
+                LcuOutcome.REQUEST_FAILED,
+                reason="gameflow session request failed",
+                status_code=result.status_code,
+            )
+        if not isinstance(result.data, Mapping):
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="gameflow session payload is not an object",
+                status_code=result.status_code,
+            )
+        snapshot = game_mode_snapshot_from_session(result.data)
+        if snapshot is None:
+            return LcuDecision(
+                LcuOutcome.MALFORMED_RESPONSE,
+                reason="gameflow session has no queue or mode identity",
+                status_code=result.status_code,
+            )
+        return LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=snapshot,
+            status_code=result.status_code,
+        )
 
     def consume_phase_transition(self, phase: Optional[str]) -> Optional[tuple[Optional[str], str]]:
         if not phase:

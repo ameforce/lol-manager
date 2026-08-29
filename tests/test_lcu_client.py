@@ -20,6 +20,7 @@ from lolmanager.core.lcu_client import (
     CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_ENV,
     ChampSelectAction,
     DEFAULT_CHAMP_SELECT_ACTION_CONFIRM_TIMEOUT_SEC,
+    GameMode,
     LcuConnection,
     LcuClient,
     LcuDecision,
@@ -459,6 +460,97 @@ class LcuClientTests(unittest.TestCase):
             lcu_loop_action_for(result, context="phase"),
             LcuLoopAction.WAIT_AUTHORITATIVE,
         )
+
+    def test_game_mode_decision_classifies_ranked_queue(self) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {
+                        "gameClient": {"gameMode": "CLASSIC", "mapId": 11},
+                        "gameData": {
+                            "queue": {
+                                "id": 420,
+                                "gameMode": "CLASSIC",
+                                "mapId": 11,
+                                "isRanked": True,
+                            }
+                        },
+                    },
+                )
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_game_mode_decision()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.mode, GameMode.RANKED)
+        self.assertEqual(result.value.queue_id, 420)
+        self.assertTrue(
+            str(session.calls[0]["url"]).endswith("/lol-gameflow/v1/session")
+        )
+
+    def test_game_mode_decision_classifies_aram_without_position(self) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {
+                        "gameClient": {"gameMode": "ARAM", "mapId": 12},
+                        "gameData": {
+                            "queue": {
+                                "id": 450,
+                                "gameMode": "ARAM",
+                                "mapId": 12,
+                                "isRanked": False,
+                            }
+                        },
+                    },
+                )
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_game_mode_decision()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.mode, GameMode.ARAM)
+        self.assertEqual(result.value.queue_id, 450)
+
+    def test_game_mode_decision_marks_other_queue_unsupported(self) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {
+                        "gameData": {
+                            "queue": {
+                                "id": 400,
+                                "gameMode": "CLASSIC",
+                                "mapId": 11,
+                                "isRanked": False,
+                            }
+                        }
+                    },
+                )
+            ]
+        )
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_game_mode_decision()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.mode, GameMode.UNSUPPORTED)
+        self.assertEqual(result.value.queue_id, 400)
+
+    def test_game_mode_decision_rejects_session_without_mode_identity(self) -> None:
+        session = _FakeSession([_FakeResponse(200, {"phase": "ChampSelect"})])
+        client = LcuClient(lockfile=self.lockfile, session=session)
+
+        result = client.get_game_mode_decision()
+
+        self.assertEqual(result.status, LcuOutcome.MALFORMED_RESPONSE)
 
     def test_request_converts_requests_exception_to_transport_failure(self) -> None:
         session = mock.Mock()
