@@ -300,6 +300,7 @@ _last_accept_click_at: dict[str, float] = {}
 _last_lcu_ready_accept_at: dict[str, float] = {}
 ACCEPT_CLICK_COOLDOWN_SEC = 0.8
 LCU_READY_ACCEPT_COOLDOWN_SEC = 0.8
+MATCHMAKING_START_CONFIRM_GRACE_SEC = 1.0
 
 
 RUNTIME_STATE: dict[str, object] = {
@@ -307,6 +308,7 @@ RUNTIME_STATE: dict[str, object] = {
     "client_state_updated_at": 0.0,
     "is_my_pick_turn": False,
     "my_pick_turn_updated_at": 0.0,
+    "matchmaking_start_pending_at": None,
 }
 _my_pick_turn_miss_streak: int = 0
 MY_PICK_TURN_CLEAR_MISS_STREAK = 3
@@ -354,6 +356,92 @@ class MatchPollAttempt:
     def __iter__(self) -> Iterator[bool]:
         yield self.accepted
         yield self.finding
+
+
+@dataclass
+class MatchmakingSearchTracker:
+    """Track one queue search without losing its observation provenance."""
+
+    last_authoritative_phase: Optional[str] = None
+    finding_source: Optional[str] = None
+    start_pending_since: Optional[float] = None
+
+    @property
+    def start_pending(self) -> bool:
+        return self.start_pending_since is not None
+
+    def mark_start_requested(self, now: float) -> None:
+        self.start_pending_since = float(now)
+        self.finding_source = None
+
+    def observe(
+        self,
+        attempt: MatchPollAttempt,
+        *,
+        now: float,
+        image_observation_complete: bool = False,
+    ) -> bool:
+        """Return True when an observed or requested search disappeared."""
+        authoritative = attempt.loop_action == LcuLoopAction.ACT_LCU
+        authoritative_lobby = authoritative and attempt.phase == PHASE_LOBBY
+        fallback_absence = (
+            attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
+            and image_observation_complete
+            and not attempt.accepted
+            and not attempt.finding
+        )
+
+        if attempt.accepted or (
+            authoritative
+            and attempt.phase
+            in {
+                PHASE_READY_CHECK,
+                PHASE_CHAMP_SELECT,
+                PHASE_IN_PROGRESS,
+                PHASE_RECONNECT,
+                PHASE_WATCH_IN_PROGRESS,
+            }
+        ):
+            self.start_pending_since = None
+            self.finding_source = None
+        elif attempt.finding:
+            if authoritative and attempt.phase == PHASE_MATCHMAKING:
+                self.finding_source = "lcu"
+            elif (
+                attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
+                and image_observation_complete
+            ):
+                self.finding_source = "image"
+            if self.finding_source is not None:
+                self.start_pending_since = None
+        elif self.finding_source is not None and (
+            authoritative_lobby or fallback_absence
+        ):
+            return True
+        elif (
+            self.start_pending_since is not None
+            and (authoritative_lobby or fallback_absence)
+            and float(now) - self.start_pending_since
+            >= MATCHMAKING_START_CONFIRM_GRACE_SEC
+        ):
+            return True
+
+        if authoritative and attempt.phase is not None:
+            self.last_authoritative_phase = attempt.phase
+        return False
+
+
+def _record_matchmaking_start_requested(now: Optional[float] = None) -> float:
+    requested_at = time.monotonic() if now is None else float(now)
+    RUNTIME_STATE["matchmaking_start_pending_at"] = requested_at
+    return requested_at
+
+
+def _matchmaking_start_pending_at() -> Optional[float]:
+    value = RUNTIME_STATE.get("matchmaking_start_pending_at")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _set_client_state(value: ClientState, now: float, logger: logging.Logger) -> None:
@@ -686,6 +774,7 @@ def _start_matchmaking_lcu_attempt(
             result = decision_fn()
             outcome = _lcu_status_label(result)
             if getattr(result, "ok", False):
+                _record_matchmaking_start_requested()
                 logger.info("LCU 대전 찾기 요청 완료(%s).", stage)
                 return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, outcome)
 
@@ -706,6 +795,7 @@ def _start_matchmaking_lcu_attempt(
             return LcuActionAttempt(False, loop_action, outcome)
 
         if lcu.start_matchmaking():
+            _record_matchmaking_start_requested()
             logger.info("LCU 대전 찾기 요청 완료(%s).", stage)
             return LcuActionAttempt(True, LcuLoopAction.ACT_LCU, "success")
     except RequestException as exc:
@@ -2729,6 +2819,7 @@ def process_postgame(
             rect, tpl_find_match, threshold=threshold, click=True
         )
         if found_find_match:
+            _record_matchmaking_start_requested()
             logger.info("엔드 이후 대전 찾기 버튼 클릭 완료.")
             return True
 
@@ -3217,6 +3308,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    RUNTIME_STATE["matchmaking_start_pending_at"] = None
     log_path = configure_runtime_logging(debug=bool(args.debug))
     install_exception_logger()
     logger = logging.getLogger("lolmanager")
@@ -3537,7 +3629,51 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
         finding_early = False
+        initial_authoritative_phase: Optional[str] = (
+            phase_at_cycle
+            if phase_attempt_at_cycle.loop_action == LcuLoopAction.ACT_LCU
+            else None
+        )
+        initial_finding_source = (
+            "lcu" if initial_authoritative_phase == PHASE_MATCHMAKING else None
+        )
+        matchmaking_tracker = MatchmakingSearchTracker(
+            last_authoritative_phase=initial_authoritative_phase,
+            finding_source=initial_finding_source,
+            start_pending_since=(
+                None
+                if initial_finding_source is not None
+                else _matchmaking_start_pending_at()
+            ),
+        )
+        RUNTIME_STATE["matchmaking_start_pending_at"] = (
+            matchmaking_tracker.start_pending_since
+        )
         restart_matching_cycle = False
+
+        def observed_manual_matchmaking_cancel(
+            attempt: MatchPollAttempt, *, image_observation_complete: bool = False
+        ) -> bool:
+            source = (
+                matchmaking_tracker.finding_source
+                or ("start-pending" if matchmaking_tracker.start_pending else "unknown")
+            )
+            cancelled = matchmaking_tracker.observe(
+                attempt,
+                now=time.monotonic(),
+                image_observation_complete=image_observation_complete,
+            )
+            RUNTIME_STATE["matchmaking_start_pending_at"] = (
+                matchmaking_tracker.start_pending_since
+            )
+            if cancelled:
+                logger.info(
+                    "매칭 검색 종료를 감지했습니다(source=%s). "
+                    "사용자 매칭 취소로 판단해 자동화를 종료합니다.",
+                    source,
+                )
+                return True
+            return False
 
         def confirm_champ_select_after_lcu_accept(stage: str) -> Optional[bool]:
             nonlocal restart_matching_cycle
@@ -3585,6 +3721,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 lcu=lcu,
             )
             accepted, finding = poll_attempt
+            if observed_manual_matchmaking_cancel(poll_attempt):
+                return
             if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 time.sleep(interval_sec)
                 continue
@@ -3641,6 +3779,10 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 lcu=lcu,
             )
             accepted, finding = poll_attempt
+            if observed_manual_matchmaking_cancel(
+                poll_attempt, image_observation_complete=True
+            ):
+                return
             if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 time.sleep(interval_sec)
                 continue
@@ -3664,6 +3806,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             start_attempt = _start_matchmaking_lcu_attempt(lcu, "사이클 진입", logger)
             if start_attempt.completed:
                 now = time.monotonic()
+                matchmaking_tracker.mark_start_requested(
+                    _matchmaking_start_pending_at() or now
+                )
                 _reset_match_timer_by_find_match_click(now, logger)
                 break
             if start_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
@@ -3675,6 +3820,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             )
             if success:
                 now = time.monotonic()
+                matchmaking_tracker.mark_start_requested(
+                    _record_matchmaking_start_requested(now)
+                )
                 _reset_match_timer_by_find_match_click(now, logger)
                 logger.info("대전 찾기 버튼 클릭 완료.")
                 break
@@ -3699,6 +3847,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 )
                 accepted, finding = poll_attempt
+                if observed_manual_matchmaking_cancel(poll_attempt):
+                    return
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
@@ -3739,6 +3889,10 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 )
                 accepted, finding = poll_attempt
+                if observed_manual_matchmaking_cancel(
+                    poll_attempt, image_observation_complete=True
+                ):
+                    return
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
@@ -3767,9 +3921,18 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 ):
                     break
+                if matchmaking_tracker.start_pending:
+                    logger.debug(
+                        "대전 찾기 요청 반영 대기 중입니다. 자동 재요청을 보류합니다."
+                    )
+                    time.sleep(interval_sec)
+                    continue
                 start_attempt = _start_matchmaking_lcu_attempt(lcu, "매칭 단계", logger)
                 if start_attempt.completed:
                     now = time.monotonic()
+                    matchmaking_tracker.mark_start_requested(
+                        _matchmaking_start_pending_at() or now
+                    )
                     _reset_match_timer_by_find_match_click(now, logger)
                     logger.info("LCU 대전 찾기 재요청 완료.")
                     time.sleep(interval_sec)
@@ -3783,6 +3946,9 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 )
                 if clicked:
                     now = time.monotonic()
+                    matchmaking_tracker.mark_start_requested(
+                        _record_matchmaking_start_requested(now)
+                    )
                     _reset_match_timer_by_find_match_click(now, logger)
                     logger.info("대전 찾기 버튼 재클릭.")
                 else:
