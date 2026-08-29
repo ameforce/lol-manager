@@ -28,6 +28,8 @@ from lolmanager.platform.external_apps import (
 from lolmanager.core.match_timing import append_match_duration, format_duration_mmss
 from lolmanager.core.gui_preferences import load_continue_after_game_preference
 from lolmanager.core.lcu_client import (
+    GameMode,
+    GameModeSnapshot,
     LcuClient,
     LcuLoopAction,
     PHASE_CHAMP_SELECT,
@@ -1371,6 +1373,46 @@ def _detect_role_via_lcu(
             loop_action.value,
         )
     return RoleLcuAttempt(None, loop_action, _lcu_status_label(result))
+
+
+def _detect_game_mode_via_lcu(
+    lcu: Optional[LcuClient], logger: logging.Logger
+) -> Optional[GameModeSnapshot]:
+    if lcu is None:
+        return None
+
+    decision_fn = getattr(lcu, "get_game_mode_decision", None)
+    if not callable(decision_fn):
+        logger.debug("LCU 게임 모드 감지 API가 없어 기존 랭크 흐름을 유지합니다.")
+        return None
+
+    try:
+        result = decision_fn()
+    except RequestException as exc:
+        logger.debug("LCU 게임 모드 감지 실패: %s. 기존 랭크 흐름을 유지합니다.", exc)
+        return None
+    except Exception:  # noqa: BLE001 - unexpected failures must stay visible.
+        logger.exception("LCU 게임 모드 감지 중 예상하지 못한 오류가 발생했습니다.")
+        raise
+
+    snapshot = getattr(result, "value", None)
+    if not getattr(result, "ok", False) or not isinstance(
+        snapshot, GameModeSnapshot
+    ):
+        logger.warning(
+            "LCU 게임 모드를 확인하지 못했습니다(outcome=%s). 기존 랭크 흐름을 유지합니다.",
+            _lcu_status_label(result),
+        )
+        return None
+
+    logger.info(
+        "LCU 게임 모드 감지: %s (queueId=%s, gameMode=%s, mapId=%s)",
+        snapshot.mode.value,
+        snapshot.queue_id if snapshot.queue_id is not None else "unknown",
+        snapshot.raw_game_mode or "unknown",
+        snapshot.map_id if snapshot.map_id is not None else "unknown",
+    )
+    return snapshot
 
 
 def _detect_role_lcu_first(
@@ -2929,6 +2971,116 @@ def monitor_ingame_and_postgame(
     )
 
 
+def _wait_for_game_start_and_monitor(
+    *,
+    lcu: LcuClient,
+    tpl_end_next: Path,
+    tpl_end_one_more: Path,
+    tpl_find_match: Path,
+    tpl_finding_match: Path,
+    tpl_accept: Path,
+    tpl_confirm_templates: Sequence[Path],
+    tpl_prepick: Path,
+    tpl_pick_decline: Optional[Path],
+    available_roles: list[tuple[str, Path]],
+    threshold: float,
+    confirm_check_interval: float,
+    interval_sec: float,
+    logger: logging.Logger,
+    continue_after_game: object,
+    passive_champ_select: bool = False,
+) -> Optional[bool]:
+    """Wait through champ select and return None only when the cycle must restart."""
+
+    if passive_champ_select:
+        logger.info("인게임 시작 대기 중(챔피언 선택 비개입 감시).")
+    else:
+        logger.info("인게임 시작 대기 중(픽 팝업/거절 감시 포함).")
+    _set_client_state(ClientState.WAIT_GAME_START, time.monotonic(), logger)
+    wait_iter = 0
+    while True:
+        if _LEAGUE_EXIT_GUARD is not None and _LEAGUE_EXIT_GUARD.should_exit():
+            _exit_after_league_client_closed(logger)
+        phase_attempt = _poll_lcu_phase_attempt(
+            lcu, logger, "인게임 시작 대기", max_age_sec=0.5
+        )
+        phase = phase_attempt.phase
+        if phase_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
+            logger.debug(
+                "LCU phase가 authoritative wait 상태입니다"
+                "(인게임 시작 대기,outcome=%s).",
+                phase_attempt.outcome,
+            )
+            time.sleep(0.3)
+            continue
+
+        if phase in {
+            PHASE_IN_PROGRESS,
+            PHASE_RECONNECT,
+            PHASE_WATCH_IN_PROGRESS,
+        }:
+            logger.info("LCU 인게임 시작 감지. 게임 종료 감시로 전환합니다.")
+            _set_client_state(ClientState.INGAME, time.monotonic(), logger)
+            break
+        if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK}:
+            if phase == PHASE_READY_CHECK:
+                _accept_ready_check_via_lcu(lcu, "인게임 시작 대기", logger)
+            logger.info(
+                "LCU 상태가 인게임 대기 밖으로 전환되었습니다(phase=%s). 사이클을 재시작합니다.",
+                phase,
+            )
+            return None
+        if (
+            phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
+            and is_game_client_active()
+        ):
+            _set_client_state(ClientState.INGAME, time.monotonic(), logger)
+            break
+        rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
+        if rect is not None:
+            if not passive_champ_select:
+                try_pick_popups(
+                    rect,
+                    tpl_confirm_templates,
+                    tpl_pick_decline,
+                    threshold,
+                    logger,
+                    lcu=lcu,
+                )
+
+            wait_iter += 1
+            if (
+                phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
+                and wait_iter % 10 == 0
+                and search_and_act(
+                    rect, tpl_find_match, threshold=threshold, click=False
+                )
+            ):
+                _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
+                logger.info(
+                    "대전 찾기 화면 복귀 감지(인게임 시작 대기). 사이클을 재시작합니다."
+                )
+                return None
+        time.sleep(0.3)
+
+    return monitor_ingame_and_postgame(
+        tpl_end_next,
+        tpl_end_one_more,
+        tpl_find_match,
+        tpl_finding_match,
+        tpl_accept,
+        tpl_confirm_templates,
+        tpl_prepick,
+        available_roles,
+        threshold,
+        confirm_check_interval,
+        interval_sec,
+        logger,
+        lcu=lcu,
+        continue_after_game=continue_after_game,
+    )
+
+
 def choose_available_pick_index(
     *,
     pick_pool: Sequence[tuple[str, str]],
@@ -3961,6 +4113,50 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             continue
 
         _set_client_state(ClientState.PREPICK, time.monotonic(), logger)
+        game_mode_snapshot = _detect_game_mode_via_lcu(lcu, logger)
+        if (
+            game_mode_snapshot is not None
+            and game_mode_snapshot.mode != GameMode.RANKED
+        ):
+            if game_mode_snapshot.mode == GameMode.ARAM:
+                logger.info(
+                    "칼바람 모드에서는 포지션 기반 픽/밴을 건너뛰고 인게임 시작을 감시합니다."
+                )
+            else:
+                logger.warning(
+                    "지원하지 않는 게임 모드에서는 챔피언 선택 작업을 수행하지 않습니다"
+                    "(queueId=%s, gameMode=%s).",
+                    game_mode_snapshot.queue_id
+                    if game_mode_snapshot.queue_id is not None
+                    else "unknown",
+                    game_mode_snapshot.raw_game_mode or "unknown",
+                )
+
+            should_continue = _wait_for_game_start_and_monitor(
+                lcu=lcu,
+                tpl_end_next=tpl_end_next,
+                tpl_end_one_more=tpl_end_one_more,
+                tpl_find_match=tpl_find_match,
+                tpl_finding_match=tpl_finding_match,
+                tpl_accept=tpl_accept,
+                tpl_confirm_templates=tpl_confirm_templates,
+                tpl_prepick=tpl_prepick,
+                tpl_pick_decline=tpl_pick_decline_opt,
+                available_roles=available_roles,
+                threshold=threshold,
+                confirm_check_interval=confirm_check_interval,
+                interval_sec=interval_sec,
+                logger=logger,
+                continue_after_game=current_continue_after_game,
+                passive_champ_select=True,
+            )
+            if should_continue is None:
+                continue
+            if not should_continue:
+                logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
+                return
+            logger.info("다음 매칭 사이클을 시작합니다.")
+            continue
 
         def detect_role_by_image() -> Optional[str]:
             nonlocal role_fallback_phase_exit
@@ -4902,96 +5098,25 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 _set_my_pick_turn(False, time.monotonic(), logger)
                 continue
 
-            logger.info("인게임 시작 대기 중(픽 팝업/거절 감시 포함).")
-            _set_client_state(ClientState.WAIT_GAME_START, time.monotonic(), logger)
-            wait_iter = 0
-            while True:
-                if _LEAGUE_EXIT_GUARD is not None and _LEAGUE_EXIT_GUARD.should_exit():
-                    _exit_after_league_client_closed(logger)
-                phase_attempt = _poll_lcu_phase_attempt(
-                    lcu, logger, "인게임 시작 대기", max_age_sec=0.5
-                )
-                phase = phase_attempt.phase
-                if phase_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
-                    logger.debug(
-                        "LCU phase가 authoritative wait 상태입니다"
-                        "(인게임 시작 대기,outcome=%s).",
-                        phase_attempt.outcome,
-                    )
-                    time.sleep(0.3)
-                    continue
-
-                if phase in {
-                    PHASE_IN_PROGRESS,
-                    PHASE_RECONNECT,
-                    PHASE_WATCH_IN_PROGRESS,
-                }:
-                    logger.info("LCU 인게임 시작 감지. 게임 종료 감시로 전환합니다.")
-                    _set_client_state(ClientState.INGAME, time.monotonic(), logger)
-                    break
-                if phase in {PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK}:
-                    if phase == PHASE_READY_CHECK:
-                        _accept_ready_check_via_lcu(lcu, "인게임 시작 대기", logger)
-                    logger.info(
-                        "LCU 상태가 인게임 대기 밖으로 전환되었습니다(phase=%s). 사이클을 재시작합니다.",
-                        phase,
-                    )
-                    restart_cycle = True
-                    break
-                if (
-                    phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
-                    and is_game_client_active()
-                ):
-                    _set_client_state(ClientState.INGAME, time.monotonic(), logger)
-                    break
-                rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
-                if rect is not None:
-                    try_pick_popups(
-                        rect,
-                        tpl_confirm_templates,
-                        tpl_pick_decline_opt,
-                        threshold,
-                        logger,
-                        lcu=lcu,
-                    )
-
-                    wait_iter += 1
-                    if (
-                        phase_attempt.loop_action == LcuLoopAction.FALLBACK_IMAGE
-                        and wait_iter % 10 == 0
-                    ):
-                        if search_and_act(
-                            rect, tpl_find_match, threshold=threshold, click=False
-                        ):
-                            _set_client_state(
-                                ClientState.LOBBY, time.monotonic(), logger
-                            )
-                            logger.info(
-                                "대전 찾기 화면 복귀 감지(인게임 시작 대기). 사이클을 재시작합니다."
-                            )
-                            restart_cycle = True
-                            break
-                time.sleep(0.3)
-
-            if restart_cycle:
-                continue
-
-            should_continue = monitor_ingame_and_postgame(
-                tpl_end_next,
-                tpl_end_one_more,
-                tpl_find_match,
-                tpl_finding_match,
-                tpl_accept,
-                tpl_confirm_templates,
-                tpl_prepick,
-                available_roles,
-                threshold,
-                confirm_check_interval,
-                interval_sec,
-                logger,
+            should_continue = _wait_for_game_start_and_monitor(
                 lcu=lcu,
+                tpl_end_next=tpl_end_next,
+                tpl_end_one_more=tpl_end_one_more,
+                tpl_find_match=tpl_find_match,
+                tpl_finding_match=tpl_finding_match,
+                tpl_accept=tpl_accept,
+                tpl_confirm_templates=tpl_confirm_templates,
+                tpl_prepick=tpl_prepick,
+                tpl_pick_decline=tpl_pick_decline_opt,
+                available_roles=available_roles,
+                threshold=threshold,
+                confirm_check_interval=confirm_check_interval,
+                interval_sec=interval_sec,
+                logger=logger,
                 continue_after_game=current_continue_after_game,
             )
+            if should_continue is None:
+                continue
             if not should_continue:
                 logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
                 return
