@@ -4168,7 +4168,10 @@ class CliLcuStateTests(unittest.TestCase):
     def test_passive_champ_select_reaches_ingame_monitor(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePhaseDecisionSequenceLcu(
-            [LcuDecision(LcuOutcome.SUCCESS, value=PHASE_IN_PROGRESS)]
+            [
+                LcuDecision(LcuOutcome.SUCCESS, value=PHASE_CHAMP_SELECT),
+                LcuDecision(LcuOutcome.SUCCESS, value=PHASE_IN_PROGRESS),
+            ]
         )
         entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.PREPICK
 
@@ -4177,6 +4180,14 @@ class CliLcuStateTests(unittest.TestCase):
             mock.patch.object(
                 entrypoint, "monitor_ingame_and_postgame", return_value=False
             ) as monitor,
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_for_image_scan",
+                return_value=(0, 0, 1280, 720),
+            ),
+            mock.patch.object(entrypoint, "try_pick_popups") as pick_popups,
+            mock.patch.object(entrypoint, "search_and_act", return_value=False),
+            mock.patch.object(entrypoint.time, "sleep"),
         ):
             result = entrypoint._wait_for_game_start_and_monitor(
                 lcu=cast(Any, fake),
@@ -4194,6 +4205,7 @@ class CliLcuStateTests(unittest.TestCase):
                 interval_sec=1.0,
                 logger=logger,
                 continue_after_game=False,
+                passive_champ_select=True,
             )
 
         self.assertFalse(result)
@@ -4201,6 +4213,7 @@ class CliLcuStateTests(unittest.TestCase):
             entrypoint.RUNTIME_STATE["client_state"], entrypoint.ClientState.INGAME
         )
         monitor.assert_called_once()
+        pick_popups.assert_not_called()
 
     def test_ui_action_classification_marks_unverified_image_paths(self) -> None:
         self.assertEqual(

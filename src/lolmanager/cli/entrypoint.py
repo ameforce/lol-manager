@@ -2988,10 +2988,14 @@ def _wait_for_game_start_and_monitor(
     interval_sec: float,
     logger: logging.Logger,
     continue_after_game: object,
+    passive_champ_select: bool = False,
 ) -> Optional[bool]:
     """Wait through champ select and return None only when the cycle must restart."""
 
-    logger.info("인게임 시작 대기 중(픽 팝업/거절 감시 포함).")
+    if passive_champ_select:
+        logger.info("인게임 시작 대기 중(챔피언 선택 비개입 감시).")
+    else:
+        logger.info("인게임 시작 대기 중(픽 팝업/거절 감시 포함).")
     _set_client_state(ClientState.WAIT_GAME_START, time.monotonic(), logger)
     wait_iter = 0
     while True:
@@ -3034,14 +3038,15 @@ def _wait_for_game_start_and_monitor(
             break
         rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
         if rect is not None:
-            try_pick_popups(
-                rect,
-                tpl_confirm_templates,
-                tpl_pick_decline,
-                threshold,
-                logger,
-                lcu=lcu,
-            )
+            if not passive_champ_select:
+                try_pick_popups(
+                    rect,
+                    tpl_confirm_templates,
+                    tpl_pick_decline,
+                    threshold,
+                    logger,
+                    lcu=lcu,
+                )
 
             wait_iter += 1
             if (
@@ -4143,6 +4148,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec=interval_sec,
                 logger=logger,
                 continue_after_game=current_continue_after_game,
+                passive_champ_select=True,
             )
             if should_continue is None:
                 continue
