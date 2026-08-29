@@ -1016,7 +1016,7 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertIn("사용자 매칭 취소", "\n".join(logs.output))
         search.assert_not_called()
 
-    def test_matchmaking_cancel_requires_authoritative_lobby_after_finding(
+    def test_matchmaking_cancel_tracker_preserves_source_and_start_pending(
         self,
     ) -> None:
         lobby = entrypoint.MatchPollAttempt(
@@ -1036,27 +1036,6 @@ class CliLcuStateTests(unittest.TestCase):
             "matchmaking",
             PHASE_MATCHMAKING,
         )
-
-        self.assertTrue(
-            entrypoint._is_authoritative_matchmaking_cancel(PHASE_MATCHMAKING, lobby)
-        )
-        self.assertFalse(
-            entrypoint._is_authoritative_matchmaking_cancel(True, lobby)
-        )
-        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(None, lobby))
-        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(PHASE_LOBBY, lobby))
-        self.assertFalse(
-            entrypoint._is_authoritative_matchmaking_cancel(
-                PHASE_MATCHMAKING, waiting_lobby
-            )
-        )
-        self.assertFalse(
-            entrypoint._is_authoritative_matchmaking_cancel(PHASE_MATCHMAKING, matchmaking)
-        )
-        self.assertEqual(
-            entrypoint._latest_authoritative_match_phase(None, matchmaking),
-            PHASE_MATCHMAKING,
-        )
         image_finding = entrypoint.MatchPollAttempt(
             False,
             True,
@@ -1064,11 +1043,42 @@ class CliLcuStateTests(unittest.TestCase):
             "image_finding",
             None,
         )
-        self.assertEqual(
-            entrypoint._latest_authoritative_match_phase(
-                PHASE_MATCHMAKING, image_finding
-            ),
-            PHASE_MATCHMAKING,
+        image_missing = entrypoint.MatchPollAttempt(
+            False,
+            False,
+            LcuLoopAction.FALLBACK_IMAGE,
+            "request_failed",
+            None,
+        )
+
+        quick_cancel = entrypoint.MatchmakingSearchTracker(
+            last_authoritative_phase=PHASE_LOBBY
+        )
+        quick_cancel.mark_start_requested(10.0)
+        self.assertFalse(quick_cancel.observe(lobby, now=10.2))
+        self.assertTrue(quick_cancel.start_pending)
+        self.assertFalse(quick_cancel.observe(waiting_lobby, now=11.2))
+        self.assertTrue(quick_cancel.observe(lobby, now=11.2))
+
+        authoritative = entrypoint.MatchmakingSearchTracker()
+        self.assertFalse(authoritative.observe(matchmaking, now=20.0))
+        self.assertTrue(authoritative.observe(lobby, now=20.2))
+
+        fallback = entrypoint.MatchmakingSearchTracker()
+        self.assertFalse(
+            fallback.observe(
+                image_finding, now=30.0, image_observation_complete=True
+            )
+        )
+        self.assertFalse(
+            fallback.observe(
+                image_missing, now=30.2, image_observation_complete=False
+            )
+        )
+        self.assertTrue(
+            fallback.observe(
+                image_missing, now=30.2, image_observation_complete=True
+            )
         )
 
     def test_cli_main_routes_postgame_before_cycle_ui_wait(self) -> None:
