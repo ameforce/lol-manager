@@ -357,7 +357,7 @@ class MatchPollAttempt:
 
 
 def _is_authoritative_matchmaking_cancel(
-    previous_finding: Optional[bool], attempt: MatchPollAttempt
+    previous_authoritative_phase: Optional[str], attempt: MatchPollAttempt
 ) -> bool:
     """Return whether an observed queue search was externally cancelled.
 
@@ -366,12 +366,21 @@ def _is_authoritative_matchmaking_cancel(
     therefore an external stop intent and must not be repaired by requeueing.
     """
     return bool(
-        previous_finding is True
+        previous_authoritative_phase == PHASE_MATCHMAKING
         and attempt.loop_action == LcuLoopAction.ACT_LCU
         and attempt.phase == PHASE_LOBBY
         and not attempt.accepted
         and not attempt.finding
     )
+
+
+def _latest_authoritative_match_phase(
+    previous_phase: Optional[str], attempt: MatchPollAttempt
+) -> Optional[str]:
+    """Preserve the latest LCU-owned phase without trusting image fallback."""
+    if attempt.loop_action == LcuLoopAction.ACT_LCU and attempt.phase is not None:
+        return attempt.phase
+    return previous_phase
 
 
 def _set_client_state(value: ClientState, now: float, logger: logging.Logger) -> None:
@@ -3555,7 +3564,27 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         _set_client_state(ClientState.LOBBY, time.monotonic(), logger)
         accepted_early = False
         finding_early = False
+        last_authoritative_match_phase: Optional[str] = (
+            phase_at_cycle
+            if phase_attempt_at_cycle.loop_action == LcuLoopAction.ACT_LCU
+            else None
+        )
         restart_matching_cycle = False
+
+        def observed_manual_matchmaking_cancel(attempt: MatchPollAttempt) -> bool:
+            nonlocal last_authoritative_match_phase
+            if _is_authoritative_matchmaking_cancel(
+                last_authoritative_match_phase, attempt
+            ):
+                logger.info(
+                    "LCU Matchmaking -> Lobby 전이를 감지했습니다. "
+                    "사용자 매칭 취소로 판단해 자동화를 종료합니다."
+                )
+                return True
+            last_authoritative_match_phase = _latest_authoritative_match_phase(
+                last_authoritative_match_phase, attempt
+            )
+            return False
 
         def confirm_champ_select_after_lcu_accept(stage: str) -> Optional[bool]:
             nonlocal restart_matching_cycle
@@ -3603,6 +3632,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 lcu=lcu,
             )
             accepted, finding = poll_attempt
+            if observed_manual_matchmaking_cancel(poll_attempt):
+                return
             if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 time.sleep(interval_sec)
                 continue
@@ -3659,6 +3690,8 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 lcu=lcu,
             )
             accepted, finding = poll_attempt
+            if observed_manual_matchmaking_cancel(poll_attempt):
+                return
             if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                 time.sleep(interval_sec)
                 continue
@@ -3717,17 +3750,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 )
                 accepted, finding = poll_attempt
+                if observed_manual_matchmaking_cancel(poll_attempt):
+                    return
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
-                if _is_authoritative_matchmaking_cancel(
-                    last_finding_state, poll_attempt
-                ):
-                    logger.info(
-                        "LCU Matchmaking -> Lobby 전이를 감지했습니다. "
-                        "사용자 매칭 취소로 판단해 자동화를 종료합니다."
-                    )
-                    return
                 if (
                     poll_attempt.loop_action == LcuLoopAction.ACT_LCU
                     and poll_attempt.phase == PHASE_CHAMP_SELECT
@@ -3765,17 +3792,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                     lcu=lcu,
                 )
                 accepted, finding = poll_attempt
+                if observed_manual_matchmaking_cancel(poll_attempt):
+                    return
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
-                if _is_authoritative_matchmaking_cancel(
-                    last_finding_state, poll_attempt
-                ):
-                    logger.info(
-                        "LCU Matchmaking -> Lobby 전이를 감지했습니다. "
-                        "사용자 매칭 취소로 판단해 자동화를 종료합니다."
-                    )
-                    return
                 if finding != last_finding_state:
                     logger.info("매칭 상태 텍스트: %s", "감지" if finding else "미감지")
                     last_finding_state = finding

@@ -1037,14 +1037,38 @@ class CliLcuStateTests(unittest.TestCase):
             PHASE_MATCHMAKING,
         )
 
-        self.assertTrue(entrypoint._is_authoritative_matchmaking_cancel(True, lobby))
-        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(None, lobby))
-        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(False, lobby))
-        self.assertFalse(
-            entrypoint._is_authoritative_matchmaking_cancel(True, waiting_lobby)
+        self.assertTrue(
+            entrypoint._is_authoritative_matchmaking_cancel(PHASE_MATCHMAKING, lobby)
         )
         self.assertFalse(
-            entrypoint._is_authoritative_matchmaking_cancel(True, matchmaking)
+            entrypoint._is_authoritative_matchmaking_cancel(True, lobby)
+        )
+        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(None, lobby))
+        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(PHASE_LOBBY, lobby))
+        self.assertFalse(
+            entrypoint._is_authoritative_matchmaking_cancel(
+                PHASE_MATCHMAKING, waiting_lobby
+            )
+        )
+        self.assertFalse(
+            entrypoint._is_authoritative_matchmaking_cancel(PHASE_MATCHMAKING, matchmaking)
+        )
+        self.assertEqual(
+            entrypoint._latest_authoritative_match_phase(None, matchmaking),
+            PHASE_MATCHMAKING,
+        )
+        image_finding = entrypoint.MatchPollAttempt(
+            False,
+            True,
+            LcuLoopAction.FALLBACK_IMAGE,
+            "image_finding",
+            None,
+        )
+        self.assertEqual(
+            entrypoint._latest_authoritative_match_phase(
+                PHASE_MATCHMAKING, image_finding
+            ),
+            PHASE_MATCHMAKING,
         )
 
     def test_cli_main_routes_postgame_before_cycle_ui_wait(self) -> None:
