@@ -356,6 +356,24 @@ class MatchPollAttempt:
         yield self.finding
 
 
+def _is_authoritative_matchmaking_cancel(
+    previous_finding: Optional[bool], attempt: MatchPollAttempt
+) -> bool:
+    """Return whether an observed queue search was externally cancelled.
+
+    The matching loop never cancels its own active search.  Once LCU has
+    authoritatively reported Matchmaking, a later authoritative Lobby phase is
+    therefore an external stop intent and must not be repaired by requeueing.
+    """
+    return bool(
+        previous_finding is True
+        and attempt.loop_action == LcuLoopAction.ACT_LCU
+        and attempt.phase == PHASE_LOBBY
+        and not attempt.accepted
+        and not attempt.finding
+    )
+
+
 def _set_client_state(value: ClientState, now: float, logger: logging.Logger) -> None:
     prev = RUNTIME_STATE.get("client_state", ClientState.UNKNOWN)
     if prev == value:
@@ -3702,6 +3720,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
+                if _is_authoritative_matchmaking_cancel(
+                    last_finding_state, poll_attempt
+                ):
+                    logger.info(
+                        "LCU Matchmaking -> Lobby 전이를 감지했습니다. "
+                        "사용자 매칭 취소로 판단해 자동화를 종료합니다."
+                    )
+                    return
                 if (
                     poll_attempt.loop_action == LcuLoopAction.ACT_LCU
                     and poll_attempt.phase == PHASE_CHAMP_SELECT
@@ -3742,6 +3768,14 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 if poll_attempt.loop_action == LcuLoopAction.WAIT_AUTHORITATIVE:
                     time.sleep(interval_sec)
                     continue
+                if _is_authoritative_matchmaking_cancel(
+                    last_finding_state, poll_attempt
+                ):
+                    logger.info(
+                        "LCU Matchmaking -> Lobby 전이를 감지했습니다. "
+                        "사용자 매칭 취소로 판단해 자동화를 종료합니다."
+                    )
+                    return
                 if finding != last_finding_state:
                     logger.info("매칭 상태 텍스트: %s", "감지" if finding else "미감지")
                     last_finding_state = finding

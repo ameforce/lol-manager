@@ -831,6 +831,39 @@ class _FakeCliReservePickDodgeLcu(_FakeReserveFallbackLcu):
         return LcuDecision(LcuOutcome.SUCCESS, value=phase)
 
 
+class _FakeCliManualQueueCancelLcu:
+    def __init__(self) -> None:
+        self.phase_calls = 0
+        self.start_calls = 0
+        self.post_start_phase_calls = 0
+
+    def get_gameflow_phase_decision(
+        self, *, max_age_sec: float = 0.25
+    ) -> LcuDecision:
+        self.phase_calls += 1
+        if self.start_calls == 0:
+            phase = PHASE_LOBBY
+        else:
+            self.post_start_phase_calls += 1
+            phase = (
+                PHASE_MATCHMAKING
+                if self.post_start_phase_calls == 1
+                else PHASE_LOBBY
+            )
+        return LcuDecision(LcuOutcome.SUCCESS, value=phase)
+
+    def consume_phase_transition(self, phase: str):
+        return None
+
+    def start_matchmaking_decision(self) -> LcuDecision:
+        self.start_calls += 1
+        if self.start_calls > 1:
+            raise AssertionError(
+                f"manual queue cancel must not requeue (phase_calls={self.phase_calls})"
+            )
+        return LcuDecision(LcuOutcome.SUCCESS, reason="matchmaking search accepted")
+
+
 class _FakeChampSelectPhaseGuardLcu:
     def __init__(self, phases: list[LcuDecision | str]) -> None:
         self.phases = list(phases)
@@ -934,6 +967,85 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         configure_logging.assert_not_called()
         fake_gui.run_config_gui.assert_not_called()
+
+    def test_cli_main_stops_after_authoritative_manual_queue_cancel(self) -> None:
+        fake_lcu = _FakeCliManualQueueCancelLcu()
+        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint, "find_league_window_rect", return_value=(0, 0, 1280, 720)
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(entrypoint, "search_and_act") as search,
+            mock.patch.object(entrypoint.time, "sleep", return_value=None),
+            self.assertLogs("lolmanager", level="INFO") as logs,
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(fake_lcu.start_calls, 1)
+        self.assertGreaterEqual(fake_lcu.phase_calls, 7)
+        self.assertIn("사용자 매칭 취소", "\n".join(logs.output))
+        search.assert_not_called()
+
+    def test_matchmaking_cancel_requires_authoritative_lobby_after_finding(
+        self,
+    ) -> None:
+        lobby = entrypoint.MatchPollAttempt(
+            False, False, LcuLoopAction.ACT_LCU, "lobby", PHASE_LOBBY
+        )
+        waiting_lobby = entrypoint.MatchPollAttempt(
+            False,
+            False,
+            LcuLoopAction.WAIT_AUTHORITATIVE,
+            "request_failed",
+            PHASE_LOBBY,
+        )
+        matchmaking = entrypoint.MatchPollAttempt(
+            False,
+            True,
+            LcuLoopAction.ACT_LCU,
+            "matchmaking",
+            PHASE_MATCHMAKING,
+        )
+
+        self.assertTrue(entrypoint._is_authoritative_matchmaking_cancel(True, lobby))
+        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(None, lobby))
+        self.assertFalse(entrypoint._is_authoritative_matchmaking_cancel(False, lobby))
+        self.assertFalse(
+            entrypoint._is_authoritative_matchmaking_cancel(True, waiting_lobby)
+        )
+        self.assertFalse(
+            entrypoint._is_authoritative_matchmaking_cancel(True, matchmaking)
+        )
 
     def test_cli_main_routes_postgame_before_cycle_ui_wait(self) -> None:
         postgame_message = "postgame routed before cycle ui fallback"
