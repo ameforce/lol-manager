@@ -43,9 +43,11 @@ class _Value:
 class _Button:
     def __init__(self) -> None:
         self.state: object = None
+        self.text: object = None
 
     def configure(self, **kwargs: object) -> None:
         self.state = kwargs.get("state")
+        self.text = kwargs.get("text")
 
 
 class _Proc:
@@ -275,9 +277,78 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             checksum_url="https://example.test/SHA256SUMS.txt",
             github_digest=None,
         )
+        same_version = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 26),
+            installer_name="LOLManager-Setup-v1.1.26.exe",
+            installer_url="https://example.test/same.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
 
         self.assertFalse(should_prefer_release_candidate(pending=pending, candidate=older))
         self.assertTrue(should_prefer_release_candidate(pending=pending, candidate=newer))
+        self.assertFalse(
+            should_prefer_release_candidate(pending=pending, candidate=same_version)
+        )
+        self.assertTrue(
+            should_prefer_release_candidate(
+                pending=pending,
+                candidate=same_version,
+                pending_failed=True,
+            )
+        )
+
+    def test_failed_release_check_restores_staged_update_action(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_event_q = queue.Queue()
+        gui._update_event_q.put(("check_failed", "offline"))
+        gui._update_check_started = True
+        gui._update_stage_started = False
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_pending_failed = False
+        gui._set_update_status = mock.Mock()
+        gui._configure_update_button = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._poll_update_events()
+
+        gui._set_update_status.assert_called_once_with("Update 준비됨")
+        gui._configure_update_button.assert_called_once_with(
+            text="Update 적용", state="normal"
+        )
+
+    def test_newer_update_staging_cannot_apply_an_older_pending_installer(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_authorized = True
+        gui._update_stage_started = True
+        gui._update_apply_requested = False
+        gui._staged_update_is_idle = mock.Mock(return_value=(True, ""))
+        gui._begin_staged_update_application = mock.Mock()
+
+        self.assertFalse(gui._maybe_apply_staged_update(trigger="external-idle"))
+        gui._begin_staged_update_application.assert_not_called()
+
+    def test_closing_during_newer_update_staging_cannot_apply_older_pending_installer(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_authorized = True
+        gui._update_apply_requested = False
+        gui._update_stage_started = True
+        gui._begin_staged_update_application = mock.Mock()
+        gui._auto_ban_refresher = None
+        gui._proc_usage_after_id = None
+        gui._external_sync_stop = threading.Event()
+        gui.proc = None
+        gui.root = _Root()
+
+        gui._on_close()
+
+        gui._begin_staged_update_application.assert_not_called()
+        self.assertTrue(gui.root.destroyed)
 
     def test_update_installer_launch_is_deferred_until_after_mainloop_shutdown(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)

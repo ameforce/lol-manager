@@ -181,11 +181,14 @@ def should_prefer_release_candidate(
     *,
     pending: PendingUpdate | None,
     candidate: ReleaseUpdateCandidate | None,
+    pending_failed: bool = False,
 ) -> bool:
-    """Prefer a newer stable Release over an already staged older installer."""
+    """Prefer a new Release, or re-stage a pending installer that failed validation."""
     if candidate is None:
         return False
     if pending is None:
+        return True
+    if pending_failed:
         return True
     try:
         pending_version = parse_app_release_version(pending.target_version).as_tuple()
@@ -766,6 +769,18 @@ class LolManagerGui:
         except Exception:
             pass
 
+    def _restore_pending_update_action(self) -> bool:
+        """Restore the local Apply/Retry action after a background check ends."""
+        if getattr(self, "_pending_update", None) is None:
+            return False
+        retry = bool(getattr(self, "_update_pending_failed", False))
+        self._set_update_status("Update 확인 필요" if retry else "Update 준비됨")
+        self._configure_update_button(
+            text="Update 재시도" if retry else "Update 적용",
+            state=tk.NORMAL,
+        )
+        return True
+
     def _initialize_update_lifecycle(self) -> None:
         if not bool(getattr(self, "_updates_enabled", False)):
             return
@@ -833,7 +848,11 @@ class LolManagerGui:
             return
         pending = getattr(self, "_pending_update", None)
         candidate = getattr(self, "_update_candidate", None)
-        if should_prefer_release_candidate(pending=pending, candidate=candidate):
+        if should_prefer_release_candidate(
+            pending=pending,
+            candidate=candidate,
+            pending_failed=bool(getattr(self, "_update_pending_failed", False)),
+        ):
             if bool(getattr(self, "_update_stage_started", False)):
                 return
             accepted = messagebox.askyesno(
@@ -904,19 +923,9 @@ class LolManagerGui:
                 candidate = value if isinstance(value, ReleaseUpdateCandidate) else None
                 self._update_candidate = candidate
                 if candidate is None:
-                    pending = getattr(self, "_pending_update", None)
-                    if pending is None:
+                    if not self._restore_pending_update_action():
                         self._set_update_status("Update 최신")
                         self._configure_update_button(text="Update 최신", state=tk.DISABLED)
-                    else:
-                        retry = bool(getattr(self, "_update_pending_failed", False))
-                        self._set_update_status(
-                            "Update 확인 필요" if retry else "Update 준비됨"
-                        )
-                        self._configure_update_button(
-                            text="Update 재시도" if retry else "Update 적용",
-                            state=tk.NORMAL,
-                        )
                     continue
                 self._set_update_status(f"Update v{candidate.version.text}")
                 self._configure_update_button(
@@ -927,7 +936,7 @@ class LolManagerGui:
                 )
             elif kind == "check_failed":
                 self._update_check_started = False
-                if self._pending_update is None:
+                if not self._restore_pending_update_action():
                     self._set_update_status("Update 확인 실패")
                     self._configure_update_button(text="Update 확인 실패", state=tk.DISABLED)
                 self._append_log(f"[Update] 확인 실패: {value}\n")
@@ -987,6 +996,10 @@ class LolManagerGui:
     def _maybe_apply_staged_update(self, *, trigger: str) -> bool:
         pending = getattr(self, "_pending_update", None)
         if pending is None or not bool(getattr(self, "_update_apply_authorized", False)):
+            return False
+        # A newer installer is still downloading.  Keep any previous staged
+        # version inert until this user-confirmed staging attempt resolves.
+        if bool(getattr(self, "_update_stage_started", False)):
             return False
         if bool(getattr(self, "_update_apply_requested", False)):
             return True
@@ -3110,7 +3123,7 @@ class LolManagerGui:
             return
         if bool(getattr(self, "_update_apply_authorized", False)) and not bool(
             getattr(self, "_update_apply_requested", False)
-        ):
+        ) and not bool(getattr(self, "_update_stage_started", False)):
             self._begin_staged_update_application(
                 trigger="app-close",
                 close_after_launch=False,
