@@ -16,6 +16,8 @@ def test_inno_installer_keeps_stable_per_user_contract() -> None:
     assert "CloseApplicationsFilter={#MyAppExeName}" in script
     assert "PrepareToInstall" in script
     assert "StopRunningLOLManager" in script
+    assert "[InstallDelete]" in script
+    assert 'Type: files; Name: "{app}\\.lolmanager-installer-managed"' in script
 
 
 def test_inno_installer_creates_required_shortcuts_and_launch_option() -> None:
@@ -25,24 +27,31 @@ def test_inno_installer_creates_required_shortcuts_and_launch_option() -> None:
     assert re.search(r'^Name: "\{userdesktop\}.*"; Filename:', script, re.MULTILINE)
     assert "Flags: checkedonce" in script
     assert "Flags: nowait postinstall skipifsilent" in script
+    assert "ShouldLaunchLOLManager" in script
+    assert "{param:LOLMANAGER_RELAUNCH|0}" in script
 
 
-def test_inno_installer_update_mode_waits_for_bootstrap_and_relaunches_only_after_success() -> None:
+def test_inno_installer_update_mode_waits_then_fails_safe_on_residual_process() -> None:
     script = (PROJECT_ROOT / "installer" / "LOLManager.iss").read_text("utf-8")
 
-    assert "LOLMANAGERUPDATEMODE" in script
+    assert "LOLMANAGERUPDATEMODE" not in script
     assert "LOLMANAGERWAITPID" in script
-    assert "LOLMANAGERRESULT" in script
+    assert "LOLMANAGER_RELAUNCH" in script
     assert "WaitForUpdateBootstrapExit" in script
     assert "OpenProcess@kernel32.dll" in script
     assert "WaitForSingleObject@kernel32.dll" in script
-    assert "Check: IsUpdaterInstallMode" in script
+    assert "RequireNoResidualLOLManagerProcess" in script
+    assert "ExecAndCaptureOutput" in script
+    assert "Check: ShouldLaunchLOLManager" in script
     assert "Flags: nowait skipifnotsilent" in script
-    assert "WriteUpdateSuccessResult" in script
-    update_prepare = script[
-        script.index("function PrepareToInstall") : script.index("procedure CurStepChanged")
+    assert "WriteUpdateSuccessResult" not in script
+    updater_branch = script[
+        script.index("if IsUpdaterInstallMode() then") : script.index(
+            "  Result := StopRunningLOLManager();", script.index("function PrepareToInstall")
+        )
     ]
-    assert "Result := StopRunningLOLManager();" in update_prepare
+    assert "StopRunningLOLManager();" not in updater_branch
+    assert "RequireNoResidualLOLManagerProcess();" in updater_branch
 
 
 def test_release_package_contains_no_separate_updater_or_powershell_helper() -> None:
@@ -50,6 +59,7 @@ def test_release_package_contains_no_separate_updater_or_powershell_helper() -> 
 
     assert not list(resources.rglob("*.ps1"))
     assert not list(resources.rglob("*updater*.exe"))
+    assert not (PROJECT_ROOT / "installer" / "installer-managed.marker").exists()
 
 
 def test_inno_installer_does_not_delete_user_settings() -> None:
@@ -84,9 +94,15 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "VersionInfo.FileVersion" in script
     assert "UseDefaultInstallPath" in script
     assert "제거 후 설치 경로가 남아 있습니다." in script
-    assert "LOLMANAGERUPDATEMODE" in script
+    assert "LOLMANAGER_RELAUNCH=1" in script
+    assert "LOLMANAGERUPDATEMODE" not in script
     assert "업데이트 installer가 원본 LOLManager 종료 전에 대기하지 않았습니다." in script
-    assert "업데이트 모드 검증용 두 번째 GUI 창" in script
-    assert "다른 LOLManager.exe를 종료하지 못했습니다." in script
-    assert "update mode waited for bootstrap exit, closed residual GUI instances, and relaunched: yes" in script
+    assert "잔여 GUI가 보존되지 않았습니다" in script
+    assert "InstallLocation 등록값 불일치" in script
+    assert "Close-LolManagerInstance" in script
+    assert "Get-TaskOwnedLolManagerProcesses" in script
+    assert "$updateBootstrapProcess.Id" in script
+    assert "Stop-Process -Name 'LOLManager'" not in script
+    assert "legacy installer marker를 정리하지 못했습니다." in script
+    assert "update mode waited for bootstrap exit, preserved residual GUI, and relaunched: yes" in script
     assert "settings preserved after reinstall/uninstall: yes" in script

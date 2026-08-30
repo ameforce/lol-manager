@@ -19,6 +19,7 @@ from lolmanager.core.auto_updater import (
     ReleaseUpdateCandidate,
     ReleaseVersion,
     StartupUpdateStatus,
+    UpdateError,
 )
 from lolmanager.gui.app_gui import (
     EXTERNAL_SYNC_MS,
@@ -256,35 +257,39 @@ class GuiRuntimePolicyTests(unittest.TestCase):
 
     def test_newer_release_candidate_supersedes_an_older_staged_installer(self) -> None:
         pending = PendingUpdate(
+            phase="ready",
             target_version="1.1.26",
-            installer_name="LOLManager-Setup-v1.1.26.exe",
-            installer_path="C:/updates/1.1.26/LOLManager-Setup-v1.1.26.exe",
+            tag="v1.1.26",
+            installer_path="C:/updates/v1.1.26/LOLManager-Setup-v1.1.26.exe",
             sha256="0" * 64,
-            github_digest=None,
+            installer_log_path="C:/updates/v1.1.26/installer-update.log",
             created_at_unix=1.0,
         )
         older = ReleaseUpdateCandidate(
             version=ReleaseVersion(1, 1, 25),
+            tag="v1.1.25",
             installer_name="LOLManager-Setup-v1.1.25.exe",
-            installer_url="https://example.test/old.exe",
+            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.25/old.exe",
             installer_size=1,
-            checksum_url="https://example.test/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.25/SHA256SUMS.txt",
             github_digest=None,
         )
         newer = ReleaseUpdateCandidate(
             version=ReleaseVersion(1, 1, 27),
+            tag="v1.1.27",
             installer_name="LOLManager-Setup-v1.1.27.exe",
-            installer_url="https://example.test/new.exe",
+            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.27/new.exe",
             installer_size=1,
-            checksum_url="https://example.test/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.27/SHA256SUMS.txt",
             github_digest=None,
         )
         same_version = ReleaseUpdateCandidate(
             version=ReleaseVersion(1, 1, 26),
+            tag="v1.1.26",
             installer_name="LOLManager-Setup-v1.1.26.exe",
-            installer_url="https://example.test/same.exe",
+            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.26/same.exe",
             installer_size=1,
-            checksum_url="https://example.test/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.26/SHA256SUMS.txt",
             github_digest=None,
         )
 
@@ -321,7 +326,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             text="Update 적용", state="normal"
         )
 
-    def test_failed_release_check_without_pending_update_allows_manual_retry(self) -> None:
+    def test_failed_background_check_without_pending_update_keeps_action_hidden(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
         gui._closing = False
         gui._update_event_q = queue.Queue()
@@ -331,25 +336,25 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui._pending_update = None
         gui._set_update_status = mock.Mock()
         gui._configure_update_button = mock.Mock()
+        gui._set_update_button_visible = mock.Mock()
         gui._append_log = mock.Mock()
 
         gui._poll_update_events()
 
         gui._set_update_status.assert_called_once_with("Update 확인 실패")
-        gui._configure_update_button.assert_called_once_with(
-            text="Update 다시 확인", state="normal"
-        )
+        gui._set_update_button_visible.assert_called_once_with(False)
+        gui._configure_update_button.assert_not_called()
 
-    def test_update_button_restarts_check_when_no_update_is_available(self) -> None:
+    def test_hidden_update_button_cannot_become_a_manual_background_check_action(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
         gui._closing = False
         gui._pending_update = None
         gui._update_candidate = None
-        gui._start_update_check = mock.Mock()
+        gui._set_update_button_visible = mock.Mock()
 
         gui._on_update_clicked()
 
-        gui._start_update_check.assert_called_once_with()
+        gui._set_update_button_visible.assert_called_once_with(False)
 
     def test_applied_update_with_retained_staging_schedules_cleanup_retry(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
@@ -444,6 +449,24 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             self.assertTrue(gui.launch_staged_update_after_mainloop())
 
         launch.assert_called_once()
+
+    def test_post_mainloop_installer_spawn_failure_uses_native_dialog_and_keeps_retry(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_requested = True
+
+        with (
+            mock.patch(
+                "lolmanager.gui.app_gui.launch_staged_installer_update",
+                side_effect=UpdateError("spawn denied"),
+            ),
+            mock.patch("lolmanager.gui.app_gui.mark_installer_launch_failure") as mark_failure,
+            mock.patch("lolmanager.gui.app_gui.show_native_update_error") as native_error,
+        ):
+            self.assertFalse(gui.launch_staged_update_after_mainloop())
+
+        mark_failure.assert_called_once_with(message="spawn denied")
+        native_error.assert_called_once()
 
     def test_opgg_shutdown_hook_is_only_in_client_auto_exit_branch(self) -> None:
         sync_source = inspect.getsource(LolManagerGui._sync_external_state)
