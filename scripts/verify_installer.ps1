@@ -91,6 +91,46 @@ function Invoke-Installer([string]$LogPath) {
     }
 }
 
+function Start-UpdateInstallerWithStalePyInstallerEnvironment(
+    [int]$WaitPid,
+    [string]$LogPath
+) {
+    $environmentNames = @(
+        '_PYI_ARCHIVE_FILE',
+        '_PYI_PARENT_PROCESS_LEVEL',
+        '_PYI_APPLICATION_HOME_DIR',
+        '_PYI_SPLASH_IPC',
+        'PYINSTALLER_RESET_ENVIRONMENT'
+    )
+    $originalEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+
+    try {
+        [Environment]::SetEnvironmentVariable('_PYI_ARCHIVE_FILE', $installedExe, 'Process')
+        [Environment]::SetEnvironmentVariable('_PYI_PARENT_PROCESS_LEVEL', '2', 'Process')
+        [Environment]::SetEnvironmentVariable('_PYI_APPLICATION_HOME_DIR', $verificationRootFull, 'Process')
+        [Environment]::SetEnvironmentVariable('_PYI_SPLASH_IPC', '0', 'Process')
+        [Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', $null, 'Process')
+
+        return Start-Process -FilePath $setupPath -ArgumentList @(
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            "/DIR=$installDir",
+            '/LOLMANAGER_RELAUNCH=1',
+            "/LOLMANAGERWAITPID=$WaitPid",
+            "/LOG=$LogPath"
+        ) -PassThru
+    }
+    finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], 'Process')
+        }
+    }
+}
+
 function Assert-ShortcutTarget([string]$ShortcutPath, [string]$ExpectedTarget) {
     if (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf)) {
         throw "바로가기가 생성되지 않았습니다: $ShortcutPath"
@@ -329,15 +369,9 @@ try {
     # relaunches only through the explicit Inno [Run] contract.
     $updateBootstrapProcess = Start-Process -FilePath $installedExe -PassThru
     $updateWindowProcess = Wait-ForLolManagerWindow '업데이트 성공 경로 검증용 GUI 창이 30초 안에 나타나지 않았습니다.'
-    $updateProcess = Start-Process -FilePath $setupPath -ArgumentList @(
-        '/VERYSILENT',
-        '/SUPPRESSMSGBOXES',
-        '/NORESTART',
-        "/DIR=$installDir",
-        '/LOLMANAGER_RELAUNCH=1',
-        "/LOLMANAGERWAITPID=$($updateBootstrapProcess.Id)",
-        "/LOG=$updateInstallLog"
-    ) -PassThru
+    $updateProcess = Start-UpdateInstallerWithStalePyInstallerEnvironment `
+        $updateBootstrapProcess.Id `
+        $updateInstallLog
     Start-Sleep -Milliseconds 750
     $updateProcess.Refresh()
     if ($updateProcess.HasExited) {
