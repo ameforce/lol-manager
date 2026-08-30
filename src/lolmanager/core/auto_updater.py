@@ -31,7 +31,7 @@ import requests
 from lolmanager.core.app_version import get_app_version
 from lolmanager.platform.runtime import is_frozen
 
-GITHUB_REPOSITORY = "ameforce/LOLManager"
+GITHUB_REPOSITORY = "ameforce/lol-manager"
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 APPROVED_GITHUB_HOSTS = frozenset(
     {

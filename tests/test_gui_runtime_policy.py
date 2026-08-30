@@ -269,27 +269,27 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             version=ReleaseVersion(1, 1, 25),
             tag="v1.1.25",
             installer_name="LOLManager-Setup-v1.1.25.exe",
-            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.25/old.exe",
+            installer_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.25/old.exe",
             installer_size=1,
-            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.25/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.25/SHA256SUMS.txt",
             github_digest=None,
         )
         newer = ReleaseUpdateCandidate(
             version=ReleaseVersion(1, 1, 27),
             tag="v1.1.27",
             installer_name="LOLManager-Setup-v1.1.27.exe",
-            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.27/new.exe",
+            installer_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.27/new.exe",
             installer_size=1,
-            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.27/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.27/SHA256SUMS.txt",
             github_digest=None,
         )
         same_version = ReleaseUpdateCandidate(
             version=ReleaseVersion(1, 1, 26),
             tag="v1.1.26",
             installer_name="LOLManager-Setup-v1.1.26.exe",
-            installer_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.26/same.exe",
+            installer_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.26/same.exe",
             installer_size=1,
-            checksum_url="https://github.com/ameforce/LOLManager/releases/download/v1.1.26/SHA256SUMS.txt",
+            checksum_url="https://github.com/ameforce/lol-manager/releases/download/v1.1.26/SHA256SUMS.txt",
             github_digest=None,
         )
 
