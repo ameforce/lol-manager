@@ -147,7 +147,10 @@ function Assert-ShortcutTarget([string]$ShortcutPath, [string]$ExpectedTarget) {
 }
 
 function Get-TaskOwnedLolManagerProcesses() {
-    $ownedPrefix = $verificationRootFull + [IO.Path]::DirectorySeparatorChar
+    $ownedRoot = [IO.Path]::GetFullPath($installDir).TrimEnd(
+        [char[]]@([char]0x5c, [char]'/')
+    )
+    $ownedPrefix = $ownedRoot + [IO.Path]::DirectorySeparatorChar
     return @(
         Get-CimInstance Win32_Process -Filter "Name='LOLManager.exe'" -ErrorAction SilentlyContinue |
             Where-Object {

@@ -110,6 +110,7 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "InstallLocation 등록값 불일치" in script
     assert "Close-LolManagerInstance" in script
     assert "Get-TaskOwnedLolManagerProcesses" in script
+    assert "[IO.Path]::GetFullPath($installDir)" in script
     assert "$updateBootstrapProcess.Id" in script
     assert "Start-UpdateInstallerWithStalePyInstallerEnvironment" in script
     assert "_PYI_ARCHIVE_FILE" in script
