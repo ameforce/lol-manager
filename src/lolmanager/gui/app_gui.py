@@ -20,6 +20,20 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from lolmanager.core.auto_ban_refresh import AutoBanRefreshCoordinator
+from lolmanager.core.auto_updater import (
+    InstallerUpdateService,
+    PendingUpdate,
+    ReleaseUpdateCandidate,
+    StartupUpdateStatus,
+    UpdateBusyError,
+    UpdateError,
+    has_other_installer_instance,
+    inspect_startup_update,
+    is_installer_managed_build,
+    launch_staged_installer_update,
+    mark_installer_launch_failure,
+    parse_app_release_version,
+)
 from lolmanager.core.app_version import format_app_version_label, get_app_version
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.gui_preferences import (
@@ -80,6 +94,10 @@ LAST_MSG_MAX_CHARS = 2048
 MATCH_TIMER_TICK_MS = 250
 MATCH_STATS_POLL_MIN_SEC = 1.0
 PROC_USAGE_POLL_MS = 1000
+UPDATE_CHECK_DELAY_MS = 750
+UPDATE_EVENT_POLL_MS = 80
+UPDATE_CLEANUP_RETRY_MS = 2000
+UPDATE_CLEANUP_RETRY_ATTEMPTS = 30
 
 
 class _GuiWarningLogger:
@@ -150,6 +168,36 @@ def should_recover_cli_exit(
     if not league_running:
         return False
     return int(restart_count) < max(0, int(restart_limit))
+
+
+def should_apply_staged_update(
+    *,
+    in_game: bool,
+    automation_running: bool,
+    user_confirmed: bool,
+) -> bool:
+    """Only a confirmed update may close an otherwise idle GUI session."""
+    return bool(user_confirmed and not in_game and not automation_running)
+
+
+def should_prefer_release_candidate(
+    *,
+    pending: PendingUpdate | None,
+    candidate: ReleaseUpdateCandidate | None,
+    pending_failed: bool = False,
+) -> bool:
+    """Prefer a new Release, or re-stage a pending installer that failed validation."""
+    if candidate is None:
+        return False
+    if pending is None:
+        return True
+    if pending_failed:
+        return True
+    try:
+        pending_version = parse_app_release_version(pending.target_version).as_tuple()
+    except UpdateError:
+        return True
+    return candidate.version.as_tuple() > pending_version
 
 
 _USER32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -430,6 +478,16 @@ def _windows_create_no_window_flag() -> int:
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+def show_native_update_error(title: str, message: str) -> None:
+    """Report a post-mainloop installer spawn failure without a Tk root."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.user32.MessageBoxW(0, str(message), str(title), 0x00000010)
+    except Exception:
+        pass
+
+
 class LolManagerGui:
     def __init__(self, root: tk.Tk, *, auto_start: bool = True) -> None:
         self.root = root
@@ -487,6 +545,22 @@ class LolManagerGui:
         self._restart_after_exit = False
         self._unexpected_cli_restart_count = 0
 
+        self._updates_enabled = is_installer_managed_build()
+        self._update_service: Optional[InstallerUpdateService] = (
+            InstallerUpdateService() if self._updates_enabled else None
+        )
+        self._update_event_q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._update_candidate: Optional[ReleaseUpdateCandidate] = None
+        self._pending_update: Optional[PendingUpdate] = None
+        self._update_check_started = False
+        self._update_stage_started = False
+        self._update_apply_authorized = False
+        self._update_apply_requested = False
+        self._update_defer_reason: Optional[str] = None
+        self._update_pending_failed = False
+        self._update_cleanup_retry_scheduled = False
+        self._update_button_visible = False
+
         try:
             self._last_config_mtime_ns = int(self.config_path.stat().st_mtime_ns)
         except OSError:
@@ -523,6 +597,7 @@ class LolManagerGui:
         self.app_version_var = tk.StringVar(
             value=format_app_version_label(get_app_version())
         )
+        self.update_status_var = tk.StringVar(value="")
         self.role_key: Optional[str] = None
         self.role_var = tk.StringVar(value="미감지")
         self.continue_after_game_var = tk.BooleanVar(
@@ -657,6 +732,7 @@ class LolManagerGui:
         self._auto_ban_refresher.start()
 
         self._start_external_sync_worker()
+        self._initialize_update_lifecycle()
 
         try:
             self.root.after_idle(self._enforce_compact_root_size)
@@ -681,6 +757,416 @@ class LolManagerGui:
             self.root.after(0, self._refresh_role_setting)
         except Exception:
             pass
+
+    def _configure_update_button(
+        self,
+        *,
+        text: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> None:
+        button = getattr(self, "btn_update", None)
+        if button is None:
+            return
+        kwargs: dict[str, object] = {}
+        if text is not None:
+            kwargs["text"] = text
+        if state is not None:
+            kwargs["state"] = state
+        if kwargs:
+            try:
+                button.configure(**kwargs)
+            except Exception:
+                pass
+
+    def _set_update_button_visible(self, visible: bool) -> None:
+        """Pack the update action only when it represents a real user action."""
+        button = getattr(self, "btn_update", None)
+        if button is None:
+            return
+        want_visible = bool(visible)
+        current_visible = bool(getattr(self, "_update_button_visible", False))
+        if want_visible == current_visible:
+            return
+        try:
+            if want_visible:
+                button.pack(side=tk.LEFT, padx=(6, 0), before=self.chk_continue)
+            else:
+                button.pack_forget()
+        except Exception:
+            return
+        self._update_button_visible = want_visible
+
+    def _set_update_status(self, value: str) -> None:
+        try:
+            self.update_status_var.set(value)
+        except Exception:
+            pass
+
+    def _restore_pending_update_action(self) -> bool:
+        """Restore the local Apply/Retry action after a background check ends."""
+        if getattr(self, "_pending_update", None) is None:
+            return False
+        retry = bool(getattr(self, "_update_pending_failed", False))
+        self._set_update_status("Update 확인 필요" if retry else "Update 준비됨")
+        self._set_update_button_visible(True)
+        self._configure_update_button(
+            text="Update 재시도" if retry else "Update 적용",
+            state=tk.NORMAL,
+        )
+        return True
+
+    def _initialize_update_lifecycle(self) -> None:
+        if not bool(getattr(self, "_updates_enabled", False)):
+            return
+        try:
+            startup = inspect_startup_update()
+        except Exception as exc:
+            startup = StartupUpdateStatus("failed", f"업데이트 상태 확인 실패: {exc}")
+        self._handle_startup_update_status(startup)
+        try:
+            self.root.after(UPDATE_CHECK_DELAY_MS, self._start_update_check)
+        except Exception:
+            pass
+
+    def _handle_startup_update_status(self, status: StartupUpdateStatus) -> None:
+        if status.kind == "applied":
+            self._set_update_button_visible(False)
+            self._set_update_status("Update 설치 확인")
+            self._append_log(f"[Update] {status.message}\n")
+            if status.pending is not None:
+                self._schedule_applied_update_cleanup()
+            return
+        if status.kind == "pending":
+            self._pending_update = status.pending
+            self._update_pending_failed = False
+            self._set_update_status("Update 준비됨")
+            self._set_update_button_visible(True)
+            self._configure_update_button(text="Update 적용", state=tk.NORMAL)
+            self._append_log(f"[Update] {status.message} 앱 종료 또는 유휴 상태에서 적용할 수 있습니다.\n")
+            return
+        if status.kind == "failed":
+            self._pending_update = status.pending
+            self._update_pending_failed = status.pending is not None
+            self._set_update_status("Update 확인 필요")
+            if status.pending is not None:
+                self._set_update_button_visible(True)
+                self._configure_update_button(text="Update 재시도", state=tk.NORMAL)
+            else:
+                self._set_update_button_visible(False)
+            self._append_log(f"[Update] {status.message}\n")
+
+    def _schedule_applied_update_cleanup(self, *, attempt: int = 0) -> None:
+        if (
+            bool(getattr(self, "_closing", False))
+            or bool(getattr(self, "_update_cleanup_retry_scheduled", False))
+            or attempt >= UPDATE_CLEANUP_RETRY_ATTEMPTS
+        ):
+            return
+        self._update_cleanup_retry_scheduled = True
+        try:
+            self.root.after(
+                UPDATE_CLEANUP_RETRY_MS,
+                lambda: self._retry_applied_update_cleanup(attempt=attempt),
+            )
+        except Exception:
+            self._update_cleanup_retry_scheduled = False
+
+    def _retry_applied_update_cleanup(self, *, attempt: int) -> None:
+        self._update_cleanup_retry_scheduled = False
+        if bool(getattr(self, "_closing", False)):
+            return
+        try:
+            status = inspect_startup_update()
+        except Exception as exc:
+            self._append_log(f"[Update] 임시 installer 정리 확인 실패: {exc}\n")
+            return
+        if status.kind == "applied" and status.pending is not None:
+            self._schedule_applied_update_cleanup(attempt=attempt + 1)
+        elif status.kind == "applied":
+            self._append_log("[Update] 임시 installer 정리를 완료했습니다.\n")
+
+    def _start_update_check(self) -> None:
+        if (
+            not bool(getattr(self, "_updates_enabled", False))
+            or bool(getattr(self, "_closing", False))
+            or bool(getattr(self, "_update_check_started", False))
+        ):
+            return
+        service = getattr(self, "_update_service", None)
+        if service is None:
+            return
+        self._update_check_started = True
+        self._set_update_status("Update 확인 중")
+        if bool(getattr(self, "_update_button_visible", False)):
+            self._configure_update_button(text="Update 확인 중", state=tk.DISABLED)
+        threading.Thread(target=self._run_update_check, daemon=True).start()
+        self._schedule_update_event_poll()
+
+    def _run_update_check(self) -> None:
+        service = getattr(self, "_update_service", None)
+        if service is None:
+            return
+        try:
+            candidate = service.check_for_update(current_version=get_app_version())
+        except (UpdateError, UpdateBusyError) as exc:
+            self._update_event_q.put(("check_failed", str(exc)))
+        except Exception as exc:
+            self._update_event_q.put(("check_failed", f"예상하지 못한 오류: {exc}"))
+        else:
+            self._update_event_q.put(("check_finished", candidate))
+
+    def _on_update_clicked(self) -> None:
+        if bool(getattr(self, "_closing", False)):
+            return
+        pending = getattr(self, "_pending_update", None)
+        candidate = getattr(self, "_update_candidate", None)
+        if should_prefer_release_candidate(
+            pending=pending,
+            candidate=candidate,
+            pending_failed=bool(getattr(self, "_update_pending_failed", False)),
+        ):
+            if bool(getattr(self, "_update_stage_started", False)):
+                return
+            accepted = messagebox.askyesno(
+                "업데이트 다운로드",
+                f"LOLManager v{candidate.version.text} 업데이트를 다운로드하고 적용할까요?\n"
+                "다운로드 후 게임/자동화가 없을 때만 앱을 다시 시작합니다.",
+                parent=self.root,
+            )
+            if not accepted:
+                return
+            self._update_stage_started = True
+            self._update_apply_authorized = True
+            self._set_update_status("Update 다운로드 중")
+            self._configure_update_button(text="Update 다운로드 중", state=tk.DISABLED)
+            threading.Thread(
+                target=self._run_update_stage,
+                args=(candidate,),
+                daemon=True,
+            ).start()
+            self._schedule_update_event_poll()
+            return
+        if pending is not None:
+            accepted = messagebox.askyesno(
+                "업데이트 적용",
+                f"LOLManager v{pending.target_version} 업데이트를 적용할까요?\n"
+                "게임 또는 자동화가 실행 중이면 앱 종료 뒤 적용됩니다.",
+                parent=self.root,
+            )
+            if not accepted:
+                return
+            self._update_apply_authorized = True
+            self._set_update_status("Update 적용 대기")
+            self._configure_update_button(text="Update 적용 대기", state=tk.DISABLED)
+            self._maybe_apply_staged_update(trigger="user-confirmed")
+            return
+        # A hidden action cannot become visible merely because a background
+        # check failed or found no release. A later available release or a
+        # retained ready/failed state supplies the actionable button instead.
+        self._set_update_button_visible(False)
+
+    def _run_update_stage(self, candidate: ReleaseUpdateCandidate) -> None:
+        service = getattr(self, "_update_service", None)
+        if service is None:
+            return
+        try:
+            staged = service.stage_update(candidate)
+        except (UpdateError, UpdateBusyError) as exc:
+            self._update_event_q.put(("stage_failed", str(exc)))
+        except Exception as exc:
+            self._update_event_q.put(("stage_failed", f"예상하지 못한 오류: {exc}"))
+        else:
+            self._update_event_q.put(("stage_finished", staged))
+
+    def _schedule_update_event_poll(self) -> None:
+        try:
+            self.root.after(UPDATE_EVENT_POLL_MS, self._poll_update_events)
+        except Exception:
+            pass
+
+    def _poll_update_events(self) -> None:
+        if bool(getattr(self, "_closing", False)):
+            return
+        processed = 0
+        while processed < 20:
+            try:
+                kind, value = self._update_event_q.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+            if kind == "check_finished":
+                self._update_check_started = False
+                candidate = value if isinstance(value, ReleaseUpdateCandidate) else None
+                self._update_candidate = candidate
+                if candidate is None:
+                    if not self._restore_pending_update_action():
+                        self._set_update_status("Update 최신")
+                        self._set_update_button_visible(False)
+                    continue
+                self._set_update_status(f"Update v{candidate.version.text}")
+                self._set_update_button_visible(True)
+                self._configure_update_button(
+                    text=f"Update v{candidate.version.text}", state=tk.NORMAL
+                )
+                self._append_log(
+                    f"[Update] v{candidate.version.text} installer 업데이트를 찾았습니다.\n"
+                )
+            elif kind == "check_failed":
+                self._update_check_started = False
+                if not self._restore_pending_update_action():
+                    self._set_update_status("Update 확인 실패")
+                    self._set_update_button_visible(False)
+                self._append_log(f"[Update] 확인 실패: {value}\n")
+            elif kind == "stage_finished":
+                self._update_stage_started = False
+                staged_pending = getattr(value, "pending", None)
+                if not isinstance(staged_pending, PendingUpdate):
+                    self._set_update_status("Update 다운로드 실패")
+                    candidate = getattr(self, "_update_candidate", None)
+                    self._set_update_button_visible(
+                        isinstance(candidate, ReleaseUpdateCandidate)
+                    )
+                    if isinstance(candidate, ReleaseUpdateCandidate):
+                        self._configure_update_button(
+                            text=f"Update v{candidate.version.text}", state=tk.NORMAL
+                        )
+                    continue
+                self._pending_update = staged_pending
+                self._update_candidate = None
+                self._update_pending_failed = False
+                self._set_update_status("Update 준비됨")
+                self._set_update_button_visible(True)
+                self._configure_update_button(text="Update 적용 대기", state=tk.DISABLED)
+                self._append_log(
+                    f"[Update] v{staged_pending.target_version} installer 검증 및 스테이징 완료.\n"
+                )
+                self._maybe_apply_staged_update(trigger="download-complete")
+            elif kind == "stage_failed":
+                self._update_stage_started = False
+                self._update_apply_authorized = False
+                self._set_update_status("Update 다운로드 실패")
+                candidate = getattr(self, "_update_candidate", None)
+                text = (
+                    f"Update v{candidate.version.text}"
+                    if isinstance(candidate, ReleaseUpdateCandidate)
+                    else "Update 재시도"
+                )
+                self._set_update_button_visible(
+                    isinstance(candidate, ReleaseUpdateCandidate)
+                )
+                self._configure_update_button(text=text, state=tk.NORMAL)
+                self._append_log(f"[Update] 다운로드 실패: {value}\n")
+                try:
+                    messagebox.showerror("업데이트 실패", str(value), parent=self.root)
+                except Exception:
+                    pass
+
+        if bool(getattr(self, "_update_check_started", False)) or bool(
+            getattr(self, "_update_stage_started", False)
+        ):
+            self._schedule_update_event_poll()
+
+    def _staged_update_is_idle(self) -> tuple[bool, str]:
+        snapshot = getattr(self, "_external_sync_last", None)
+        if not isinstance(snapshot, _ExternalSyncSnapshot):
+            return (False, "외부 상태 확인 대기")
+        proc = getattr(self, "proc", None)
+        try:
+            automation_running = bool(proc is not None and proc.poll() is None)
+        except Exception:
+            automation_running = True
+        if bool(snapshot.in_game):
+            return (False, "게임 종료 또는 앱 종료 시 적용")
+        if automation_running:
+            return (False, "자동화 종료 또는 앱 종료 시 적용")
+        other_instance, reason = self._other_installer_instance_status()
+        if other_instance:
+            return (False, reason)
+        return (True, "")
+
+    @staticmethod
+    def _other_installer_instance_status() -> tuple[bool, str]:
+        try:
+            if has_other_installer_instance():
+                return (True, "다른 LOLManager 종료 또는 앱 종료 시 적용")
+        except UpdateError:
+            return (True, "다른 LOLManager 상태 확인 대기")
+        return (False, "")
+
+    def _maybe_apply_staged_update(self, *, trigger: str) -> bool:
+        pending = getattr(self, "_pending_update", None)
+        if pending is None or not bool(getattr(self, "_update_apply_authorized", False)):
+            return False
+        # A newer installer is still downloading.  Keep any previous staged
+        # version inert until this user-confirmed staging attempt resolves.
+        if bool(getattr(self, "_update_stage_started", False)):
+            return False
+        if bool(getattr(self, "_update_apply_requested", False)):
+            return True
+        idle, reason = self._staged_update_is_idle()
+        if not idle:
+            self._set_update_status("Update 적용 대기")
+            if reason != getattr(self, "_update_defer_reason", None):
+                self._append_log(f"[Update] {reason}.\n")
+                self._update_defer_reason = reason
+            return False
+        self._update_defer_reason = None
+        if not should_apply_staged_update(
+            in_game=False,
+            automation_running=False,
+            user_confirmed=True,
+        ):
+            return False
+        return self._begin_staged_update_application(
+            trigger=trigger,
+            close_after_launch=True,
+        )
+
+    def _begin_staged_update_application(
+        self,
+        *,
+        trigger: str,
+        close_after_launch: bool,
+    ) -> bool:
+        pending = getattr(self, "_pending_update", None)
+        if pending is None or bool(getattr(self, "_update_apply_requested", False)):
+            return bool(getattr(self, "_update_apply_requested", False))
+        self._update_apply_requested = True
+        self._set_update_status("Update 적용 중")
+        self._set_update_button_visible(True)
+        self._configure_update_button(text="Update 적용 중", state=tk.DISABLED)
+        self._append_log(
+            f"[Update] v{pending.target_version} installer 적용 예약(trigger={trigger}).\n"
+        )
+        if close_after_launch:
+            try:
+                self.root.after_idle(self._on_close)
+            except Exception:
+                self._on_close()
+        return True
+
+    def launch_staged_update_after_mainloop(self) -> bool:
+        """Use the exiting LOLManager bootstrap to start Inno Setup directly."""
+        pending = getattr(self, "_pending_update", None)
+        if pending is None or not bool(getattr(self, "_update_apply_requested", False)):
+            return False
+        try:
+            launch_staged_installer_update()
+        except UpdateError as exc:
+            mark_installer_launch_failure(message=str(exc))
+            logging.getLogger("lolmanager").error(
+                "업데이트 installer 시작 실패: %s", exc
+            )
+            show_native_update_error(
+                "LOLManager 업데이트",
+                f"업데이트 installer를 시작하지 못했습니다.\n\n{exc}\n\n"
+                "스테이징된 installer와 로그를 보존했으므로 다음 시작에서 재시도할 수 있습니다.",
+            )
+            return False
+        logging.getLogger("lolmanager").info(
+            "업데이트 installer 시작: v%s", pending.target_version
+        )
+        return True
 
     def _show_root_noactivate(self) -> None:
         if os.name != "nt":
@@ -914,6 +1400,14 @@ class LolManagerGui:
         )
         self.btn_config = ttk.Button(btns, text="Config", command=self.open_config)
         self.btn_log = ttk.Button(btns, text="Log", command=self.toggle_log_window)
+        self.btn_update: Optional[ttk.Button] = None
+        if self._updates_enabled:
+            self.btn_update = ttk.Button(
+                btns,
+                text="Update 확인 중",
+                command=self._on_update_clicked,
+                state=tk.DISABLED,
+            )
         self.chk_continue = ttk.Checkbutton(
             btns,
             text="다음 게임 계속",
@@ -925,6 +1419,8 @@ class LolManagerGui:
         self.btn_stop.pack(side=tk.LEFT, padx=6)
         self.btn_config.pack(side=tk.LEFT, padx=6)
         self.btn_log.pack(side=tk.LEFT)
+        # btn_update is deliberately left unpacked until an update exists or a
+        # ready/failed local update state is actionable.
         self.chk_continue.pack(side=tk.LEFT, padx=(14, 0))
 
         ttk.Separator(root).pack(side=tk.TOP, fill=tk.X, pady=(10, 8))
@@ -934,6 +1430,13 @@ class LolManagerGui:
 
         self.lbl_last = ttk.Label(last, textvariable=self.last_msg_var, anchor="w")
         self.lbl_last.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if self._updates_enabled:
+            ttk.Label(
+                last,
+                textvariable=self.update_status_var,
+                foreground="#555555",
+                anchor="e",
+            ).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Label(
             last,
             textvariable=self.app_version_var,
@@ -2069,6 +2572,15 @@ class LolManagerGui:
             "[GUI] Automation process ended "
             f"(exit_code={code}, reason={reason}, league_running={league_running}).\n"
         )
+        if bool(getattr(self, "_update_apply_authorized", False)):
+            try:
+                self.root.after_idle(
+                    lambda: self._maybe_apply_staged_update(
+                        trigger="automation-exit"
+                    )
+                )
+            except Exception:
+                pass
 
     def _poll_log_queue(self) -> None:
         self._in_log_poll = True
@@ -2376,6 +2888,10 @@ class LolManagerGui:
 
         in_game = bool(state.in_game)
         league_running = bool(state.league_running)
+
+        if not in_game and bool(getattr(self, "_update_apply_authorized", False)):
+            if self._maybe_apply_staged_update(trigger="external-idle"):
+                return
 
         # `is_game_client_active()` can remain true briefly after LeagueClient has
         # exited.  The process guard is authoritative for our shutdown sequence.
@@ -2711,6 +3227,19 @@ class LolManagerGui:
     def _on_close(self, *, close_opgg: bool = False) -> None:
         if bool(getattr(self, "_closing", False)):
             return
+        if bool(getattr(self, "_update_apply_authorized", False)) and not bool(
+            getattr(self, "_update_apply_requested", False)
+        ) and not bool(getattr(self, "_update_stage_started", False)):
+            other_instance, reason = self._other_installer_instance_status()
+            if other_instance:
+                self._update_defer_reason = reason
+                self._set_update_status("Update 적용 대기")
+                self._append_log(f"[Update] {reason}.\n")
+            else:
+                self._begin_staged_update_application(
+                    trigger="app-close",
+                    close_after_launch=False,
+                )
         self._closing = True
         try:
             refresher = getattr(self, "_auto_ban_refresher", None)
@@ -2779,13 +3308,14 @@ def main() -> None:
     _apply_readable_fonts(root)
     _apply_window_icon(root)
 
-    LolManagerGui(root, auto_start=True)
+    app = LolManagerGui(root, auto_start=True)
     try:
         root.deiconify()
         root.lift()
     except Exception:
         pass
     root.mainloop()
+    app.launch_staged_update_after_mainloop()
 
 
 if __name__ == "__main__":
