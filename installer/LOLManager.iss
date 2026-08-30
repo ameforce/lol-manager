@@ -30,7 +30,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
-CloseApplications=yes
+CloseApplications=no
 RestartApplications=no
 CloseApplicationsFilter={#MyAppExeName}
 VersionInfoVersion={#MyAppVersionQuad}
@@ -53,12 +53,146 @@ Name: "{userprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeNam
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName} 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName} 실행"; Flags: nowait postinstall skipifsilent; Check: ShouldLaunchLOLManager
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: ShouldLaunchLOLManager
+
+[InstallDelete]
+Type: files; Name: "{app}\.lolmanager-installer-managed"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
 
 [Code]
+const
+  SYNCHRONIZE = $00100000;
+  WAIT_OBJECT_0 = $00000000;
+  WAIT_TIMEOUT = $00000102;
+
+function OpenProcess(dwDesiredAccess: LongWord; bInheritHandle: Boolean; dwProcessId: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(hHandle: THandle; dwMilliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(hObject: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function UpdateCommandLineValue(const Name: String): String;
+var
+  Index: Integer;
+  Parameter: String;
+  Prefix: String;
+begin
+  Result := '';
+  Prefix := '/' + Name + '=';
+  for Index := 1 to ParamCount do
+  begin
+    Parameter := ParamStr(Index);
+    if CompareText(Copy(Parameter, 1, Length(Prefix)), Prefix) = 0 then
+    begin
+      Result := Copy(Parameter, Length(Prefix) + 1, Length(Parameter));
+      Exit;
+    end;
+  end;
+end;
+
+function HasExplicitRelaunchRequest(): Boolean;
+begin
+  Result := CompareText(ExpandConstant('{param:LOLMANAGER_RELAUNCH|0}'), '1') = 0;
+end;
+
+function ShouldLaunchLOLManager(): Boolean;
+begin
+  { Interactive installs may use the post-install launch option. A silent
+    install launches only when the direct updater explicitly asks for it. }
+  Result := (not WizardSilent()) or HasExplicitRelaunchRequest();
+end;
+
+function UpdateBootstrapWaitPid(): Integer;
+var
+  RawPid: String;
+begin
+  Result := 0;
+  RawPid := UpdateCommandLineValue('LOLMANAGERWAITPID');
+  if RawPid <> '' then
+    Result := StrToIntDef(RawPid, 0);
+end;
+
+function IsUpdaterInstallMode(): Boolean;
+begin
+  Result := HasExplicitRelaunchRequest() and (UpdateBootstrapWaitPid() > 0);
+end;
+
+function WaitForUpdateBootstrapExit(): String;
+var
+  ProcessId: Integer;
+  ProcessHandle: THandle;
+  WaitResult: LongWord;
+begin
+  Result := '';
+  ProcessId := UpdateBootstrapWaitPid();
+  if ProcessId <= 0 then
+  begin
+    Result := '업데이트 모드의 원본 LOLManager PID가 올바르지 않습니다.';
+    Exit;
+  end;
+
+  ProcessHandle := OpenProcess(SYNCHRONIZE, False, ProcessId);
+  if ProcessHandle = 0 then
+    Exit;
+  try
+    WaitResult := WaitForSingleObject(ProcessHandle, 60000);
+    if WaitResult = WAIT_TIMEOUT then
+      Result := '원본 LOLManager 종료 대기 시간이 초과되었습니다.'
+    else if WaitResult <> WAIT_OBJECT_0 then
+      Result := '원본 LOLManager 종료 상태를 확인하지 못했습니다.';
+  finally
+    CloseHandle(ProcessHandle);
+  end;
+end;
+
+function RequireNoResidualLOLManagerProcess(): String;
+var
+  ResultCode: Integer;
+  Output: TExecOutput;
+  TaskListPath: String;
+  Index: Integer;
+begin
+  Result := '';
+  TaskListPath := ExpandConstant('{sys}\tasklist.exe');
+  if not ExecAndCaptureOutput(
+    TaskListPath,
+    '/FI "IMAGENAME eq {#MyAppExeName}" /FO CSV /NH',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode,
+    Output
+  ) then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태를 확인하지 못했습니다.';
+    Exit;
+  end;
+  if ResultCode <> 0 then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태 확인 명령이 실패했습니다.';
+    Exit;
+  end;
+  if Output.Error then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태 출력을 완전히 읽지 못했습니다.';
+    Exit;
+  end;
+  for Index := 0 to GetArrayLength(Output.StdOut) - 1 do
+  begin
+    if Pos('"{#MyAppExeName}"', Output.StdOut[Index]) > 0 then
+    begin
+      { Updater mode never terminates an unknown residual GUI, automation, or
+        in-game instance. Abort safely so its ready state can be retried. }
+      Result := '다른 LOLManager가 아직 실행 중입니다. 종료 후 업데이트를 다시 시도하세요.';
+      Exit;
+    end;
+  end;
+end;
+
 function StopRunningLOLManager(): String;
 var
   ResultCode: Integer;
@@ -93,6 +227,16 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  if IsUpdaterInstallMode() then
+  begin
+    Result := WaitForUpdateBootstrapExit();
+    if Result <> '' then
+      Exit;
+    { Do not call StopRunningLOLManager here. The updater must never forcibly
+      terminate a residual automation or in-game process after its PID exits. }
+    Result := RequireNoResidualLOLManagerProcess();
+    Exit;
+  end;
   Result := StopRunningLOLManager();
 end;
 
