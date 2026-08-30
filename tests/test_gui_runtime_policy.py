@@ -5,8 +5,8 @@ import queue
 import sys
 import threading
 import time
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,13 +14,20 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from lolmanager.core.auto_updater import (
+    PendingUpdate,
+    ReleaseUpdateCandidate,
+    ReleaseVersion,
+)
 from lolmanager.gui.app_gui import (
     EXTERNAL_SYNC_MS,
-    _ExternalSyncSnapshot,
     LolManagerGui,
+    _ExternalSyncSnapshot,
     external_sync_delay_ms,
     normalize_process_cpu_percent,
+    should_apply_staged_update,
     should_auto_iconify_ingame,
+    should_prefer_release_candidate,
     should_recover_cli_exit,
 )
 
@@ -212,6 +219,77 @@ class GuiRuntimePolicyTests(unittest.TestCase):
                 restart_limit=1,
             )
         )
+
+    def test_staged_update_applies_only_when_user_confirmed_and_idle(self) -> None:
+        self.assertTrue(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=False,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=True,
+                automation_running=False,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=True,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=False,
+                user_confirmed=False,
+            )
+        )
+
+    def test_newer_release_candidate_supersedes_an_older_staged_installer(self) -> None:
+        pending = PendingUpdate(
+            target_version="1.1.26",
+            installer_name="LOLManager-Setup-v1.1.26.exe",
+            installer_path="C:/updates/1.1.26/LOLManager-Setup-v1.1.26.exe",
+            sha256="0" * 64,
+            github_digest=None,
+            created_at_unix=1.0,
+        )
+        older = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 25),
+            installer_name="LOLManager-Setup-v1.1.25.exe",
+            installer_url="https://example.test/old.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
+        newer = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 27),
+            installer_name="LOLManager-Setup-v1.1.27.exe",
+            installer_url="https://example.test/new.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
+
+        self.assertFalse(should_prefer_release_candidate(pending=pending, candidate=older))
+        self.assertTrue(should_prefer_release_candidate(pending=pending, candidate=newer))
+
+    def test_update_installer_launch_is_deferred_until_after_mainloop_shutdown(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_requested = True
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.launch_staged_installer_update"
+        ) as launch:
+            self.assertTrue(gui.launch_staged_update_after_mainloop())
+
+        launch.assert_called_once()
 
     def test_opgg_shutdown_hook_is_only_in_client_auto_exit_branch(self) -> None:
         sync_source = inspect.getsource(LolManagerGui._sync_external_state)

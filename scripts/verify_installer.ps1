@@ -60,6 +60,8 @@ $settingsMarker = Join-Path $settingsDir 'installer-preserve-check.txt'
 $backupDir = Join-Path $verificationRootFull 'shortcut-backup'
 $installLog1 = Join-Path $verificationRootFull 'install-first.log'
 $installLog2 = Join-Path $verificationRootFull 'install-reinstall.log'
+$updateInstallLog = Join-Path $verificationRootFull 'install-update-mode.log'
+$updateResultPath = Join-Path $verificationRootFull 'update-result.json'
 $uninstallLog = Join-Path $verificationRootFull 'uninstall.log'
 
 $desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
@@ -155,6 +157,76 @@ try {
     Assert-ShortcutTarget $desktopShortcut $installedExe
     Assert-ShortcutTarget $startShortcut $installedExe
 
+    Start-Process -FilePath $installedExe | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $updateWindowProcess = $null
+    do {
+        Start-Sleep -Milliseconds 250
+        $updateWindowProcess = Get-Process -Name 'LOLManager' -ErrorAction SilentlyContinue |
+            Where-Object {
+                [void]$_.Refresh()
+                $_.MainWindowHandle -ne 0
+            } |
+            Select-Object -First 1
+    } while (
+        (-not $updateWindowProcess -or $updateWindowProcess.MainWindowHandle -eq 0) -and
+        [DateTime]::UtcNow -lt $deadline
+    )
+    if (-not $updateWindowProcess -or $updateWindowProcess.MainWindowHandle -eq 0) {
+        throw '업데이트 모드 검증용 GUI 창이 30초 안에 나타나지 않았습니다.'
+    }
+
+    $updateProcess = Start-Process -FilePath $setupPath -ArgumentList @(
+        '/VERYSILENT',
+        '/SUPPRESSMSGBOXES',
+        '/NORESTART',
+        '/LOLMANAGERUPDATEMODE',
+        "/LOLMANAGERWAITPID=$($updateWindowProcess.Id)",
+        "/LOLMANAGERRESULT=$updateResultPath",
+        "/LOLMANAGERTARGETVERSION=$Version",
+        "/LOG=$updateInstallLog"
+    ) -PassThru
+    Start-Sleep -Milliseconds 750
+    $updateProcess.Refresh()
+    if ($updateProcess.HasExited) {
+        throw '업데이트 installer가 원본 LOLManager 종료 전에 대기하지 않았습니다.'
+    }
+    Stop-Process -Id $updateWindowProcess.Id -Force
+    if (-not $updateProcess.WaitForExit(60000)) {
+        Stop-Process -Id $updateProcess.Id -Force -ErrorAction SilentlyContinue
+        throw '업데이트 installer가 원본 LOLManager 종료 뒤 60초 안에 완료되지 않았습니다.'
+    }
+    if ($updateProcess.ExitCode -ne 0) {
+        throw "업데이트 installer 실행 실패(exit=$($updateProcess.ExitCode)): $updateInstallLog"
+    }
+    if (-not (Test-Path -LiteralPath $updateResultPath -PathType Leaf)) {
+        throw '업데이트 installer 성공 결과 파일이 없습니다.'
+    }
+    $updateResult = Get-Content -LiteralPath $updateResultPath -Raw | ConvertFrom-Json
+    if ($updateResult.status -ne 'success' -or $updateResult.target_version -ne $Version) {
+        throw '업데이트 installer 성공 결과가 올바르지 않습니다.'
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $relaunchedProcess = $null
+    do {
+        Start-Sleep -Milliseconds 250
+        $relaunchedProcess = Get-Process -Name 'LOLManager' -ErrorAction SilentlyContinue |
+            Where-Object {
+                [void]$_.Refresh()
+                ($_.Id -ne $updateWindowProcess.Id) -and
+                ($_.MainWindowHandle -ne 0)
+            } |
+            Select-Object -First 1
+    } while (
+        (-not $relaunchedProcess -or $relaunchedProcess.MainWindowHandle -eq 0) -and
+        [DateTime]::UtcNow -lt $deadline
+    )
+    if (-not $relaunchedProcess -or $relaunchedProcess.MainWindowHandle -eq 0) {
+        throw '업데이트 installer가 성공 뒤 LOLManager를 다시 시작하지 않았습니다.'
+    }
+    Stop-Process -Id $relaunchedProcess.Id -Force
+
     $uninstaller = Join-Path $installDir 'unins000.exe'
     if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
         throw "uninstaller가 없습니다: $uninstaller"
@@ -190,6 +262,7 @@ try {
     Write-Host "[VERIFY] file version: $installedVersion"
     Write-Host '[VERIFY] shortcuts: desktop + Start Menu'
     Write-Host '[VERIFY] reinstall closed running app: yes'
+    Write-Host '[VERIFY] update mode waited for bootstrap exit and relaunched: yes'
     Write-Host '[VERIFY] settings preserved after reinstall/uninstall: yes'
 }
 finally {

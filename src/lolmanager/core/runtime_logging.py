@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from lolmanager.platform.paths import project_root
+from lolmanager.platform.paths import project_root, user_data_dir
+from lolmanager.platform.runtime import is_frozen
 
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
@@ -55,6 +56,8 @@ def redact_sensitive(value: object) -> str:
 
 
 def runtime_log_dir() -> Path:
+    if is_frozen():
+        return user_data_dir() / "logs"
     return project_root() / "logs"
 
 

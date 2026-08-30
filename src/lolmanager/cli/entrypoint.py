@@ -5131,6 +5131,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         cli_main(cli_argv)
         return
 
+    configure_runtime_logging()
+    install_exception_logger()
     logger = logging.getLogger("lolmanager")
     try:
         ensure_external_apps_running_once(logger=logger)
