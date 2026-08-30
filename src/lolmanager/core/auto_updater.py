@@ -1064,12 +1064,18 @@ def launch_staged_installer_update(
             raise UpdateError("업데이트 상태를 ready로 기록하지 못했습니다.") from exc
     pid = installer_bootstrap_wait_pid() if wait_for_pid is None else int(wait_for_pid)
     request = _build_update_apply_request(ready, wait_for_pid=pid)
+    installer_env = os.environ.copy()
+    # Inno Setup launches the updated onefile executable as its child. Without
+    # an explicit reset, that executable inherits the old PyInstaller process
+    # markers through Inno and mistakes itself for a worker of Inno Setup.
+    installer_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     try:
         popen(
             list(request.command),
             cwd=str(Path(ready.installer_path).parent),
             close_fds=True,
             creationflags=_windows_detached_flags(),
+            env=installer_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError("silent installer 업데이트를 시작하지 못했습니다.") from exc
