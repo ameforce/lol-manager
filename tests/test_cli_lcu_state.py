@@ -13,6 +13,8 @@ from requests import Timeout
 
 from lolmanager.cli import entrypoint
 from lolmanager.core.lcu_client import (
+    GameMode,
+    GameModeSnapshot,
     LcuDecision,
     LcuLoopAction,
     PHASE_CHAMP_SELECT,
@@ -637,6 +639,28 @@ class _FakeCliChampSelectLcu:
         if len(self.select_calls) == 1:
             return LcuDecision(LcuOutcome.SUCCESS, reason="prepick accepted")
         return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ReadTimeout")
+
+
+class _FakeCliAramLcu(_FakeCliChampSelectLcu):
+    def get_game_mode_decision(self) -> LcuDecision:
+        return LcuDecision(
+            LcuOutcome.SUCCESS,
+            value=GameModeSnapshot(
+                mode=GameMode.ARAM,
+                queue_id=450,
+                map_id=12,
+                raw_game_mode="ARAM",
+                is_ranked=False,
+            ),
+        )
+
+    def get_local_player_position(self) -> LcuDecision:
+        raise AssertionError("ARAM must not enter ranked role detection")
+
+    def select_champ_select_champion_decision(
+        self, champion_name: object, *, action_type: str, complete: bool = False
+    ) -> LcuDecision:
+        raise AssertionError("ARAM must not issue ranked pick or ban actions")
 
 
 class _FakeReserveFallbackLcu:
@@ -1277,6 +1301,59 @@ class CliLcuStateTests(unittest.TestCase):
         search.assert_not_called()
         click_relative.assert_not_called()
         click_screen.assert_not_called()
+
+    def test_cli_main_aram_skips_ranked_role_and_pick_actions(self) -> None:
+        fake_lcu = _FakeCliAramLcu()
+        marker = "aram game-start monitor reached"
+
+        with (
+            mock.patch.object(
+                entrypoint, "configure_runtime_logging", return_value=Path("runtime.log")
+            ),
+            mock.patch.object(entrypoint, "install_exception_logger"),
+            mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint,
+                "LeagueClientExitGuard",
+                return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
+            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(
+                entrypoint,
+                "default_counter_cache_path",
+                return_value=Path("counter-cache.json"),
+            ),
+            mock.patch.object(
+                entrypoint, "select_image_set", return_value=Path("images/1280")
+            ),
+            mock.patch.object(entrypoint.Path, "exists", return_value=True),
+            mock.patch.object(
+                entrypoint,
+                "find_league_window_rect",
+                return_value=(0, 0, 1280, 720),
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_dismiss_blocking_modal_lcu_attempt",
+                return_value=entrypoint.LcuActionAttempt(
+                    False, LcuLoopAction.FALLBACK_IMAGE, "not_found"
+                ),
+            ),
+            mock.patch.object(
+                entrypoint,
+                "_wait_for_game_start_and_monitor",
+                side_effect=RuntimeError(marker),
+            ) as wait_for_game,
+            self.assertRaisesRegex(RuntimeError, marker),
+        ):
+            entrypoint.cli_main([])
+
+        self.assertEqual(fake_lcu.position_calls, 0)
+        self.assertEqual(fake_lcu.select_calls, [])
+        wait_for_game.assert_called_once()
+        self.assertIs(wait_for_game.call_args.kwargs["lcu"], fake_lcu)
 
     def test_cli_main_reserve_pick_when_primary_lcu_action_rejected(
         self,
@@ -4087,6 +4164,56 @@ class CliLcuStateTests(unittest.TestCase):
             entrypoint.RUNTIME_STATE["client_state"],
             entrypoint.ClientState.WAIT_GAME_START,
         )
+
+    def test_passive_champ_select_reaches_ingame_monitor(self) -> None:
+        logger = logging.getLogger("lolmanager-test-cli-lcu")
+        fake = _FakePhaseDecisionSequenceLcu(
+            [
+                LcuDecision(LcuOutcome.SUCCESS, value=PHASE_CHAMP_SELECT),
+                LcuDecision(LcuOutcome.SUCCESS, value=PHASE_IN_PROGRESS),
+            ]
+        )
+        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.PREPICK
+
+        with (
+            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(
+                entrypoint, "monitor_ingame_and_postgame", return_value=False
+            ) as monitor,
+            mock.patch.object(
+                entrypoint,
+                "_visible_rect_for_image_scan",
+                return_value=(0, 0, 1280, 720),
+            ),
+            mock.patch.object(entrypoint, "try_pick_popups") as pick_popups,
+            mock.patch.object(entrypoint, "search_and_act", return_value=False),
+            mock.patch.object(entrypoint.time, "sleep"),
+        ):
+            result = entrypoint._wait_for_game_start_and_monitor(
+                lcu=cast(Any, fake),
+                tpl_end_next=Path("end_next-button.png"),
+                tpl_end_one_more=Path("end_one-more-button.png"),
+                tpl_find_match=Path("lobby_find-match-button.png"),
+                tpl_finding_match=Path("lobby_finding-match-text.png"),
+                tpl_accept=Path("lobby_accept-button.png"),
+                tpl_confirm_templates=[Path("client_confirm-button.png")],
+                tpl_prepick=Path("prepick_search-text.png"),
+                tpl_pick_decline=Path("pick_decline-button.png"),
+                available_roles=[],
+                threshold=0.85,
+                confirm_check_interval=0.2,
+                interval_sec=1.0,
+                logger=logger,
+                continue_after_game=False,
+                passive_champ_select=True,
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(
+            entrypoint.RUNTIME_STATE["client_state"], entrypoint.ClientState.INGAME
+        )
+        monitor.assert_called_once()
+        pick_popups.assert_not_called()
 
     def test_ui_action_classification_marks_unverified_image_paths(self) -> None:
         self.assertEqual(
