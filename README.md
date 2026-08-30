@@ -184,12 +184,12 @@ installer는 `%LOCALAPPDATA%\Programs\LOLManager`에 사용자 권한으로 설�
 
 ## 설치형 자동 업데이트
 
-Inno Setup으로 설치된 frozen `LOLManager.exe`만 시작 뒤 백그라운드에서 stable GitHub Release를 확인합니다. `uv run` 등의 소스 실행과 portable EXE는 업데이트 확인·다운로드 대상이 아닙니다.
+Inno Setup의 HKCU AppId 설치 기록에서 `InstallLocation`을 읽어, 그 경로의 frozen `LOLManager.exe`와 내장 `FileVersion`이 현재 `X.Y.Z.0`과 정확히 일치할 때만 시작 뒤 백그라운드에서 stable GitHub Release를 확인합니다. `uv run` 등의 소스 실행과 portable EXE는 업데이트 확인·다운로드 대상이 아닙니다.
 
-- 업데이트는 정확히 `LOLManager-Setup-vX.Y.Z.exe`와 같은 Release의 `SHA256SUMS.txt`만 사용합니다. 파일은 크기 제한을 둔 스트리밍 다운로드 후 SHA-256으로 검증하고, GitHub가 asset digest를 제공하면 그 값도 함께 확인합니다.
-- 사용자 확인 뒤 installer는 `%APPDATA%\LOLManager\updates`에 원자적으로 스테이징됩니다. 최신 버전 여부와 이전 적용 결과는 다음 시작 때 다시 확인합니다.
+- 업데이트는 정확히 `LOLManager-Setup-vX.Y.Z.exe`와 같은 Release의 `SHA256SUMS.txt`만 사용합니다. 승인된 GitHub HTTPS host에서만 받아 최대 300 MiB까지 스트리밍 다운로드 후 SHA-256으로 검증하고, GitHub가 asset digest를 제공하면 그 값도 함께 확인합니다.
+- 사용자 확인 뒤 installer는 `%LOCALAPPDATA%\LOLManager\updates\vX.Y.Z`에 원자적으로 스테이징됩니다. `pending-update.json`(schema 1)은 `ready` 또는 `launched` 상태, 대상 tag/version, installer SHA-256, installer 로그 경로를 보존합니다. 다음 시작은 `launched` 대상과 실제 내장 `FileVersion`을 비교해 성공 시에만 정리하고, 불일치 시 재시도 가능한 실패로 알립니다.
 - 게임, 자동화 또는 다른 LOLManager GUI 인스턴스가 실행 중이면 업데이트는 유휴 상태나 앱 종료까지 보류됩니다. `Stop`은 기존처럼 자동화 CLI만 종료하며, GUI의 정상 종료 경로가 installer 시작을 소유합니다.
-- 적용 시 별도 updater 프로그램이나 PowerShell helper를 만들지 않습니다. 종료 중인 `LOLManager.exe`가 silent installer를 직접 시작하고, installer는 원 프로세스 PID가 끝날 때까지 기다린 뒤 성공한 경우에만 새 `LOLManager.exe`를 다시 실행합니다. 실패하면 스테이징 상태와 installer 로그를 보존하여 다음 시작에서 재시도할 수 있습니다.
+- 적용 시 별도 updater 프로그램이나 PowerShell helper를 만들지 않습니다. 종료 중인 `LOLManager.exe`가 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=… /LOLMANAGER_RELAUNCH=1 /LOG=…` 계약으로 silent installer를 직접 시작합니다. one-file build에서는 동일한 설치 EXE인 PyInstaller bootstrap 부모 PID까지 기다린 뒤, installer가 알 수 없는 잔여 GUI·자동화·인게임 프로세스를 종료하지 않고 안전하게 중단합니다. 성공한 명시적 재시작에만 새 `LOLManager.exe`를 실행하며, 시작 실패는 native Windows 오류 대화상자를 표시하고 상태와 installer 로그를 보존하여 다음 시작에서 재시도할 수 있습니다.
 
 ## 바로가기
 

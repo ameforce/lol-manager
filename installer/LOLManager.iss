@@ -47,15 +47,14 @@ Name: "desktopicon"; Description: "바탕 화면 바로가기 만들기"; GroupD
 
 [Files]
 Source: "{#MySourceExe}"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
-Source: "installer-managed.marker"; DestDir: "{app}"; DestName: ".lolmanager-installer-managed"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName} 실행"; Flags: nowait postinstall skipifsilent; Check: not IsUpdaterInstallMode
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: IsUpdaterInstallMode
+Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName} 실행"; Flags: nowait postinstall skipifsilent; Check: ShouldLaunchLOLManager
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: ShouldLaunchLOLManager
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
@@ -72,21 +71,6 @@ function WaitForSingleObject(hHandle: THandle; dwMilliseconds: LongWord): LongWo
   external 'WaitForSingleObject@kernel32.dll stdcall';
 function CloseHandle(hObject: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
-
-function HasCommandLineSwitch(const Expected: String): Boolean;
-var
-  Index: Integer;
-begin
-  Result := False;
-  for Index := 1 to ParamCount do
-  begin
-    if CompareText(ParamStr(Index), Expected) = 0 then
-    begin
-      Result := True;
-      Exit;
-    end;
-  end;
-end;
 
 function UpdateCommandLineValue(const Name: String): String;
 var
@@ -107,9 +91,16 @@ begin
   end;
 end;
 
-function IsUpdaterInstallMode(): Boolean;
+function HasExplicitRelaunchRequest(): Boolean;
 begin
-  Result := HasCommandLineSwitch('/LOLMANAGERUPDATEMODE');
+  Result := CompareText(ExpandConstant('{param:LOLMANAGER_RELAUNCH|0}'), '1') = 0;
+end;
+
+function ShouldLaunchLOLManager(): Boolean;
+begin
+  { Interactive installs may use the post-install launch option. A silent
+    install launches only when the direct updater explicitly asks for it. }
+  Result := (not WizardSilent()) or HasExplicitRelaunchRequest();
 end;
 
 function UpdateBootstrapWaitPid(): Integer;
@@ -120,6 +111,11 @@ begin
   RawPid := UpdateCommandLineValue('LOLMANAGERWAITPID');
   if RawPid <> '' then
     Result := StrToIntDef(RawPid, 0);
+end;
+
+function IsUpdaterInstallMode(): Boolean;
+begin
+  Result := HasExplicitRelaunchRequest() and (UpdateBootstrapWaitPid() > 0);
 end;
 
 function WaitForUpdateBootstrapExit(): String;
@@ -150,23 +146,48 @@ begin
   end;
 end;
 
-procedure WriteUpdateSuccessResult();
+function RequireNoResidualLOLManagerProcess(): String;
 var
-  ResultPath: String;
-  TargetVersion: String;
-  Payload: String;
+  ResultCode: Integer;
+  Output: TExecOutput;
+  TaskListPath: String;
+  Index: Integer;
 begin
-  if not IsUpdaterInstallMode() then
+  Result := '';
+  TaskListPath := ExpandConstant('{sys}\tasklist.exe');
+  if not ExecAndCaptureOutput(
+    TaskListPath,
+    '/FI "IMAGENAME eq {#MyAppExeName}" /FO CSV /NH',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode,
+    Output
+  ) then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태를 확인하지 못했습니다.';
     Exit;
-  ResultPath := UpdateCommandLineValue('LOLMANAGERRESULT');
-  TargetVersion := UpdateCommandLineValue('LOLMANAGERTARGETVERSION');
-  if (ResultPath = '') or (TargetVersion = '') then
+  end;
+  if ResultCode <> 0 then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태 확인 명령이 실패했습니다.';
     Exit;
-  Payload := '{"schema_version":1,"status":"success","target_version":"' +
-    TargetVersion +
-    '","message":"silent installer completed.","recorded_at_unix":0}' + #13#10;
-  if not SaveStringToFile(ResultPath, Payload, False) then
-    Log('업데이트 성공 결과를 저장하지 못했습니다: ' + ResultPath);
+  end;
+  if Output.Error then
+  begin
+    Result := '{#MyAppName} 잔여 프로세스 상태 출력을 완전히 읽지 못했습니다.';
+    Exit;
+  end;
+  for Index := 0 to GetArrayLength(Output.StdOut) - 1 do
+  begin
+    if Pos('"{#MyAppExeName}"', Output.StdOut[Index]) > 0 then
+    begin
+      { Updater mode never terminates an unknown residual GUI, automation, or
+        in-game instance. Abort safely so its ready state can be retried. }
+      Result := '다른 LOLManager가 아직 실행 중입니다. 종료 후 업데이트를 다시 시도하세요.';
+      Exit;
+    end;
+  end;
 end;
 
 function StopRunningLOLManager(): String;
@@ -208,19 +229,12 @@ begin
     Result := WaitForUpdateBootstrapExit();
     if Result <> '' then
       Exit;
-    { A second GUI may have opened after the initiating app checked for it.
-      Do not replace binaries until the normal installer process shutdown
-      policy has closed any residual LOLManager instance. }
-    Result := StopRunningLOLManager();
+    { Do not call StopRunningLOLManager here. The updater must never forcibly
+      terminate a residual automation or in-game process after its PID exits. }
+    Result := RequireNoResidualLOLManagerProcess();
     Exit;
   end;
   Result := StopRunningLOLManager();
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-    WriteUpdateSuccessResult();
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
