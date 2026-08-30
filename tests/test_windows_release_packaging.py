@@ -39,6 +39,10 @@ def test_inno_installer_update_mode_waits_for_bootstrap_and_relaunches_only_afte
     assert "Check: IsUpdaterInstallMode" in script
     assert "Flags: nowait skipifnotsilent" in script
     assert "WriteUpdateSuccessResult" in script
+    update_prepare = script[
+        script.index("function PrepareToInstall") : script.index("procedure CurStepChanged")
+    ]
+    assert "Result := StopRunningLOLManager();" in update_prepare
 
 
 def test_release_package_contains_no_separate_updater_or_powershell_helper() -> None:
@@ -82,5 +86,7 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "제거 후 설치 경로가 남아 있습니다." in script
     assert "LOLMANAGERUPDATEMODE" in script
     assert "업데이트 installer가 원본 LOLManager 종료 전에 대기하지 않았습니다." in script
-    assert "update mode waited for bootstrap exit and relaunched: yes" in script
+    assert "업데이트 모드 검증용 두 번째 GUI 창" in script
+    assert "다른 LOLManager.exe를 종료하지 못했습니다." in script
+    assert "update mode waited for bootstrap exit, closed residual GUI instances, and relaunched: yes" in script
     assert "settings preserved after reinstall/uninstall: yes" in script

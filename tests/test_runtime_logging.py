@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -125,6 +126,33 @@ class RuntimeLoggingTests(unittest.TestCase):
         self.assertNotIn("activity-secret-value", text)
         self.assertNotIn("join-secret-value", text)
         self.assertNotIn("token-value", text)
+
+    def test_runtime_logging_falls_back_when_log_file_cannot_open(self) -> None:
+        logger_name = "lolmanager-test-runtime-fallback"
+        logger = logging.getLogger(logger_name)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
+        old_propagate = logger.propagate
+        logger.propagate = False
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "runtime.log"
+            try:
+                with mock.patch(
+                    "lolmanager.core.runtime_logging.runtime_log_path",
+                    return_value=expected,
+                ), mock.patch(
+                    "lolmanager.core.runtime_logging.RotatingFileHandler",
+                    side_effect=OSError("read-only"),
+                ):
+                    path = configure_runtime_logging(logger_name=logger_name)
+            finally:
+                for handler in list(logger.handlers):
+                    logger.removeHandler(handler)
+                    handler.close()
+                logger.propagate = old_propagate
+
+            self.assertEqual(path, expected)
 
 
 if __name__ == "__main__":

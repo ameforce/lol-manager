@@ -188,7 +188,7 @@ Inno Setup으로 설치된 frozen `LOLManager.exe`만 시작 뒤 백그라운드
 
 - 업데이트는 정확히 `LOLManager-Setup-vX.Y.Z.exe`와 같은 Release의 `SHA256SUMS.txt`만 사용합니다. 파일은 크기 제한을 둔 스트리밍 다운로드 후 SHA-256으로 검증하고, GitHub가 asset digest를 제공하면 그 값도 함께 확인합니다.
 - 사용자 확인 뒤 installer는 `%APPDATA%\LOLManager\updates`에 원자적으로 스테이징됩니다. 최신 버전 여부와 이전 적용 결과는 다음 시작 때 다시 확인합니다.
-- 게임 또는 자동화가 실행 중이면 업데이트는 유휴 상태나 앱 종료까지 보류됩니다. `Stop`은 기존처럼 자동화 CLI만 종료하며, GUI의 정상 종료 경로가 installer 시작을 소유합니다.
+- 게임, 자동화 또는 다른 LOLManager GUI 인스턴스가 실행 중이면 업데이트는 유휴 상태나 앱 종료까지 보류됩니다. `Stop`은 기존처럼 자동화 CLI만 종료하며, GUI의 정상 종료 경로가 installer 시작을 소유합니다.
 - 적용 시 별도 updater 프로그램이나 PowerShell helper를 만들지 않습니다. 종료 중인 `LOLManager.exe`가 silent installer를 직접 시작하고, installer는 원 프로세스 PID가 끝날 때까지 기다린 뒤 성공한 경우에만 새 `LOLManager.exe`를 다시 실행합니다. 실패하면 스테이징 상태와 installer 로그를 보존하여 다음 시작에서 재시도할 수 있습니다.
 
 ## 바로가기

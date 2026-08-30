@@ -84,8 +84,6 @@ def configure_runtime_logging(
     logger_name: Optional[str] = None,
 ) -> Path:
     path = runtime_log_path(log_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     level = logging.DEBUG if debug else logging.INFO
     formatter = RedactingFormatter(LOG_FORMAT, LOG_DATE_FORMAT)
     logger = logging.getLogger(logger_name) if logger_name else logging.getLogger()
@@ -102,12 +100,19 @@ def configure_runtime_logging(
             handler.setFormatter(formatter)
 
     _remove_previous_runtime_handlers(logger)
-    file_handler = RotatingFileHandler(
-        path,
-        maxBytes=DEFAULT_MAX_BYTES,
-        backupCount=DEFAULT_BACKUP_COUNT,
-        encoding="utf-8",
-    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            path,
+            maxBytes=DEFAULT_MAX_BYTES,
+            backupCount=DEFAULT_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        # Logging must never prevent the CLI from reaching its GUI entrypoint
+        # when APPDATA is unavailable, read-only, or out of space.
+        logger.warning("런타임 로그 파일을 열 수 없어 콘솔 로그만 사용합니다: %s", exc)
+        return path
     setattr(file_handler, _RUNTIME_HANDLER_MARKER, True)
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)

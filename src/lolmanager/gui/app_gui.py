@@ -27,6 +27,7 @@ from lolmanager.core.auto_updater import (
     StartupUpdateStatus,
     UpdateBusyError,
     UpdateError,
+    has_other_installer_instance,
     inspect_startup_update,
     is_installer_managed_build,
     launch_staged_installer_update,
@@ -95,6 +96,8 @@ MATCH_STATS_POLL_MIN_SEC = 1.0
 PROC_USAGE_POLL_MS = 1000
 UPDATE_CHECK_DELAY_MS = 750
 UPDATE_EVENT_POLL_MS = 80
+UPDATE_CLEANUP_RETRY_MS = 2000
+UPDATE_CLEANUP_RETRY_ATTEMPTS = 30
 
 
 class _GuiWarningLogger:
@@ -545,6 +548,7 @@ class LolManagerGui:
         self._update_apply_requested = False
         self._update_defer_reason: Optional[str] = None
         self._update_pending_failed = False
+        self._update_cleanup_retry_scheduled = False
 
         try:
             self._last_config_mtime_ns = int(self.config_path.stat().st_mtime_ns)
@@ -798,6 +802,8 @@ class LolManagerGui:
         if status.kind == "applied":
             self._set_update_status("Update 설치 확인")
             self._append_log(f"[Update] {status.message}\n")
+            if status.pending is not None:
+                self._schedule_applied_update_cleanup()
             return
         if status.kind == "pending":
             self._pending_update = status.pending
@@ -813,6 +819,36 @@ class LolManagerGui:
             if status.pending is not None:
                 self._configure_update_button(text="Update 재시도", state=tk.NORMAL)
             self._append_log(f"[Update] {status.message}\n")
+
+    def _schedule_applied_update_cleanup(self, *, attempt: int = 0) -> None:
+        if (
+            bool(getattr(self, "_closing", False))
+            or bool(getattr(self, "_update_cleanup_retry_scheduled", False))
+            or attempt >= UPDATE_CLEANUP_RETRY_ATTEMPTS
+        ):
+            return
+        self._update_cleanup_retry_scheduled = True
+        try:
+            self.root.after(
+                UPDATE_CLEANUP_RETRY_MS,
+                lambda: self._retry_applied_update_cleanup(attempt=attempt),
+            )
+        except Exception:
+            self._update_cleanup_retry_scheduled = False
+
+    def _retry_applied_update_cleanup(self, *, attempt: int) -> None:
+        self._update_cleanup_retry_scheduled = False
+        if bool(getattr(self, "_closing", False)):
+            return
+        try:
+            status = inspect_startup_update(current_version=get_app_version())
+        except Exception as exc:
+            self._append_log(f"[Update] 임시 installer 정리 확인 실패: {exc}\n")
+            return
+        if status.kind == "applied" and status.pending is not None:
+            self._schedule_applied_update_cleanup(attempt=attempt + 1)
+        elif status.kind == "applied":
+            self._append_log("[Update] 임시 installer 정리를 완료했습니다.\n")
 
     def _start_update_check(self) -> None:
         if (
@@ -888,6 +924,7 @@ class LolManagerGui:
             self._configure_update_button(text="Update 적용 대기", state=tk.DISABLED)
             self._maybe_apply_staged_update(trigger="user-confirmed")
             return
+        self._start_update_check()
 
     def _run_update_stage(self, candidate: ReleaseUpdateCandidate) -> None:
         service = getattr(self, "_update_service", None)
@@ -938,7 +975,7 @@ class LolManagerGui:
                 self._update_check_started = False
                 if not self._restore_pending_update_action():
                     self._set_update_status("Update 확인 실패")
-                    self._configure_update_button(text="Update 확인 실패", state=tk.DISABLED)
+                    self._configure_update_button(text="Update 다시 확인", state=tk.NORMAL)
                 self._append_log(f"[Update] 확인 실패: {value}\n")
             elif kind == "stage_finished":
                 self._update_stage_started = False
@@ -991,7 +1028,19 @@ class LolManagerGui:
             return (False, "게임 종료 또는 앱 종료 시 적용")
         if automation_running:
             return (False, "자동화 종료 또는 앱 종료 시 적용")
+        other_instance, reason = self._other_installer_instance_status()
+        if other_instance:
+            return (False, reason)
         return (True, "")
+
+    @staticmethod
+    def _other_installer_instance_status() -> tuple[bool, str]:
+        try:
+            if has_other_installer_instance():
+                return (True, "다른 LOLManager 종료 또는 앱 종료 시 적용")
+        except UpdateError:
+            return (True, "다른 LOLManager 상태 확인 대기")
+        return (False, "")
 
     def _maybe_apply_staged_update(self, *, trigger: str) -> bool:
         pending = getattr(self, "_pending_update", None)
@@ -3124,10 +3173,16 @@ class LolManagerGui:
         if bool(getattr(self, "_update_apply_authorized", False)) and not bool(
             getattr(self, "_update_apply_requested", False)
         ) and not bool(getattr(self, "_update_stage_started", False)):
-            self._begin_staged_update_application(
-                trigger="app-close",
-                close_after_launch=False,
-            )
+            other_instance, reason = self._other_installer_instance_status()
+            if other_instance:
+                self._update_defer_reason = reason
+                self._set_update_status("Update 적용 대기")
+                self._append_log(f"[Update] {reason}.\n")
+            else:
+                self._begin_staged_update_application(
+                    trigger="app-close",
+                    close_after_launch=False,
+                )
         self._closing = True
         try:
             refresher = getattr(self, "_auto_ban_refresher", None)

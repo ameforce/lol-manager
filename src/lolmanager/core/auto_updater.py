@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import psutil
 import requests
 
 from lolmanager.core.app_version import get_app_version
@@ -251,6 +252,64 @@ def is_installer_managed_build(
         return False
 
 
+def has_other_installer_instance(
+    *,
+    executable: Path | None = None,
+    current_pid: int | None = None,
+) -> bool:
+    """Return whether another process is running this installed executable.
+
+    A frozen one-file build can have a same-executable bootstrap parent.  That
+    parent belongs to this GUI lifecycle and must not prevent its own update,
+    so the complete current process family is ignored.  A distinct GUI
+    instance is deliberately an update deferral: the installer must not try to
+    replace the executable while another user-visible instance is active.
+    """
+    try:
+        expected = (
+            Path(executable) if executable is not None else Path(sys.executable)
+        ).resolve()
+    except OSError as exc:
+        raise UpdateError("설치된 LOLManager 실행 파일 경로를 확인할 수 없습니다.") from exc
+
+    pid = os.getpid() if current_pid is None else int(current_pid)
+    if pid <= 0:
+        raise UpdateError("현재 LOLManager PID가 올바르지 않습니다.")
+    ignored_pids = {pid}
+    try:
+        ignored_pids.update(int(parent.pid) for parent in psutil.Process(pid).parents())
+    except (psutil.Error, OSError):
+        # The current PID itself is still enough to avoid matching this GUI.
+        pass
+
+    try:
+        processes = psutil.process_iter(["pid", "exe"])
+        for process in processes:
+            try:
+                info = process.info
+                process_pid = int(info.get("pid", process.pid))
+                if process_pid in ignored_pids:
+                    continue
+                executable_path = info.get("exe") or process.exe()
+                if executable_path is None:
+                    continue
+                if Path(str(executable_path)).resolve() == expected:
+                    return True
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+                OSError,
+            ):
+                # A process we cannot inspect is not evidence that it is this
+                # user's LOLManager executable.  Another same-user GUI remains
+                # inspectable and is caught above.
+                continue
+    except (psutil.Error, OSError) as exc:
+        raise UpdateError("다른 LOLManager 실행 상태를 확인할 수 없습니다.") from exc
+    return False
+
+
 def _atomic_write_json(path: Path, value: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -438,18 +497,46 @@ def _read_apply_result(pending: PendingUpdate) -> dict[str, object] | None:
     }
 
 
-def _clear_pending_update(pending: PendingUpdate, *, state_path: Path, data_dir: Path | None) -> None:
+def _clear_pending_update(
+    pending: PendingUpdate,
+    *,
+    state_path: Path,
+    data_dir: Path | None,
+) -> bool:
+    """Remove completed staging only after its directory is gone.
+
+    The silent installer can keep its own executable and log open briefly
+    after it records success. Retaining the state file on a failed cleanup
+    lets a later startup retry instead of orphaning a potentially 500 MiB
+    staging directory.
+    """
     installer = Path(pending.installer_path)
     root = update_staging_root(data_dir)
-    if _is_within(installer.parent, root):
-        try:
-            shutil.rmtree(installer.parent)
-        except OSError:
-            pass
+    if not _is_within(installer.parent, root):
+        return False
+    try:
+        active = load_pending_update(state_path)
+    except UpdateError:
+        return False
+    if active is not None and active != pending:
+        return True
+    try:
+        shutil.rmtree(installer.parent)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        active = load_pending_update(state_path)
+    except UpdateError:
+        return False
+    if active is not None and active != pending:
+        return True
     try:
         state_path.unlink(missing_ok=True)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def inspect_startup_update(
@@ -474,10 +561,19 @@ def inspect_startup_update(
         return StartupUpdateStatus("failed", str(exc), pending)
 
     if current.as_tuple() >= target.as_tuple():
-        _clear_pending_update(pending, state_path=state_file, data_dir=data_dir)
+        cleaned = _clear_pending_update(
+            pending,
+            state_path=state_file,
+            data_dir=data_dir,
+        )
         return StartupUpdateStatus(
             "applied",
-            f"v{target.text} 업데이트 설치를 확인했습니다.",
+            (
+                f"v{target.text} 업데이트 설치를 확인했습니다."
+                if cleaned
+                else f"v{target.text} 업데이트 설치를 확인했고 임시 installer 정리를 재시도합니다."
+            ),
+            None if cleaned else pending,
         )
 
     try:

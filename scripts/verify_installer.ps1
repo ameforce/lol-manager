@@ -73,6 +73,7 @@ $shortcutBackups = @{}
 $originalAppData = $env:APPDATA
 $launchedProcess = $null
 $windowProcess = $null
+$secondaryUpdateWindowProcess = $null
 
 function Invoke-Installer([string]$LogPath) {
     $process = Start-Process -FilePath $setupPath -ArgumentList @(
@@ -176,6 +177,25 @@ try {
         throw '업데이트 모드 검증용 GUI 창이 30초 안에 나타나지 않았습니다.'
     }
 
+    Start-Process -FilePath $installedExe | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 250
+        $secondaryUpdateWindowProcess = Get-Process -Name 'LOLManager' -ErrorAction SilentlyContinue |
+            Where-Object {
+                [void]$_.Refresh()
+                ($_.Id -ne $updateWindowProcess.Id) -and
+                ($_.MainWindowHandle -ne 0)
+            } |
+            Select-Object -First 1
+    } while (
+        (-not $secondaryUpdateWindowProcess -or $secondaryUpdateWindowProcess.MainWindowHandle -eq 0) -and
+        [DateTime]::UtcNow -lt $deadline
+    )
+    if (-not $secondaryUpdateWindowProcess -or $secondaryUpdateWindowProcess.MainWindowHandle -eq 0) {
+        throw '업데이트 모드 검증용 두 번째 GUI 창이 30초 안에 나타나지 않았습니다.'
+    }
+
     $updateProcess = Start-Process -FilePath $setupPath -ArgumentList @(
         '/VERYSILENT',
         '/SUPPRESSMSGBOXES',
@@ -198,6 +218,9 @@ try {
     }
     if ($updateProcess.ExitCode -ne 0) {
         throw "업데이트 installer 실행 실패(exit=$($updateProcess.ExitCode)): $updateInstallLog"
+    }
+    if (Get-Process -Id $secondaryUpdateWindowProcess.Id -ErrorAction SilentlyContinue) {
+        throw '업데이트 installer가 남아 있던 다른 LOLManager.exe를 종료하지 못했습니다.'
     }
     if (-not (Test-Path -LiteralPath $updateResultPath -PathType Leaf)) {
         throw '업데이트 installer 성공 결과 파일이 없습니다.'
@@ -262,7 +285,7 @@ try {
     Write-Host "[VERIFY] file version: $installedVersion"
     Write-Host '[VERIFY] shortcuts: desktop + Start Menu'
     Write-Host '[VERIFY] reinstall closed running app: yes'
-    Write-Host '[VERIFY] update mode waited for bootstrap exit and relaunched: yes'
+    Write-Host '[VERIFY] update mode waited for bootstrap exit, closed residual GUI instances, and relaunched: yes'
     Write-Host '[VERIFY] settings preserved after reinstall/uninstall: yes'
 }
 finally {

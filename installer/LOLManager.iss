@@ -206,6 +206,12 @@ begin
   if IsUpdaterInstallMode() then
   begin
     Result := WaitForUpdateBootstrapExit();
+    if Result <> '' then
+      Exit;
+    { A second GUI may have opened after the initiating app checked for it.
+      Do not replace binaries until the normal installer process shutdown
+      policy has closed any residual LOLManager instance. }
+    Result := StopRunningLOLManager();
     Exit;
   end;
   Result := StopRunningLOLManager();

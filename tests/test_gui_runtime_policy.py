@@ -18,9 +18,11 @@ from lolmanager.core.auto_updater import (
     PendingUpdate,
     ReleaseUpdateCandidate,
     ReleaseVersion,
+    StartupUpdateStatus,
 )
 from lolmanager.gui.app_gui import (
     EXTERNAL_SYNC_MS,
+    UPDATE_CLEANUP_RETRY_MS,
     LolManagerGui,
     _ExternalSyncSnapshot,
     external_sync_delay_ms,
@@ -319,6 +321,63 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             text="Update 적용", state="normal"
         )
 
+    def test_failed_release_check_without_pending_update_allows_manual_retry(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_event_q = queue.Queue()
+        gui._update_event_q.put(("check_failed", "offline"))
+        gui._update_check_started = True
+        gui._update_stage_started = False
+        gui._pending_update = None
+        gui._set_update_status = mock.Mock()
+        gui._configure_update_button = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._poll_update_events()
+
+        gui._set_update_status.assert_called_once_with("Update 확인 실패")
+        gui._configure_update_button.assert_called_once_with(
+            text="Update 다시 확인", state="normal"
+        )
+
+    def test_update_button_restarts_check_when_no_update_is_available(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._pending_update = None
+        gui._update_candidate = None
+        gui._start_update_check = mock.Mock()
+
+        gui._on_update_clicked()
+
+        gui._start_update_check.assert_called_once_with()
+
+    def test_applied_update_with_retained_staging_schedules_cleanup_retry(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_cleanup_retry_scheduled = False
+        gui.root = _Root()
+        gui._set_update_status = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._handle_startup_update_status(
+            StartupUpdateStatus("applied", "cleanup pending", mock.Mock())
+        )
+
+        self.assertEqual(gui.root.after_calls[0][0], UPDATE_CLEANUP_RETRY_MS)
+
+    def test_staged_update_defers_for_another_installer_gui_instance(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._external_sync_last = self._snapshot(in_game=False)
+        gui.proc = None
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.has_other_installer_instance", return_value=True
+        ):
+            self.assertEqual(
+                gui._staged_update_is_idle(),
+                (False, "다른 LOLManager 종료 또는 앱 종료 시 적용"),
+            )
+
     def test_newer_update_staging_cannot_apply_an_older_pending_installer(self) -> None:
         gui = LolManagerGui.__new__(LolManagerGui)
         gui._pending_update = mock.Mock(target_version="1.1.26")
@@ -348,6 +407,30 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui._on_close()
 
         gui._begin_staged_update_application.assert_not_called()
+        self.assertTrue(gui.root.destroyed)
+
+    def test_close_defers_authorized_update_when_another_gui_instance_runs(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_apply_authorized = True
+        gui._update_apply_requested = False
+        gui._update_stage_started = False
+        gui._begin_staged_update_application = mock.Mock()
+        gui._set_update_status = mock.Mock()
+        gui._append_log = mock.Mock()
+        gui._auto_ban_refresher = None
+        gui._proc_usage_after_id = None
+        gui._external_sync_stop = threading.Event()
+        gui.proc = None
+        gui.root = _Root()
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.has_other_installer_instance", return_value=True
+        ):
+            gui._on_close()
+
+        gui._begin_staged_update_application.assert_not_called()
+        gui._set_update_status.assert_called_once_with("Update 적용 대기")
         self.assertTrue(gui.root.destroyed)
 
     def test_update_installer_launch_is_deferred_until_after_mainloop_shutdown(self) -> None:

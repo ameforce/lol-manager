@@ -14,6 +14,7 @@ from lolmanager.core.auto_updater import (
     ReleaseVersion,
     UpdateBusyError,
     UpdateError,
+    has_other_installer_instance,
     inspect_startup_update,
     installer_asset_name,
     is_installer_managed_build,
@@ -137,6 +138,35 @@ def test_installer_managed_gate_excludes_source_and_accepts_marker(
         assert not is_installer_managed_build(executable=exe)
         (installed / auto_updater.INSTALLER_MARKER_FILENAME).write_text("managed\n")
         assert is_installer_managed_build(executable=exe)
+
+
+def test_other_installer_instance_detects_a_distinct_matching_executable(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "LOLManager.exe"
+
+    class _Process:
+        def __init__(self, pid: int, exe: Path) -> None:
+            self.info = {"pid": pid, "exe": str(exe)}
+            self.pid = pid
+
+        def exe(self) -> str:
+            return str(self.info["exe"])
+
+    current = mock.Mock()
+    current.parents.return_value = []
+    with (
+        mock.patch.object(auto_updater.psutil, "Process", return_value=current),
+        mock.patch.object(
+            auto_updater.psutil,
+            "process_iter",
+            return_value=[_Process(101, executable), _Process(202, executable)],
+        ),
+    ):
+        assert has_other_installer_instance(
+            executable=executable,
+            current_pid=101,
+        )
 
 
 def test_check_uses_stable_latest_release_and_exact_assets() -> None:
@@ -340,6 +370,42 @@ def test_startup_status_keeps_failure_for_user_retry_then_clears_verified_update
     assert applied.kind == "applied"
     assert not auto_updater.update_state_path(tmp_path).exists()
     assert not (tmp_path / "updates" / "1.1.26").exists()
+
+
+def test_completed_update_keeps_state_until_staging_cleanup_succeeds(
+    tmp_path: Path,
+) -> None:
+    installer_bytes = b"installer-content"
+    candidate = _candidate(payload=installer_bytes)
+    checksum = hashlib.sha256(installer_bytes).hexdigest()
+    service = InstallerUpdateService(
+        session=_Session(
+            {
+                candidate.checksum_url: _Response(
+                    content=f"{checksum}  {candidate.installer_name}\n".encode()
+                ),
+                candidate.installer_url: _Response(content=installer_bytes),
+            }
+        ),
+        data_dir=tmp_path,
+    )
+    staged = service.stage_update(candidate)
+    state_path = auto_updater.update_state_path(tmp_path)
+
+    with mock.patch.object(auto_updater.shutil, "rmtree", side_effect=OSError("busy")):
+        retained = inspect_startup_update(current_version="1.1.26.0", data_dir=tmp_path)
+
+    assert retained.kind == "applied"
+    assert retained.pending == staged.pending
+    assert state_path.exists()
+    assert Path(staged.pending.installer_path).exists()
+
+    cleaned = inspect_startup_update(current_version="1.1.26.0", data_dir=tmp_path)
+
+    assert cleaned.kind == "applied"
+    assert cleaned.pending is None
+    assert not state_path.exists()
+    assert not Path(staged.pending.installer_path).parent.exists()
 
 
 def test_bootstrap_starts_only_the_verified_installer_with_fixed_update_arguments(
