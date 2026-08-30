@@ -60,7 +60,7 @@ def test_inno_update_relaunch_resets_inherited_pyinstaller_environment() -> None
     assert "SetEnvironmentVariableW@kernel32.dll" in script
     assert "PYINSTALLER_RESET_ENVIRONMENT" in script
     assert "procedure CurStepChanged(CurStep: TSetupStep);" in script
-    assert "(CurStep = ssPostInstall) and HasExplicitRelaunchRequest()" in script
+    assert "(CurStep = ssInstall) and HasExplicitRelaunchRequest()" in script
 
 
 def test_release_package_contains_no_separate_updater_or_powershell_helper() -> None:
@@ -110,11 +110,16 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "InstallLocation 등록값 불일치" in script
     assert "Close-LolManagerInstance" in script
     assert "Get-TaskOwnedLolManagerProcesses" in script
+    assert "[IO.Path]::GetFullPath($installDir)" in script
     assert "$updateBootstrapProcess.Id" in script
     assert "Start-UpdateInstallerWithStalePyInstallerEnvironment" in script
     assert "_PYI_ARCHIVE_FILE" in script
     assert "_PYI_PARENT_PROCESS_LEVEL" in script
     assert "PYINSTALLER_RESET_ENVIRONMENT" in script
+    assert "Get-TaskOwnedLolManagerProcesses" in script
+    assert "MainWindowTitle -like 'LOLManager*'" in script
+    assert "업데이트 재실행이 LOLManager GUI 대신 Error 창을 표시했습니다." in script
+    assert "업데이트 재실행 EXE 버전 불일치" in script
     assert "Stop-Process -Name 'LOLManager'" not in script
     assert "legacy installer marker를 정리하지 못했습니다." in script
     assert "update mode waited for bootstrap exit, preserved residual GUI, and relaunched: yes" in script
