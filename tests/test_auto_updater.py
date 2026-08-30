@@ -76,7 +76,7 @@ class _Session:
 
 
 def _github_asset_url(version: str, name: str) -> str:
-    return f"https://github.com/ameforce/LOLManager/releases/download/v{version}/{name}"
+    return f"https://github.com/ameforce/lol-manager/releases/download/v{version}/{name}"
 
 
 def _candidate(
