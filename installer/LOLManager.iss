@@ -111,9 +111,10 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   { An updater installer inherits the running onefile application's private
-    PyInstaller environment. Make the [Run] child a fresh top-level instance
-    before the new executable performs its parent-process security check. }
-  if (CurStep = ssPostInstall) and HasExplicitRelaunchRequest() then
+    PyInstaller environment. Reset it before the installation phase begins,
+    which is guaranteed to precede every non-postinstall [Run] entry used by
+    silent updater relaunches. }
+  if (CurStep = ssInstall) and HasExplicitRelaunchRequest() then
   begin
     if not SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1') then
       RaiseException('업데이트 후 LOLManager 재실행 환경을 준비하지 못했습니다.');
