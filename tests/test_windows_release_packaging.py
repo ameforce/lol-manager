@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -13,7 +12,7 @@ def test_inno_installer_keeps_stable_per_user_contract() -> None:
     assert "AppId={{F1E18E34-A5B3-4DE8-8E91-74DC33D66D15}" in script
     assert r"DefaultDirName={localappdata}\Programs\{#MyAppName}" in script
     assert "PrivilegesRequired=lowest" in script
-    assert "CloseApplications=yes" in script
+    assert "CloseApplications=no" in script
     assert "CloseApplicationsFilter={#MyAppExeName}" in script
     assert "PrepareToInstall" in script
     assert "StopRunningLOLManager" in script
@@ -26,6 +25,31 @@ def test_inno_installer_creates_required_shortcuts_and_launch_option() -> None:
     assert re.search(r'^Name: "\{userdesktop\}.*"; Filename:', script, re.MULTILINE)
     assert "Flags: checkedonce" in script
     assert "Flags: nowait postinstall skipifsilent" in script
+
+
+def test_inno_installer_update_mode_waits_for_bootstrap_and_relaunches_only_after_success() -> None:
+    script = (PROJECT_ROOT / "installer" / "LOLManager.iss").read_text("utf-8")
+
+    assert "LOLMANAGERUPDATEMODE" in script
+    assert "LOLMANAGERWAITPID" in script
+    assert "LOLMANAGERRESULT" in script
+    assert "WaitForUpdateBootstrapExit" in script
+    assert "OpenProcess@kernel32.dll" in script
+    assert "WaitForSingleObject@kernel32.dll" in script
+    assert "Check: IsUpdaterInstallMode" in script
+    assert "Flags: nowait skipifnotsilent" in script
+    assert "WriteUpdateSuccessResult" in script
+    update_prepare = script[
+        script.index("function PrepareToInstall") : script.index("procedure CurStepChanged")
+    ]
+    assert "Result := StopRunningLOLManager();" in update_prepare
+
+
+def test_release_package_contains_no_separate_updater_or_powershell_helper() -> None:
+    resources = PROJECT_ROOT / "src" / "lolmanager" / "resources"
+
+    assert not list(resources.rglob("*.ps1"))
+    assert not list(resources.rglob("*updater*.exe"))
 
 
 def test_inno_installer_does_not_delete_user_settings() -> None:
@@ -60,4 +84,9 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "VersionInfo.FileVersion" in script
     assert "UseDefaultInstallPath" in script
     assert "제거 후 설치 경로가 남아 있습니다." in script
+    assert "LOLMANAGERUPDATEMODE" in script
+    assert "업데이트 installer가 원본 LOLManager 종료 전에 대기하지 않았습니다." in script
+    assert "업데이트 모드 검증용 두 번째 GUI 창" in script
+    assert "다른 LOLManager.exe를 종료하지 못했습니다." in script
+    assert "update mode waited for bootstrap exit, closed residual GUI instances, and relaunched: yes" in script
     assert "settings preserved after reinstall/uninstall: yes" in script

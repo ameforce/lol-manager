@@ -5,8 +5,8 @@ import queue
 import sys
 import threading
 import time
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,13 +14,22 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from lolmanager.core.auto_updater import (
+    PendingUpdate,
+    ReleaseUpdateCandidate,
+    ReleaseVersion,
+    StartupUpdateStatus,
+)
 from lolmanager.gui.app_gui import (
     EXTERNAL_SYNC_MS,
-    _ExternalSyncSnapshot,
+    UPDATE_CLEANUP_RETRY_MS,
     LolManagerGui,
+    _ExternalSyncSnapshot,
     external_sync_delay_ms,
     normalize_process_cpu_percent,
+    should_apply_staged_update,
     should_auto_iconify_ingame,
+    should_prefer_release_candidate,
     should_recover_cli_exit,
 )
 
@@ -36,9 +45,11 @@ class _Value:
 class _Button:
     def __init__(self) -> None:
         self.state: object = None
+        self.text: object = None
 
     def configure(self, **kwargs: object) -> None:
         self.state = kwargs.get("state")
+        self.text = kwargs.get("text")
 
 
 class _Proc:
@@ -212,6 +223,227 @@ class GuiRuntimePolicyTests(unittest.TestCase):
                 restart_limit=1,
             )
         )
+
+    def test_staged_update_applies_only_when_user_confirmed_and_idle(self) -> None:
+        self.assertTrue(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=False,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=True,
+                automation_running=False,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=True,
+                user_confirmed=True,
+            )
+        )
+        self.assertFalse(
+            should_apply_staged_update(
+                in_game=False,
+                automation_running=False,
+                user_confirmed=False,
+            )
+        )
+
+    def test_newer_release_candidate_supersedes_an_older_staged_installer(self) -> None:
+        pending = PendingUpdate(
+            target_version="1.1.26",
+            installer_name="LOLManager-Setup-v1.1.26.exe",
+            installer_path="C:/updates/1.1.26/LOLManager-Setup-v1.1.26.exe",
+            sha256="0" * 64,
+            github_digest=None,
+            created_at_unix=1.0,
+        )
+        older = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 25),
+            installer_name="LOLManager-Setup-v1.1.25.exe",
+            installer_url="https://example.test/old.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
+        newer = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 27),
+            installer_name="LOLManager-Setup-v1.1.27.exe",
+            installer_url="https://example.test/new.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
+        same_version = ReleaseUpdateCandidate(
+            version=ReleaseVersion(1, 1, 26),
+            installer_name="LOLManager-Setup-v1.1.26.exe",
+            installer_url="https://example.test/same.exe",
+            installer_size=1,
+            checksum_url="https://example.test/SHA256SUMS.txt",
+            github_digest=None,
+        )
+
+        self.assertFalse(should_prefer_release_candidate(pending=pending, candidate=older))
+        self.assertTrue(should_prefer_release_candidate(pending=pending, candidate=newer))
+        self.assertFalse(
+            should_prefer_release_candidate(pending=pending, candidate=same_version)
+        )
+        self.assertTrue(
+            should_prefer_release_candidate(
+                pending=pending,
+                candidate=same_version,
+                pending_failed=True,
+            )
+        )
+
+    def test_failed_release_check_restores_staged_update_action(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_event_q = queue.Queue()
+        gui._update_event_q.put(("check_failed", "offline"))
+        gui._update_check_started = True
+        gui._update_stage_started = False
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_pending_failed = False
+        gui._set_update_status = mock.Mock()
+        gui._configure_update_button = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._poll_update_events()
+
+        gui._set_update_status.assert_called_once_with("Update 준비됨")
+        gui._configure_update_button.assert_called_once_with(
+            text="Update 적용", state="normal"
+        )
+
+    def test_failed_release_check_without_pending_update_allows_manual_retry(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_event_q = queue.Queue()
+        gui._update_event_q.put(("check_failed", "offline"))
+        gui._update_check_started = True
+        gui._update_stage_started = False
+        gui._pending_update = None
+        gui._set_update_status = mock.Mock()
+        gui._configure_update_button = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._poll_update_events()
+
+        gui._set_update_status.assert_called_once_with("Update 확인 실패")
+        gui._configure_update_button.assert_called_once_with(
+            text="Update 다시 확인", state="normal"
+        )
+
+    def test_update_button_restarts_check_when_no_update_is_available(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._pending_update = None
+        gui._update_candidate = None
+        gui._start_update_check = mock.Mock()
+
+        gui._on_update_clicked()
+
+        gui._start_update_check.assert_called_once_with()
+
+    def test_applied_update_with_retained_staging_schedules_cleanup_retry(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_cleanup_retry_scheduled = False
+        gui.root = _Root()
+        gui._set_update_status = mock.Mock()
+        gui._append_log = mock.Mock()
+
+        gui._handle_startup_update_status(
+            StartupUpdateStatus("applied", "cleanup pending", mock.Mock())
+        )
+
+        self.assertEqual(gui.root.after_calls[0][0], UPDATE_CLEANUP_RETRY_MS)
+
+    def test_staged_update_defers_for_another_installer_gui_instance(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._external_sync_last = self._snapshot(in_game=False)
+        gui.proc = None
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.has_other_installer_instance", return_value=True
+        ):
+            self.assertEqual(
+                gui._staged_update_is_idle(),
+                (False, "다른 LOLManager 종료 또는 앱 종료 시 적용"),
+            )
+
+    def test_newer_update_staging_cannot_apply_an_older_pending_installer(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_authorized = True
+        gui._update_stage_started = True
+        gui._update_apply_requested = False
+        gui._staged_update_is_idle = mock.Mock(return_value=(True, ""))
+        gui._begin_staged_update_application = mock.Mock()
+
+        self.assertFalse(gui._maybe_apply_staged_update(trigger="external-idle"))
+        gui._begin_staged_update_application.assert_not_called()
+
+    def test_closing_during_newer_update_staging_cannot_apply_older_pending_installer(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_authorized = True
+        gui._update_apply_requested = False
+        gui._update_stage_started = True
+        gui._begin_staged_update_application = mock.Mock()
+        gui._auto_ban_refresher = None
+        gui._proc_usage_after_id = None
+        gui._external_sync_stop = threading.Event()
+        gui.proc = None
+        gui.root = _Root()
+
+        gui._on_close()
+
+        gui._begin_staged_update_application.assert_not_called()
+        self.assertTrue(gui.root.destroyed)
+
+    def test_close_defers_authorized_update_when_another_gui_instance_runs(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._closing = False
+        gui._update_apply_authorized = True
+        gui._update_apply_requested = False
+        gui._update_stage_started = False
+        gui._begin_staged_update_application = mock.Mock()
+        gui._set_update_status = mock.Mock()
+        gui._append_log = mock.Mock()
+        gui._auto_ban_refresher = None
+        gui._proc_usage_after_id = None
+        gui._external_sync_stop = threading.Event()
+        gui.proc = None
+        gui.root = _Root()
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.has_other_installer_instance", return_value=True
+        ):
+            gui._on_close()
+
+        gui._begin_staged_update_application.assert_not_called()
+        gui._set_update_status.assert_called_once_with("Update 적용 대기")
+        self.assertTrue(gui.root.destroyed)
+
+    def test_update_installer_launch_is_deferred_until_after_mainloop_shutdown(self) -> None:
+        gui = LolManagerGui.__new__(LolManagerGui)
+        gui._pending_update = mock.Mock(target_version="1.1.26")
+        gui._update_apply_requested = True
+
+        with mock.patch(
+            "lolmanager.gui.app_gui.launch_staged_installer_update"
+        ) as launch:
+            self.assertTrue(gui.launch_staged_update_after_mainloop())
+
+        launch.assert_called_once()
 
     def test_opgg_shutdown_hook_is_only_in_client_auto_exit_branch(self) -> None:
         sync_source = inspect.getsource(LolManagerGui._sync_external_state)
