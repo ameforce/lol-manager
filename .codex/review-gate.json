@@ -31,6 +31,38 @@
         "scripts/build_and_install.ps1"
       ],
       "evidence": "CLI 정상 종료는 GUI 프로세스 정책에 소비되고 패키지 버전은 Windows 빌드 및 설치 경로에 전달된다."
+    },
+    {
+      "id": "installer-updater-contract",
+      "triggers": [
+        "src/lolmanager/core/auto_updater.py",
+        "src/lolmanager/gui/app_gui.py",
+        "installer/LOLManager.iss",
+        "scripts/verify_installer.ps1",
+        "tests/test_auto_updater.py",
+        "tests/test_gui_runtime_policy.py",
+        "tests/test_windows_release_packaging.py"
+      ],
+      "direct_execution_paths": [
+        "src/lolmanager/core/auto_updater.py",
+        "src/lolmanager/gui/app_gui.py"
+      ],
+      "changed_contract_consumers": [
+        "installer/LOLManager.iss",
+        "scripts/verify_installer.ps1",
+        "tests/test_auto_updater.py",
+        "tests/test_gui_runtime_policy.py",
+        "tests/test_windows_release_packaging.py"
+      ],
+      "build_package_artifact_paths": [
+        "scripts/build_release.ps1",
+        "dist/release/LOLManager-Setup-vX.Y.Z.exe"
+      ],
+      "release_deploy_consumers": [
+        "installer/LOLManager.iss",
+        "scripts/verify_installer.ps1"
+      ],
+      "evidence": "설치형 updater는 frozen GUI, Inno installer, staged pending state, native installer lifecycle 및 release artifact에 함께 소비된다."
     }
   ]
 }
