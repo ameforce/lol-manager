@@ -315,11 +315,25 @@ try {
         $candidate = $null
         do {
             Start-Sleep -Milliseconds 250
-            $candidate = Get-Process -Name 'LOLManager' -ErrorAction SilentlyContinue |
-                Where-Object {
-                    [void]$_.Refresh()
-                    ($_.Id -ne $ExcludePid) -and ($_.MainWindowHandle -ne 0)
-                } |
+            $taskOwnedWindowProcesses = @(
+                Get-TaskOwnedLolManagerProcesses |
+                    Where-Object { [int]$_.ProcessId -ne $ExcludePid } |
+                    ForEach-Object {
+                        Get-Process -Id ([int]$_.ProcessId) -ErrorAction SilentlyContinue
+                    } |
+                    Where-Object {
+                        [void]$_.Refresh()
+                        $_.MainWindowHandle -ne 0
+                    }
+            )
+            $errorWindow = $taskOwnedWindowProcesses |
+                Where-Object { $_.MainWindowTitle -eq 'Error' } |
+                Select-Object -First 1
+            if ($errorWindow) {
+                throw '업데이트 재실행이 LOLManager GUI 대신 Error 창을 표시했습니다.'
+            }
+            $candidate = $taskOwnedWindowProcesses |
+                Where-Object { $_.MainWindowTitle -like 'LOLManager*' } |
                 Select-Object -First 1
         } while (
             (-not $candidate -or $candidate.MainWindowHandle -eq 0) -and
@@ -327,6 +341,10 @@ try {
         )
         if (-not $candidate -or $candidate.MainWindowHandle -eq 0) {
             throw $FailureMessage
+        }
+        $candidateVersion = (Get-Item -LiteralPath $candidate.Path).VersionInfo.FileVersion
+        if ($candidateVersion -ne $versionQuad) {
+            throw "업데이트 재실행 EXE 버전 불일치: $candidateVersion"
         }
         return $candidate
     }
