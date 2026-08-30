@@ -607,6 +607,45 @@ def test_bootstrap_starts_only_verified_installer_with_fixed_contract_arguments(
     assert kwargs["close_fds"] is True
 
 
+def test_bootstrap_resets_pyinstaller_environment_for_installer_relaunch(
+    tmp_path: Path,
+) -> None:
+    _service, _staged = _staged_update(tmp_path)
+    install_location = tmp_path / "registered-install"
+    calls: list[dict[str, object]] = []
+
+    with (
+        mock.patch.object(auto_updater, "is_installer_managed_build", return_value=True),
+        mock.patch.object(auto_updater, "_read_inno_install_location", return_value=install_location),
+        mock.patch.dict(
+            auto_updater.os.environ,
+            {
+                "_PYI_ARCHIVE_FILE": str(install_location / "LOLManager.exe"),
+                "_PYI_PARENT_PROCESS_LEVEL": "2",
+                "UNCHANGED": "value",
+            },
+            clear=True,
+        ),
+    ):
+        launch_staged_installer_update(
+            data_dir=tmp_path,
+            wait_for_pid=4321,
+            popen=lambda _command, **kwargs: calls.append(kwargs),
+        )
+
+        assert "PYINSTALLER_RESET_ENVIRONMENT" not in auto_updater.os.environ
+
+    assert len(calls) == 1
+    installer_env = calls[0]["env"]
+    assert isinstance(installer_env, dict)
+    assert installer_env == {
+        "_PYI_ARCHIVE_FILE": str(install_location / "LOLManager.exe"),
+        "_PYI_PARENT_PROCESS_LEVEL": "2",
+        "UNCHANGED": "value",
+        "PYINSTALLER_RESET_ENVIRONMENT": "1",
+    }
+
+
 def test_bootstrap_waits_for_matching_onefile_parent_by_default(tmp_path: Path) -> None:
     _service, staged = _staged_update(tmp_path)
     install_location = tmp_path / "registered-install"

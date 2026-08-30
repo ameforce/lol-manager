@@ -74,6 +74,8 @@ function WaitForSingleObject(hHandle: THandle; dwMilliseconds: LongWord): LongWo
   external 'WaitForSingleObject@kernel32.dll stdcall';
 function CloseHandle(hObject: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
+function SetEnvironmentVariable(const lpName, lpValue: String): Boolean;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
 
 function UpdateCommandLineValue(const Name: String): String;
 var
@@ -104,6 +106,18 @@ begin
   { Interactive installs may use the post-install launch option. A silent
     install launches only when the direct updater explicitly asks for it. }
   Result := (not WizardSilent()) or HasExplicitRelaunchRequest();
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  { An updater installer inherits the running onefile application's private
+    PyInstaller environment. Make the [Run] child a fresh top-level instance
+    before the new executable performs its parent-process security check. }
+  if (CurStep = ssPostInstall) and HasExplicitRelaunchRequest() then
+  begin
+    if not SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1') then
+      RaiseException('업데이트 후 LOLManager 재실행 환경을 준비하지 못했습니다.');
+  end;
 end;
 
 function UpdateBootstrapWaitPid(): Integer;
