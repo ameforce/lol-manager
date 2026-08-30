@@ -55,8 +55,9 @@ else {
     $installDir = Join-Path $verificationRootFull 'LOLManager'
 }
 $testAppData = Join-Path $verificationRootFull 'AppData\Roaming'
-$settingsDir = Join-Path $testAppData 'LOLManager'
-$settingsMarker = Join-Path $settingsDir 'installer-preserve-check.txt'
+    $settingsDir = Join-Path $testAppData 'LOLManager'
+    $settingsMarker = Join-Path $settingsDir 'installer-preserve-check.txt'
+    $legacyInstallerMarker = Join-Path $installDir '.lolmanager-installer-managed'
 $backupDir = Join-Path $verificationRootFull 'shortcut-backup'
 $installLog1 = Join-Path $verificationRootFull 'install-first.log'
 $installLog2 = Join-Path $verificationRootFull 'install-reinstall.log'
@@ -252,9 +253,16 @@ try {
     }
     $windowTitle = $windowProcess.MainWindowTitle
 
+    [IO.File]::WriteAllText($legacyInstallerMarker, 'legacy-installer-marker', [Text.Encoding]::UTF8)
+    if (-not (Test-Path -LiteralPath $legacyInstallerMarker -PathType Leaf)) {
+        throw '업그레이드 정리 검증용 legacy installer marker를 만들지 못했습니다.'
+    }
     Invoke-Installer $installLog2
     if (Get-Process -Name 'LOLManager' -ErrorAction SilentlyContinue) {
         throw '재설치가 실행 중 LOLManager.exe를 종료하지 못했습니다.'
+    }
+    if (Test-Path -LiteralPath $legacyInstallerMarker) {
+        throw '재설치가 legacy installer marker를 정리하지 못했습니다.'
     }
     if (-not (Test-Path -LiteralPath $settingsMarker -PathType Leaf)) {
         throw '재설치 중 사용자 설정 marker가 삭제됐습니다.'

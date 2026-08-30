@@ -16,6 +16,8 @@ def test_inno_installer_keeps_stable_per_user_contract() -> None:
     assert "CloseApplicationsFilter={#MyAppExeName}" in script
     assert "PrepareToInstall" in script
     assert "StopRunningLOLManager" in script
+    assert "[InstallDelete]" in script
+    assert 'Type: files; Name: "{app}\\.lolmanager-installer-managed"' in script
 
 
 def test_inno_installer_creates_required_shortcuts_and_launch_option() -> None:
@@ -101,5 +103,6 @@ def test_installer_verification_covers_real_lifecycle() -> None:
     assert "Get-TaskOwnedLolManagerProcesses" in script
     assert "$updateBootstrapProcess.Id" in script
     assert "Stop-Process -Name 'LOLManager'" not in script
+    assert "legacy installer marker를 정리하지 못했습니다." in script
     assert "update mode waited for bootstrap exit, preserved residual GUI, and relaunched: yes" in script
     assert "settings preserved after reinstall/uninstall: yes" in script

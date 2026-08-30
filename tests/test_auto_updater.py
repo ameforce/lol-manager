@@ -426,6 +426,52 @@ def test_stage_streams_exact_installer_and_writes_ready_schema_one_state(tmp_pat
     assert not list((tmp_path / "updates" / "v1.1.26").glob("*.part"))
 
 
+def test_stage_replaces_only_a_superseded_ready_installer_after_new_state_commits(
+    tmp_path: Path,
+) -> None:
+    old_bytes = b"old-installer"
+    new_bytes = b"new-installer"
+    old_release = _candidate(version="1.1.26", payload=old_bytes)
+    new_release = _candidate(version="1.1.27", payload=new_bytes)
+    session = _Session(
+        {
+            old_release.checksum_url: _Response(
+                content=(
+                    f"{hashlib.sha256(old_bytes).hexdigest()}  {old_release.installer_name}\n"
+                ).encode()
+            ),
+            old_release.installer_url: _Response(content=old_bytes),
+            new_release.checksum_url: _Response(
+                content=(
+                    f"{hashlib.sha256(new_bytes).hexdigest()}  {new_release.installer_name}\n"
+                ).encode()
+            ),
+            new_release.installer_url: _Response(content=new_bytes),
+        }
+    )
+    service = InstallerUpdateService(session=session, data_dir=tmp_path)
+
+    previous = service.stage_update(old_release).state
+    previous_stage = Path(previous.installer_path).parent
+    replacement = service.stage_update(new_release).state
+
+    assert not previous_stage.exists()
+    assert Path(replacement.installer_path).exists()
+    assert load_pending_update(auto_updater.update_state_path(tmp_path)) == replacement
+
+
+def test_stage_refuses_to_replace_an_already_launched_installer(tmp_path: Path) -> None:
+    service, previous = _staged_update(tmp_path)
+    state_path = auto_updater.update_state_path(tmp_path)
+    auto_updater._write_update_state(replace(previous, phase="launched"), state_path=state_path)
+
+    with pytest.raises(UpdateBusyError, match="이미 적용"):
+        service.stage_update(_candidate(version="1.1.27"))
+
+    assert Path(previous.installer_path).exists()
+    assert load_pending_update(state_path).phase == "launched"
+
+
 def test_stage_rejects_checksum_or_github_digest_mismatch_without_promoting_partial_file(
     tmp_path: Path,
 ) -> None:
@@ -608,6 +654,66 @@ def test_spawn_failure_keeps_ready_state_and_persisted_log_for_retry(tmp_path: P
     retained = load_pending_update(state_path)
     assert retained is not None
     assert retained.phase == "ready"
+    assert retained.installer_log_path == staged.installer_log_path
+
+
+def test_launch_retries_persisting_launched_state_after_successful_spawn(
+    tmp_path: Path,
+) -> None:
+    _service, staged = _staged_update(tmp_path)
+    install_location = tmp_path / "registered-install"
+    real_write = auto_updater._write_update_state
+    launched_write_attempts = 0
+
+    def flaky_write(state: UpdateState, *, state_path: Path) -> None:
+        nonlocal launched_write_attempts
+        if state.phase == "launched":
+            launched_write_attempts += 1
+            if launched_write_attempts == 1:
+                raise OSError("temporarily locked")
+        real_write(state, state_path=state_path)
+
+    with (
+        mock.patch.object(auto_updater, "is_installer_managed_build", return_value=True),
+        mock.patch.object(auto_updater, "_read_inno_install_location", return_value=install_location),
+        mock.patch.object(auto_updater, "_write_update_state", side_effect=flaky_write),
+        mock.patch.object(auto_updater.time, "sleep") as sleep,
+    ):
+        request = launch_staged_installer_update(
+            data_dir=tmp_path,
+            wait_for_pid=4321,
+            popen=lambda *_args, **_kwargs: None,
+        )
+
+    assert request.state.phase == "launched"
+    assert load_pending_update(auto_updater.update_state_path(tmp_path)).phase == "launched"
+    assert launched_write_attempts == 2
+    sleep.assert_called_once_with(auto_updater.LAUNCHED_STATE_WRITE_RETRY_SECONDS)
+    assert Path(staged.installer_path).exists()
+
+
+def test_launch_state_persistence_failure_is_a_retryable_update_error(tmp_path: Path) -> None:
+    _service, staged = _staged_update(tmp_path)
+    install_location = tmp_path / "registered-install"
+    spawned: list[list[str]] = []
+
+    with (
+        mock.patch.object(auto_updater, "is_installer_managed_build", return_value=True),
+        mock.patch.object(auto_updater, "_read_inno_install_location", return_value=install_location),
+        mock.patch.object(auto_updater, "LAUNCHED_STATE_WRITE_ATTEMPTS", 2),
+        mock.patch.object(auto_updater, "_write_update_state", side_effect=OSError("denied")),
+        mock.patch.object(auto_updater.time, "sleep"),
+        pytest.raises(UpdateError, match="launched 상태를 기록하지 못했습니다"),
+    ):
+        launch_staged_installer_update(
+            data_dir=tmp_path,
+            wait_for_pid=4321,
+            popen=lambda command, **_kwargs: spawned.append(command),
+        )
+
+    assert len(spawned) == 1
+    retained = load_pending_update(auto_updater.update_state_path(tmp_path))
+    assert retained is not None and retained.phase == "ready"
     assert retained.installer_log_path == staged.installer_log_path
 
 

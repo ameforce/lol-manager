@@ -56,6 +56,9 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Filename: "{app}\{#MyAppExeName}"; Description: "{#MyAppName} 실행"; Flags: nowait postinstall skipifsilent; Check: ShouldLaunchLOLManager
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: ShouldLaunchLOLManager
 
+[InstallDelete]
+Type: files; Name: "{app}\.lolmanager-installer-managed"
+
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
 

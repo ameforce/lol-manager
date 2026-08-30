@@ -63,6 +63,8 @@ DOWNLOAD_CHUNK_BYTES = 128 * 1024
 MAX_INSTALLER_BYTES = 300 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_RELEASE_METADATA_BYTES = 1024 * 1024
+LAUNCHED_STATE_WRITE_ATTEMPTS = 3
+LAUNCHED_STATE_WRITE_RETRY_SECONDS = 0.05
 USER_AGENT = "LOLManager-Updater/1"
 
 _RELEASE_TAG_RE = re.compile(r"^v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
@@ -592,6 +594,23 @@ def _write_update_state(state: UpdateState, *, state_path: Path) -> None:
     _atomic_write_json(state_path, _state_mapping(state))
 
 
+def _write_launched_update_state(state: UpdateState, *, state_path: Path) -> None:
+    """Persist a spawned installer state, tolerating transient replacement locks."""
+    last_error: OSError | None = None
+    for attempt in range(LAUNCHED_STATE_WRITE_ATTEMPTS):
+        try:
+            _write_update_state(state, state_path=state_path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt + 1 < LAUNCHED_STATE_WRITE_ATTEMPTS:
+                time.sleep(LAUNCHED_STATE_WRITE_RETRY_SECONDS)
+    raise UpdateError(
+        "installer는 시작되었지만 launched 상태를 기록하지 못했습니다. "
+        "installer 로그와 스테이징 파일은 보존됩니다."
+    ) from last_error
+
+
 def _sha256_file(path: Path, *, maximum: int) -> tuple[str, int]:
     try:
         size = int(path.stat().st_size)
@@ -675,6 +694,41 @@ def _clear_update_state(
     except OSError:
         return False
     return True
+
+
+def _remove_superseded_ready_stage(
+    previous: UpdateState | None,
+    replacement: UpdateState,
+    *,
+    state_path: Path,
+    data_dir: Path | None,
+) -> None:
+    """Best-effort cleanup of a superseded, never-launched installer only."""
+    if previous is None or previous.phase != "ready":
+        return
+    old_stage = Path(previous.installer_path).parent
+    replacement_stage = Path(replacement.installer_path).parent
+    if old_stage == replacement_stage:
+        return
+    staging_root = update_staging_root(data_dir)
+    if (
+        old_stage.name != f"v{previous.target_version}"
+        or not _is_within(old_stage, staging_root)
+        or not _is_within(replacement_stage, staging_root)
+    ):
+        return
+    try:
+        active = load_pending_update(state_path)
+    except UpdateError:
+        return
+    if active != replacement:
+        return
+    try:
+        shutil.rmtree(old_stage)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def inspect_startup_update(
@@ -900,6 +954,9 @@ class InstallerUpdateService:
         if not self._single_flight.acquire(blocking=False):
             raise UpdateBusyError("업데이트 확인 또는 다운로드가 이미 진행 중입니다.")
         try:
+            previous = load_pending_update(self._state_path)
+            if previous is not None and previous.phase == "launched":
+                raise UpdateBusyError("이미 적용을 시작한 업데이트가 있습니다.")
             checksum_bytes = self._download_limited_bytes(
                 release.checksum_url,
                 maximum=MAX_CHECKSUM_BYTES,
@@ -925,7 +982,21 @@ class InstallerUpdateService:
                 installer_log_path=str((stage_dir / INSTALLER_LOG_FILENAME).resolve()),
                 created_at_unix=time.time(),
             )
-            _write_update_state(state, state_path=self._state_path)
+            try:
+                _write_update_state(state, state_path=self._state_path)
+            except OSError as exc:
+                if previous is None or Path(previous.installer_path).parent != stage_dir:
+                    try:
+                        shutil.rmtree(stage_dir)
+                    except OSError:
+                        pass
+                raise UpdateError("스테이징된 업데이트 상태를 기록하지 못했습니다.") from exc
+            _remove_superseded_ready_stage(
+                previous,
+                state,
+                state_path=self._state_path,
+                data_dir=self._data_dir,
+            )
             return StagedUpdate(state=state, downloaded_bytes=downloaded_bytes)
         finally:
             self._single_flight.release()
@@ -987,7 +1058,10 @@ def launch_staged_installer_update(
     active = validate_staged_update(state_path=state_file, data_dir=data_dir)
     ready = active if active.phase == "ready" else replace(active, phase="ready")
     if ready != active:
-        _write_update_state(ready, state_path=state_file)
+        try:
+            _write_update_state(ready, state_path=state_file)
+        except OSError as exc:
+            raise UpdateError("업데이트 상태를 ready로 기록하지 못했습니다.") from exc
     pid = installer_bootstrap_wait_pid() if wait_for_pid is None else int(wait_for_pid)
     request = _build_update_apply_request(ready, wait_for_pid=pid)
     try:
@@ -1000,7 +1074,7 @@ def launch_staged_installer_update(
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError("silent installer 업데이트를 시작하지 못했습니다.") from exc
     launched = replace(ready, phase="launched")
-    _write_update_state(launched, state_path=state_file)
+    _write_launched_update_state(launched, state_path=state_file)
     return replace(request, state=launched)
 
 
