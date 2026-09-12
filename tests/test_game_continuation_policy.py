@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from lolmanager.cli import entrypoint
 from lolmanager.cli.entrypoint import (
     ContinueAfterGamePolicy,
+    _should_force_first_cycle_postgame,
     process_postgame,
     should_continue_after_game,
 )
@@ -17,6 +18,42 @@ from lolmanager.core.lcu_client import LcuLoopAction, PHASE_WAITING_FOR_STATS
 def test_next_game_continuation_requires_explicit_opt_in() -> None:
     assert should_continue_after_game(False) is False
     assert should_continue_after_game(True) is True
+
+
+def test_first_cycle_postgame_forces_one_run_in_one_game_mode() -> None:
+    assert (
+        _should_force_first_cycle_postgame(
+            cycle_count=1, continue_after_game=False
+        )
+        is True
+    )
+    assert (
+        _should_force_first_cycle_postgame(
+            cycle_count=1, continue_after_game=lambda: False
+        )
+        is True
+    )
+
+
+def test_first_cycle_postgame_force_applies_only_once() -> None:
+    assert (
+        _should_force_first_cycle_postgame(
+            cycle_count=1, continue_after_game=True
+        )
+        is False
+    )
+    assert (
+        _should_force_first_cycle_postgame(
+            cycle_count=2, continue_after_game=False
+        )
+        is False
+    )
+    assert (
+        _should_force_first_cycle_postgame(
+            cycle_count=3, continue_after_game=lambda: False
+        )
+        is False
+    )
 
 
 def test_live_continuation_policy_tracks_both_runtime_transitions_and_falls_back(
