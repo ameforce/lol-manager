@@ -256,6 +256,15 @@ def _should_process_postgame_at_cycle(phase: object) -> bool:
     return phase in POSTGAME_PHASES
 
 
+def _should_force_first_cycle_postgame(
+    *, cycle_count: int, continue_after_game: object
+) -> bool:
+    """시작 직후 첫 사이클이 점수판이면 한 게임 모드라도 1회를 보장한다."""
+    if cycle_count != 1:
+        return False
+    return not should_continue_after_game(continue_after_game)
+
+
 def resolve_ban_name_for_runtime(
     cache_path: Path,
     *,
@@ -3680,6 +3689,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     threshold = 0.85
     confirm_check_interval = 0.2
 
+    cycle_count = 0
     while True:
         phase_attempt_at_cycle = _poll_lcu_phase_attempt(
             lcu, logger, "사이클 시작", max_age_sec=0.5
@@ -3693,6 +3703,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
             time.sleep(interval_sec)
             continue
 
+        cycle_count += 1
         cycle_ingame_active = phase_at_cycle in {
             PHASE_IN_PROGRESS,
             PHASE_RECONNECT,
@@ -3707,6 +3718,17 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 "LCU postgame 단계 감지(사이클 시작,phase=%s). 엔드 화면 처리로 전환합니다.",
                 phase_at_cycle,
             )
+            if _should_force_first_cycle_postgame(
+                cycle_count=cycle_count,
+                continue_after_game=current_continue_after_game,
+            ):
+                logger.info(
+                    "시작 시 점수판 감지(한 게임 모드). "
+                    "Start 1회 보장을 위해 다음 매칭 1회 진행합니다."
+                )
+                effective_continue_after_game: object = True
+            else:
+                effective_continue_after_game = current_continue_after_game
             should_continue = process_postgame(
                 tpl_end_next,
                 tpl_end_one_more,
@@ -3721,7 +3743,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 interval_sec,
                 logger,
                 lcu=lcu,
-                continue_after_game=current_continue_after_game,
+                continue_after_game=effective_continue_after_game,
             )
             if not should_continue:
                 logger.info("한 게임 모드 완료. 자동화를 종료합니다.")
