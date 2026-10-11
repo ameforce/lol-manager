@@ -41,6 +41,7 @@ from lolmanager.core.gui_preferences import (
     save_continue_after_game_preference,
 )
 from lolmanager.core.role_setting_data import load_role_setting_data
+from lolmanager.core.runtime_events import RuntimeEvent, parse_runtime_event
 from lolmanager.core.match_timing import format_duration_mmss, load_match_timing_stats
 from lolmanager.gui.log_view_model import (
     ROLE_CLEAR_STATES,
@@ -2017,77 +2018,25 @@ class LolManagerGui:
         finally:
             txt.configure(state=tk.DISABLED)
 
+    def _apply_runtime_event(self, event: RuntimeEvent) -> None:
+        if event.kind == "client_state":
+            state = str(event.value)
+            self.client_state_var.set(state)
+            if state in ROLE_CLEAR_STATES:
+                self._set_role(None)
+            self._on_client_state_for_match_timer(state)
+        elif event.kind == "pick_turn":
+            self.my_turn_var.set("True" if event.value else "False")
+        elif event.kind == "role":
+            self._set_role(str(event.value))
+        elif event.kind == "pick_target":
+            self._set_pick_target_champion(str(event.value))
+        elif event.kind == "pick_blocked":
+            self._mark_blocked_norm(self._norm_champ_name(event.value))
+
     def _append_log(self, line: str) -> None:
         if not line:
             return
-
-        if "현재 상태 업데이트: client_state=" in line:
-            try:
-                state = line.split("client_state=", 1)[1].strip()
-                self.client_state_var.set(state)
-                if state in ROLE_CLEAR_STATES:
-                    self._set_role(None)
-                self._on_client_state_for_match_timer(state)
-            except Exception:
-                pass
-        if "현재 상태 업데이트: is_my_pick_turn=" in line:
-            try:
-                self.my_turn_var.set(line.split("is_my_pick_turn=", 1)[1].strip())
-            except Exception:
-                pass
-        role_key = role_key_from_log_line(line)
-        if role_key:
-            try:
-                self._set_role(role_key)
-            except Exception:
-                pass
-
-        if "챔피언 검색 입력:" in line:
-            try:
-                name = line.split("챔피언 검색 입력:", 1)[1].strip()
-                if name:
-                    self._set_pick_target_champion(name)
-            except Exception:
-                pass
-
-        if "예비 픽을 시도합니다" in line:
-            try:
-                self._mark_blocked_current_pick()
-            except Exception:
-                pass
-        if "예비 챔피언 전환 시도:" in line:
-            try:
-                after = line.split("예비 챔피언 전환 시도:", 1)[1].strip()
-
-                parts = after.split(None, 1)
-                if (
-                    len(parts) == 2
-                    and parts[0].startswith("#")
-                    and parts[0][1:].isdigit()
-                ):
-                    self._set_pick_target_champion(parts[1].strip())
-                elif after:
-                    self._set_pick_target_champion(after)
-            except Exception:
-                pass
-
-        if "밴/미선택으로 판단):" in line and (
-            "예비 전환 후 Ready가 회색입니다" in line
-            or "예비 챔피언도 비활성 Ready로 감지되었습니다" in line
-        ):
-            try:
-                nm = line.rsplit("):", 1)[1].strip()
-                if nm:
-                    self._mark_blocked_norm(self._norm_champ_name(nm))
-            except Exception:
-                pass
-        if "픽 준비 버튼 클릭 완료(예비 전환):" in line:
-            try:
-                name = line.split("픽 준비 버튼 클릭 완료(예비 전환):", 1)[1].strip()
-                if name:
-                    self._set_pick_target_champion(name)
-            except Exception:
-                pass
 
         s = str(line)
         if not s.endswith("\n"):
@@ -2236,29 +2185,13 @@ class LolManagerGui:
         except Exception:
             return tkfont.Font()
 
-        s = str(line)
-        if not s.endswith("\n"):
-            s = s + "\n"
-
-        self._log_buf.append(s)
-
-        self._queue_last_message(s)
-
-        if self._log_window is not None and self._log_text is not None:
-            try:
-                self._log_text.configure(state=tk.NORMAL)
-                self._log_text.insert(tk.END, s)
-                self._log_text.see(tk.END)
-                self._log_text.configure(state=tk.DISABLED)
-            except Exception:
-                pass
-
     def _reader_loop(self, proc: subprocess.Popen[str]) -> None:
         try:
             if proc.stdout is None:
                 return
             for line in proc.stdout:
-                self._log_q.put(line)
+                event = parse_runtime_event(line)
+                self._log_q.put(event if event is not None else line)
         except Exception as exc:
             self._log_q.put(f"[GUI] log reader error: {exc}\n")
         finally:
@@ -2278,17 +2211,9 @@ class LolManagerGui:
             )
             return False
 
-        any_champ = False
-        for role, entry in (cfg.data or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            champ = str(entry.get("champion") or "").strip()
-            if champ:
-                any_champ = True
-                break
-        if not any_champ:
+        if not cfg.is_automation_ready():
             messagebox.showinfo(
-                "설정 필요", "champion 설정이 비어있습니다. 설정 GUI를 엽니다."
+                "설정 필요", "포지션별 챔피언 또는 칼바람 자동 선택과 선호 챔피언을 설정하세요."
             )
             self.open_config()
             return False
@@ -2330,6 +2255,7 @@ class LolManagerGui:
             cmd = [sys.executable, "--cli"]
         else:
             cmd = [sys.executable, "-m", "lolmanager", "--cli"]
+        cmd.append("--runtime-events")
         if preference_saved:
             cmd.extend(
                 [
@@ -2351,6 +2277,9 @@ class LolManagerGui:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=os.environ | {"PYTHONIOENCODING": "utf-8"},
                 bufsize=1,
                 creationflags=flags,
             )
@@ -2609,7 +2538,10 @@ class LolManagerGui:
                 if item is None:
                     self._finalize_process()
                     break
-                self._append_log(str(item))
+                if isinstance(item, RuntimeEvent):
+                    self._apply_runtime_event(item)
+                else:
+                    self._append_log(str(item))
                 processed += 1
         finally:
             pending = self._log_text_pending

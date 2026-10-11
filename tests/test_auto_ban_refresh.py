@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lolmanager.core.auto_ban_refresh import (
     AUTO_BAN_REFRESH_RETRY_MS,
     AUTO_BAN_REFRESH_SUCCESS_MS,
@@ -240,3 +242,74 @@ def test_refresh_coordinator_does_not_start_duplicate_in_flight_target(
     coordinator.refresh_configured_targets()
 
     assert len(started_workers) == 1
+
+
+def _controlled_coordinator(config_path):
+    workers, timers, updated = [], [], []
+
+    def schedule(delay, callback):
+        if delay == 0:
+            callback()
+        else:
+            timers.append((delay, callback))
+
+    coordinator = AutoBanRefreshCoordinator(
+        config_path=config_path,
+        schedule_after_ms=schedule,
+        run_background=workers.append,
+        on_updated=lambda: updated.append(True),
+    )
+    return coordinator, workers, timers, updated
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_config_change_during_refresh_resumes_the_latest_generation(tmp_path, success):
+    path = tmp_path / "config.json"
+    _write_config(path, {"top": {"champion": "말파이트", "ban": AUTO_BAN_VALUE}})
+    coordinator, workers, timers, updated = _controlled_coordinator(path)
+    coordinator._refresh_target = lambda _target: success
+    coordinator.start()
+    coordinator.refresh_configured_targets()
+    coordinator.refresh_configured_targets()
+    assert len(workers) == 1
+    workers.pop(0)()
+    assert len(workers) == 1
+    assert not timers and not updated
+    workers.pop(0)()
+    assert [delay for delay, _ in timers] == [
+        AUTO_BAN_REFRESH_SUCCESS_MS if success else AUTO_BAN_REFRESH_RETRY_MS
+    ]
+    assert updated == ([True] if success else [])
+    timers.pop(0)[1]()
+    assert len(workers) == 1
+
+
+@pytest.mark.parametrize("close", [True, False])
+def test_closed_or_removed_target_is_not_rescheduled_by_an_old_worker(tmp_path, close):
+    path = tmp_path / "config.json"
+    _write_config(path, {"top": {"champion": "말파이트", "ban": AUTO_BAN_VALUE}})
+    coordinator, workers, timers, updated = _controlled_coordinator(path)
+    coordinator._refresh_target = lambda _target: True
+    coordinator.start()
+    if close:
+        coordinator.close()
+    else:
+        _write_config(path, {})
+        coordinator.refresh_configured_targets()
+    workers.pop(0)()
+    assert not workers and not timers and not updated
+
+
+def test_old_timer_cannot_create_an_extra_refresh_chain(tmp_path):
+    path = tmp_path / "config.json"
+    _write_config(path, {"top": {"champion": "말파이트", "ban": AUTO_BAN_VALUE}})
+    coordinator, workers, timers, updated = _controlled_coordinator(path)
+    coordinator._refresh_target = lambda _target: True
+    coordinator.start()
+    workers.pop(0)()
+    old_timer = timers.pop()[1]
+    coordinator.refresh_configured_targets()
+    old_timer()
+    assert len(workers) == 1
+    workers.pop(0)()
+    assert len(timers) == 1

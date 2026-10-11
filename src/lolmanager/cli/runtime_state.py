@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from lolmanager.platform.external_apps import LeagueClientExitGuard
 
 from lolmanager.core.client_state import ClientState
 from lolmanager.core.lcu_client import (
@@ -15,6 +19,32 @@ from lolmanager.core.lcu_client import (
     PHASE_WAITING_FOR_STATS,
     PHASE_WATCH_IN_PROGRESS,
 )
+
+
+@dataclass
+class RuntimeState:
+    """Mutable state owned by one automation run, reset together on Start."""
+
+    client_state: ClientState = ClientState.UNKNOWN
+    client_state_updated_at: float = 0.0
+    is_my_pick_turn: bool = False
+    my_pick_turn_updated_at: float = 0.0
+    matchmaking_start_pending_at: float | None = None
+    my_pick_turn_miss_streak: int = 0
+    match_started_at_mono: float | None = None
+    last_auto_lobby_create_at: float = 0.0
+    last_finding_logged: dict[str, bool] = field(default_factory=dict)
+    last_accept_click_at: dict[str, float] = field(default_factory=dict)
+    last_lcu_ready_accept_at: dict[str, float] = field(default_factory=dict)
+    last_popup_click_at: dict[str, float] = field(default_factory=dict)
+    last_restore_wait_log_state: dict[str, object] = field(default_factory=dict)
+    league_exit_guard: LeagueClientExitGuard | None = None
+    pick_target: str = ""
+
+    def reset(self) -> None:
+        fresh = type(self)()
+        for item in fields(self):
+            setattr(self, item.name, getattr(fresh, item.name))
 
 
 LCU_UI_ACTION_CLASSIFICATION: dict[str, str] = {

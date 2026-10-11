@@ -916,8 +916,8 @@ class CliLcuStateTests(unittest.TestCase):
         self, fake_lcu: _FakeReserveFallbackLcu
     ) -> tuple[mock.Mock, mock.Mock, mock.Mock]:
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
-        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.UNKNOWN
+        entrypoint.RUNTIME_STATE.is_my_pick_turn = False
 
         def stop_at_next_sleep(_seconds: float) -> None:
             raise RuntimeError("stop after champ-select sleep")
@@ -928,7 +928,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -994,7 +994,7 @@ class CliLcuStateTests(unittest.TestCase):
 
     def test_cli_main_stops_after_authoritative_manual_queue_cancel(self) -> None:
         fake_lcu = _FakeCliManualQueueCancelLcu()
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.UNKNOWN
 
         with (
             mock.patch.object(
@@ -1002,7 +1002,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1114,7 +1114,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1181,7 +1181,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1246,7 +1246,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1318,7 +1318,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1437,7 +1437,7 @@ class CliLcuStateTests(unittest.TestCase):
     ) -> None:
         fake_lcu = _FakeCliReadyCheckRematchLcu()
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         def stop_after_pick_wait(_seconds: float) -> None:
             if len(fake_lcu.select_calls) >= 2:
@@ -1449,7 +1449,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
             mock.patch.object(
                 entrypoint,
@@ -1513,7 +1513,7 @@ class CliLcuStateTests(unittest.TestCase):
     ) -> None:
         fake_lcu = _FakeCliChampSelectDodgeRematchLcu()
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         def stop_after_pick_wait(_seconds: float) -> None:
             if len(fake_lcu.select_calls) >= 2:
@@ -1525,7 +1525,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
             mock.patch.object(
                 entrypoint,
@@ -1587,7 +1587,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_cli_main_dodge_rematch_runs_fresh_ban_before_final_pick(self) -> None:
         fake_lcu = _FakeCliChampSelectDodgeRematchBanLcu()
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         def stop_after_rematch_actions(_seconds: float) -> None:
             if len(fake_lcu.select_calls) >= 3:
@@ -1599,7 +1599,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
             mock.patch.object(
                 entrypoint,
@@ -1661,7 +1661,7 @@ class CliLcuStateTests(unittest.TestCase):
     ) -> None:
         fake_lcu = _FakeCliFinalPickDodgeRematchLcu()
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         def fail_if_final_pick_waits(seconds: float) -> None:
             if seconds == 1.0 and len(fake_lcu.select_calls) == 2:
@@ -1673,7 +1673,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
             mock.patch.object(
                 entrypoint,
@@ -1736,7 +1736,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1806,7 +1806,7 @@ class CliLcuStateTests(unittest.TestCase):
             ),
             mock.patch.object(entrypoint, "install_exception_logger"),
             mock.patch.object(entrypoint, "ensure_external_apps_running_once"),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint,
                 "LeagueClientExitGuard",
@@ -1936,13 +1936,13 @@ class CliLcuStateTests(unittest.TestCase):
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         stage = "테스트 복원 대기"
         minimized_rect = (-32000, -32000, -31900, -31900)
-        entrypoint._last_restore_wait_log_state.pop(stage, None)
+        entrypoint.RUNTIME_STATE.last_restore_wait_log_state.pop(stage, None)
 
         with (
             mock.patch.object(
                 entrypoint, "find_league_window_rect", return_value=minimized_rect
             ),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint.time, "sleep") as sleep,
             self.assertLogs(logger, level="INFO") as logs,
         ):
@@ -1987,7 +1987,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_lcu_ready_check_accept_is_cooled_down(self) -> None:
         fake = _FakeLcu()
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         with mock.patch.object(entrypoint.time, "monotonic", side_effect=[100.0, 100.1]):
             self.assertTrue(entrypoint._accept_ready_check_via_lcu(fake, "stage", logger))
@@ -1998,7 +1998,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_lcu_ready_check_legacy_false_waits_without_image_fallback(self) -> None:
         fake = _FakeLcu(accept_result=False)
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         result = entrypoint._accept_ready_check_lcu_attempt(fake, "stage", logger)
 
@@ -2376,7 +2376,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_lobby_confirm_template_does_not_click_popup_confirm(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePhaseLcu(PHASE_LOBBY)
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.LOBBY
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.LOBBY
         confirm_template = (
             ROOT
             / "src"
@@ -2468,7 +2468,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_authoritative_postgame_phase_keeps_ui_only_popup_scan(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePhaseLcu(PHASE_END_OF_GAME)
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.POSTGAME_SCORE
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.POSTGAME_SCORE
         confirm_template = (
             ROOT
             / "src"
@@ -2580,7 +2580,7 @@ class CliLcuStateTests(unittest.TestCase):
                 LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME),
             ]
         )
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.UNKNOWN
 
         with (
             mock.patch.object(entrypoint.time, "sleep") as sleep,
@@ -2624,7 +2624,7 @@ class CliLcuStateTests(unittest.TestCase):
                         LcuDecision(LcuOutcome.SUCCESS, value=PHASE_END_OF_GAME),
                     ]
                 )
-                entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
+                entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.UNKNOWN
 
                 entrypoint.monitor_ingame_and_postgame(
                     Path("end_next-button.png"),
@@ -3204,7 +3204,7 @@ class CliLcuStateTests(unittest.TestCase):
                 "find_league_window_rect",
                 return_value=(-32000, -32000, -31900, -31900),
             ),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "search_and_act") as search,
             mock.patch.object(entrypoint, "detect_champion_select") as detect,
             mock.patch.object(entrypoint.Path, "exists", return_value=True),
@@ -3526,7 +3526,7 @@ class CliLcuStateTests(unittest.TestCase):
         self,
     ) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.POSTGAME_SCORE
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.POSTGAME_SCORE
         fake = _FakePhaseBlockingModalLcu(
             PHASE_END_OF_GAME,
             LcuDecision(LcuOutcome.SUCCESS, reason="modal dismissed"),
@@ -3617,7 +3617,7 @@ class CliLcuStateTests(unittest.TestCase):
                 PHASE_CHAMP_SELECT,
             ]
         )
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         with (
             mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0),
@@ -3888,7 +3888,7 @@ class CliLcuStateTests(unittest.TestCase):
         fake = _FakeChampSelectPhaseGuardLcu(
             [PHASE_LOBBY, PHASE_MATCHMAKING, PHASE_READY_CHECK, PHASE_CHAMP_SELECT]
         )
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
         wait_attempt = entrypoint.ChampSelectLcuAttempt(
             False,
             LcuLoopAction.WAIT_AUTHORITATIVE,
@@ -3927,7 +3927,7 @@ class CliLcuStateTests(unittest.TestCase):
     ) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeChampSelectPhaseGuardLcu([PHASE_READY_CHECK])
-        entrypoint._last_lcu_ready_accept_at.clear()
+        entrypoint.RUNTIME_STATE.last_lcu_ready_accept_at.clear()
 
         with mock.patch.object(entrypoint, "LCU_READY_ACCEPT_COOLDOWN_SEC", 0.0):
             guarded = entrypoint._guard_champ_select_phase_exit(
@@ -4034,8 +4034,8 @@ class CliLcuStateTests(unittest.TestCase):
 
     def test_champ_select_phase_exit_clears_pick_turn_before_rematch(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = True
-        entrypoint.RUNTIME_STATE["my_pick_turn_updated_at"] = 1.0
+        entrypoint.RUNTIME_STATE.is_my_pick_turn = True
+        entrypoint.RUNTIME_STATE.my_pick_turn_updated_at = 1.0
 
         try:
             with mock.patch.object(entrypoint.time, "monotonic", return_value=25.0):
@@ -4051,19 +4051,19 @@ class CliLcuStateTests(unittest.TestCase):
                 )
 
             self.assertTrue(handled)
-            self.assertFalse(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
+            self.assertFalse(entrypoint.RUNTIME_STATE.is_my_pick_turn)
             self.assertEqual(
-                entrypoint.RUNTIME_STATE["my_pick_turn_updated_at"],
+                entrypoint.RUNTIME_STATE.my_pick_turn_updated_at,
                 25.0,
             )
         finally:
-            entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+            entrypoint.RUNTIME_STATE.is_my_pick_turn = False
 
     def test_champ_select_session_reset_clears_stale_runtime_state(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.BANPICK
-        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = True
-        entrypoint._my_pick_turn_miss_streak = 2
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.BANPICK
+        entrypoint.RUNTIME_STATE.is_my_pick_turn = True
+        entrypoint.RUNTIME_STATE.my_pick_turn_miss_streak = 2
 
         try:
             with mock.patch.object(entrypoint.time, "monotonic", return_value=30.0):
@@ -4080,15 +4080,15 @@ class CliLcuStateTests(unittest.TestCase):
 
             self.assertTrue(handled)
             self.assertEqual(
-                entrypoint.RUNTIME_STATE["client_state"],
+                entrypoint.RUNTIME_STATE.client_state,
                 entrypoint.ClientState.UNKNOWN,
             )
-            self.assertFalse(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
-            self.assertEqual(entrypoint._my_pick_turn_miss_streak, 0)
+            self.assertFalse(entrypoint.RUNTIME_STATE.is_my_pick_turn)
+            self.assertEqual(entrypoint.RUNTIME_STATE.my_pick_turn_miss_streak, 0)
         finally:
-            entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.UNKNOWN
-            entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
-            entrypoint._my_pick_turn_miss_streak = 0
+            entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.UNKNOWN
+            entrypoint.RUNTIME_STATE.is_my_pick_turn = False
+            entrypoint.RUNTIME_STATE.my_pick_turn_miss_streak = 0
 
     def test_missing_ban_skips_ban_action_without_lcu_write(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
@@ -4135,7 +4135,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_lcu_champ_select_action_state_marks_ban_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeLocalActionLcu("ban")
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.PREPICK
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.PREPICK
 
         action_type = entrypoint._apply_lcu_champ_select_action_state(
             fake, 100.0, logger, "테스트"
@@ -4143,15 +4143,15 @@ class CliLcuStateTests(unittest.TestCase):
 
         self.assertEqual(action_type, "ban")
         self.assertEqual(
-            entrypoint.RUNTIME_STATE["client_state"],
+            entrypoint.RUNTIME_STATE.client_state,
             entrypoint.ClientState.BANPICK,
         )
 
     def test_lcu_champ_select_action_state_marks_pick_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakeLocalActionLcu("pick")
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.BANPICK
-        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.BANPICK
+        entrypoint.RUNTIME_STATE.is_my_pick_turn = False
 
         action_type = entrypoint._apply_lcu_champ_select_action_state(
             fake, 100.0, logger, "테스트"
@@ -4159,21 +4159,21 @@ class CliLcuStateTests(unittest.TestCase):
 
         self.assertEqual(action_type, "pick")
         self.assertEqual(
-            entrypoint.RUNTIME_STATE["client_state"],
+            entrypoint.RUNTIME_STATE.client_state,
             entrypoint.ClientState.PICK,
         )
-        self.assertTrue(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
+        self.assertTrue(entrypoint.RUNTIME_STATE.is_my_pick_turn)
 
     def test_champ_select_phase_does_not_regress_wait_game_start_to_prepick(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         fake = _FakePhaseLcu(PHASE_CHAMP_SELECT)
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.WAIT_GAME_START
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.WAIT_GAME_START
 
         phase = entrypoint._poll_lcu_phase(fake, logger, "인게임 시작 대기")
 
         self.assertEqual(phase, PHASE_CHAMP_SELECT)
         self.assertEqual(
-            entrypoint.RUNTIME_STATE["client_state"],
+            entrypoint.RUNTIME_STATE.client_state,
             entrypoint.ClientState.WAIT_GAME_START,
         )
 
@@ -4185,10 +4185,10 @@ class CliLcuStateTests(unittest.TestCase):
                 LcuDecision(LcuOutcome.SUCCESS, value=PHASE_IN_PROGRESS),
             ]
         )
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.PREPICK
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.PREPICK
 
         with (
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(
                 entrypoint, "monitor_ingame_and_postgame", return_value=False
             ) as monitor,
@@ -4222,7 +4222,7 @@ class CliLcuStateTests(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertEqual(
-            entrypoint.RUNTIME_STATE["client_state"], entrypoint.ClientState.INGAME
+            entrypoint.RUNTIME_STATE.client_state, entrypoint.ClientState.INGAME
         )
         monitor.assert_called_once()
         pick_popups.assert_not_called()
@@ -4297,7 +4297,7 @@ class CliLcuStateTests(unittest.TestCase):
     def test_pick_popups_clicks_only_decline_when_both_actions_match(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         rect = (0, 0, 1280, 720)
-        entrypoint._last_popup_click_at.clear()
+        entrypoint.RUNTIME_STATE.last_popup_click_at.clear()
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4328,8 +4328,8 @@ class CliLcuStateTests(unittest.TestCase):
     def test_myturn_image_fallback_helper_updates_pick_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         rect = (0, 0, 1280, 720)
-        entrypoint.RUNTIME_STATE["client_state"] = entrypoint.ClientState.PICK
-        entrypoint.RUNTIME_STATE["is_my_pick_turn"] = False
+        entrypoint.RUNTIME_STATE.client_state = entrypoint.ClientState.PICK
+        entrypoint.RUNTIME_STATE.is_my_pick_turn = False
 
         with mock.patch.object(
             entrypoint,
@@ -4340,7 +4340,7 @@ class CliLcuStateTests(unittest.TestCase):
                 rect, Path("pick_myturn-text.png"), 0.85, logger
             )
 
-        self.assertTrue(entrypoint.RUNTIME_STATE["is_my_pick_turn"])
+        self.assertTrue(entrypoint.RUNTIME_STATE.is_my_pick_turn)
         find_matches.assert_called_once_with(
             rect,
             [("myturn", Path("pick_myturn-text.png"))],
@@ -4416,7 +4416,7 @@ class CliLcuStateTests(unittest.TestCase):
             mock.patch.object(
                 entrypoint, "find_league_window_rect", return_value=minimized_rect
             ),
-            mock.patch.object(entrypoint, "_LEAGUE_EXIT_GUARD", None),
+            mock.patch.object(entrypoint.RUNTIME_STATE, "league_exit_guard", None),
             mock.patch.object(entrypoint, "find_best_template") as find_best_template,
             mock.patch.object(entrypoint, "search_and_act") as search,
             mock.patch.object(entrypoint, "click_relative") as click_relative,
@@ -4540,7 +4540,7 @@ class AutoLobbyCreatePolicyTests(unittest.TestCase):
                 return LcuDecision(LcuOutcome.SUCCESS, reason="created")
 
         fake = _FakeCreateLcu()
-        entrypoint._last_auto_lobby_create_at = 0.0
+        entrypoint.RUNTIME_STATE.last_auto_lobby_create_at = 0.0
 
         with mock.patch.object(entrypoint.time, "monotonic", return_value=100.0):
             entrypoint._maybe_auto_create_lobby_for_home_screen(
@@ -4569,7 +4569,7 @@ class AutoLobbyCreatePolicyTests(unittest.TestCase):
                 return LcuDecision(LcuOutcome.SUCCESS, reason="created")
 
         fake = _FakeCreateLcu()
-        entrypoint._last_auto_lobby_create_at = 0.0
+        entrypoint.RUNTIME_STATE.last_auto_lobby_create_at = 0.0
 
         entrypoint._maybe_auto_create_lobby_for_home_screen(
             cast(Any, fake), PHASE_LOBBY, logging.getLogger("test")
