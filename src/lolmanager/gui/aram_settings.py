@@ -6,6 +6,8 @@ from typing import Callable, Sequence
 
 from lolmanager.core.aram import AramPreferences
 from lolmanager.core.champion_names import normalize_name
+from lolmanager.core.opgg_counter_recommendations import display_value_to_champion_name
+from lolmanager.gui.champion_candidate_values import build_champion_candidate_values
 
 
 class AramSettingsPanel(ttk.Frame):
@@ -19,9 +21,12 @@ class AramSettingsPanel(ttk.Frame):
         super().__init__(parent, padding=12)
         self.on_change = on_change
         self.name_index: dict[str, str] = {}
+        self.champion_names: list[str] = []
+        self.ranked_entries: list[tuple[str, str, str]] = []
         self.enabled = tk.BooleanVar(self, value=preferences.enabled)
         self.champion = tk.StringVar(self)
         self.message = tk.StringVar(self)
+        self.tier_status = tk.StringVar(self, value="칼바람 티어 불러오는 중…")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(3, weight=1)
 
@@ -45,6 +50,9 @@ class AramSettingsPanel(ttk.Frame):
         self.champion_combo.grid(row=0, column=0, sticky="ew")
         self.champion_combo.bind("<Return>", self._add)
         ttk.Button(add_row, text="추가", command=self._add).grid(row=0, column=1, padx=(8, 0))
+        ttk.Label(add_row, textvariable=self.tier_status).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
         list_frame = ttk.Frame(self)
         list_frame.grid(row=3, column=0, sticky="nsew")
@@ -66,8 +74,28 @@ class AramSettingsPanel(ttk.Frame):
         self.set_preferences(preferences)
 
     def set_champion_names(self, names: Sequence[str]) -> None:
+        self.champion_names = list(names)
+        self._refresh_candidates()
+
+    def set_ranked_entries(
+        self, entries: Sequence[tuple[str, str, str]], source: str
+    ) -> None:
+        self.ranked_entries = list(entries)
+        if entries:
+            suffix = " · 저장된 자료, 갱신 실패" if source == "cache_stale" else ""
+            self.tier_status.set(f"OP.GG 칼바람 · 티어/순위순{suffix}")
+        else:
+            self.tier_status.set("칼바람 티어를 불러오지 못해 이름순으로 표시합니다.")
+        self._refresh_candidates()
+
+    def _refresh_candidates(self) -> None:
+        names = [*self.champion_names, *(entry[0] for entry in self.ranked_entries)]
         self.name_index = {normalize_name(name): name for name in names}
-        self.champion_combo.configure(values=list(names))
+        values = build_champion_candidate_values(
+            ranked_entries=self.ranked_entries,
+            all_champion_values=sorted(self.name_index.values(), key=normalize_name),
+        )
+        self.champion_combo.configure(values=values)
 
     def set_preferences(self, preferences: AramPreferences) -> None:
         self.enabled.set(preferences.enabled)
@@ -84,7 +112,7 @@ class AramSettingsPanel(ttk.Frame):
         })
 
     def _add(self, _event=None) -> str:
-        name = " ".join(self.champion.get().split())
+        name = display_value_to_champion_name(self.champion.get())
         if not name:
             return "break"
         key = normalize_name(name)

@@ -215,6 +215,7 @@ _SW_SHOWNOACTIVATE = 4
 
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
 _SWP_NOACTIVATE = 0x0010
 _SWP_NOOWNERZORDER = 0x0200
 
@@ -364,6 +365,22 @@ def _top_hwnd(hwnd: int) -> int:
     except Exception:
         top = 0
     return top or int(hwnd)
+
+
+def _move_hwnd_frame_to(
+    hwnd: int, frame: tuple[int, int, int, int], x: int, y: int
+) -> bool:
+    """Position the visible frame, accounting for invisible Windows borders."""
+    if os.name != "nt" or not hwnd:
+        return False
+    rect = _RECT()
+    if not _USER32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+        return False
+    return bool(_USER32.SetWindowPos(
+        ctypes.c_void_p(hwnd), None,
+        int(x + rect.left - frame[0]), int(y + rect.top - frame[1]), 0, 0,
+        _SWP_NOSIZE | _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_NOOWNERZORDER,
+    ))
 
 
 def _get_foreground_hwnd() -> int:
@@ -580,7 +597,6 @@ class LolManagerGui:
         self._client_close_cleanup_deadline: Optional[float] = None
         self._last_client_rect: Optional[tuple[int, int, int, int]] = None
         self._last_geo_xy: Optional[tuple[int, int]] = None
-        self._outer_wh: Optional[tuple[int, int]] = None
         self._compact_root_size: Optional[tuple[int, int]] = None
         self._closing = False
 
@@ -1232,13 +1248,11 @@ class LolManagerGui:
         if width <= 0 or height <= 0:
             return
         if current_width == width and current_height == height:
-            self._outer_wh = (width, height)
             return
         try:
             self.root.geometry(f"{width}x{height}")
             self.root.minsize(width, height)
             self.root.maxsize(width, height)
-            self._outer_wh = (width, height)
         except Exception:
             pass
 
@@ -1425,25 +1439,27 @@ class LolManagerGui:
         self.chk_continue.pack(side=tk.LEFT, padx=(14, 0))
 
         ttk.Separator(root).pack(side=tk.TOP, fill=tk.X, pady=(10, 8))
+        self._build_status_footer(root)
 
+    def _build_status_footer(self, root: ttk.Frame) -> None:
         last = ttk.Frame(root)
         last.pack(side=tk.TOP, fill=tk.X)
+        last.columnconfigure(0, weight=1)
 
-        self.lbl_last = ttk.Label(last, textvariable=self.last_msg_var, anchor="w")
-        self.lbl_last.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Only the log column may shrink. Its requested width must not grow
+        # with a message and push the version/update labels out of the window.
+        self.lbl_last = ttk.Label(
+            last, textvariable=self.last_msg_var, anchor="w", width=1
+        )
+        self.lbl_last.grid(row=0, column=0, sticky="ew")
+        self.lbl_version = ttk.Label(last, textvariable=self.app_version_var, anchor="e")
+        self.lbl_version.grid(row=0, column=1, padx=(8, 0), sticky="e")
+        self.lbl_update_status = None
         if self._updates_enabled:
-            ttk.Label(
-                last,
-                textvariable=self.update_status_var,
-                foreground="#555555",
-                anchor="e",
-            ).pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Label(
-            last,
-            textvariable=self.app_version_var,
-            foreground="#555555",
-            anchor="e",
-        ).pack(side=tk.RIGHT, padx=(8, 0))
+            self.lbl_update_status = ttk.Label(
+                last, textvariable=self.update_status_var, anchor="e"
+            )
+            self.lbl_update_status.grid(row=0, column=2, padx=(8, 0), sticky="e")
         try:
             self.lbl_last.bind("<Configure>", self._on_last_label_configure)
         except Exception:
@@ -1675,10 +1691,8 @@ class LolManagerGui:
             width_px = 0
 
         if width_px <= 1:
-            try:
-                self.root.after_idle(self._update_last_message_label)
-            except Exception:
-                pass
+            # The Configure binding will retry once layout assigns usable
+            # space. Requeuing idle callbacks here can starve initial mapping.
             return
 
         avail_px = self._ttk_text_avail_width_px(self.lbl_last, width_px)
@@ -3062,45 +3076,25 @@ class LolManagerGui:
         left, top, right, _bottom = rect
         gap = int(getattr(self, "_snap_gap_px", 0))
 
-        w = h = 1
-        if self._outer_wh is not None:
-            w, h = self._outer_wh
+        try:
+            self.root.update_idletasks()
+            hwnd = _top_hwnd(int(self.root.winfo_id()))
+        except Exception:
+            return
+        # Tk's requested/client size can differ from the native frame after
+        # removing decorations. Always remeasure the top-level window, including
+        # after resize, restore, or a change of monitor/DPI.
+        frame = _get_hwnd_rect(hwnd)
+        if frame is not None:
+            w, h = frame[2] - frame[0], frame[3] - frame[1]
+            cur_xy = frame[:2]
+        elif os.name == "nt":
+            return
         else:
-            try:
-                self.root.update_idletasks()
-            except Exception:
-                return
-
-            if bool(getattr(self, "_is_frameless", False)):
-                w = int(self.root.winfo_width()) or int(self.root.winfo_reqwidth()) or 1
-                h = (
-                    int(self.root.winfo_height())
-                    or int(self.root.winfo_reqheight())
-                    or 1
-                )
-                self._outer_wh = (w, h)
-            else:
-                hwnd = 0
-                try:
-                    hwnd = int(self.root.winfo_id())
-                except Exception:
-                    hwnd = 0
-                wrect = _get_hwnd_rect(hwnd)
-                if wrect:
-                    w = max(1, int(wrect[2] - wrect[0]))
-                    h = max(1, int(wrect[3] - wrect[1]))
-                    self._outer_wh = (w, h)
-                else:
-                    w = (
-                        int(self.root.winfo_width())
-                        or int(self.root.winfo_reqwidth())
-                        or 1
-                    )
-                    h = (
-                        int(self.root.winfo_height())
-                        or int(self.root.winfo_reqheight())
-                        or 1
-                    )
+            w, h = self.root.winfo_width(), self.root.winfo_height()
+            cur_xy = (self.root.winfo_x(), self.root.winfo_y())
+        if w <= 0 or h <= 0:
+            return
 
         bounds = _work_area_for_rect(rect)
 
@@ -3120,21 +3114,6 @@ class LolManagerGui:
 
         xy = (x, y)
         if self._last_geo_xy == xy and self._last_client_rect == rect:
-            cur_xy: Optional[tuple[int, int]] = None
-            try:
-                hwnd = int(self.root.winfo_id())
-            except Exception:
-                hwnd = 0
-            if hwnd:
-                wrect = _get_hwnd_rect(hwnd)
-                if wrect is not None:
-                    cur_xy = (int(wrect[0]), int(wrect[1]))
-            if cur_xy is None:
-                try:
-                    cur_xy = (int(self.root.winfo_x()), int(self.root.winfo_y()))
-                except Exception:
-                    cur_xy = None
-
             tol_px = 2
             try:
                 tol_px = int(getattr(self, "_snap_tol_px", 2) or 2)
@@ -3149,7 +3128,11 @@ class LolManagerGui:
                 return
 
         try:
-            self.root.geometry(f"{int(x):+d}{int(y):+d}")
+            if frame is not None:
+                if not _move_hwnd_frame_to(hwnd, frame, x, y):
+                    return
+            else:
+                self.root.geometry(f"{int(x):+d}{int(y):+d}")
         except Exception:
             pass
         else:

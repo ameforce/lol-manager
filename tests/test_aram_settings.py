@@ -8,21 +8,6 @@ from lolmanager.core.aram import AramPreferences
 from lolmanager.core.champion_config import ChampionConfig
 
 
-@pytest.fixture(scope="module")
-def tk_interpreter():
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk display unavailable: {exc}")
-    root.withdraw()
-    yield root
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-
-
 @pytest.fixture
 def tk_root(tk_interpreter):
     yield tk_interpreter
@@ -58,6 +43,48 @@ def descendants(widget):
     for child in widget.winfo_children():
         yield child
         yield from descendants(child)
+
+
+@pytest.mark.parametrize("names_first", [True, False])
+def test_tier_candidates_save_plain_names_without_changing_preference_priority(tk_root, names_first):
+    from lolmanager.gui.aram_settings import AramSettingsPanel
+
+    changed = mock.Mock()
+    preferences = AramPreferences(True, ("가렌", "럭스"))
+    panel = AramSettingsPanel(tk_root, preferences=preferences, on_change=changed)
+    entries = [("스웨인", "OP", "/swain"), ("럭스", "1티어", "/lux"), ("가렌", "3티어", "/garen")]
+    actions = [lambda: panel.set_champion_names(["가렌", "럭스", "스웨인", "아리"]),
+               lambda: panel.set_ranked_entries(entries, "opgg")]
+    for action in actions if names_first else reversed(actions):
+        action()
+    assert panel.champion_combo.cget("values") == (
+        "──────── OP ────────", "  1. 스웨인",
+        "──────── 1티어 ────────", "  2. 럭스",
+        "──────── 3티어 ────────", "  3. 가렌",
+        "──────── 기타 ────────", "아리",
+    )
+    assert panel.get_preferences() == preferences
+    changed.assert_not_called()
+    for value in ("──────── OP ────────", "  2. 럭스", "  1. 스웨인"):
+        panel.champion.set(value)
+        panel._add()
+    assert panel.get_preferences().preferred_champions == ("가렌", "럭스", "스웨인")
+    changed.assert_called_once()
+    panel.set_ranked_entries(entries[::-1], "cache_stale")
+    assert panel.get_preferences().preferred_champions == ("가렌", "럭스", "스웨인")
+    assert "갱신 실패" in panel.tier_status.get()
+
+
+def test_tier_failure_keeps_alphabetical_candidates_and_existing_preferences(tk_root):
+    from lolmanager.gui.aram_settings import AramSettingsPanel
+
+    preferences = AramPreferences(True, ("럭스", "가렌"))
+    panel = AramSettingsPanel(tk_root, preferences=preferences, on_change=mock.Mock())
+    panel.set_champion_names(["아리", "가렌", "럭스"])
+    panel.set_ranked_entries([], "unavailable")
+    assert panel.champion_combo.cget("values") == ("가렌", "럭스", "아리")
+    assert "이름순" in panel.tier_status.get()
+    assert panel.get_preferences() == preferences
 
 
 def test_settings_window_persists_aram_edits_on_close_with_ranked_settings_intact(tk_root, tmp_path, monkeypatch):
