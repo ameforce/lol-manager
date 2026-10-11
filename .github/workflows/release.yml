@@ -58,18 +58,29 @@ jobs:
         shell: pwsh
         run: choco install innosetup --yes --no-progress
 
-      - name: Validate source and package
+      - name: Validate lockfile
         shell: pwsh
-        run: |
-          uv lock --check
-          uv sync --locked --group dev
-          uv run --group dev python -m pytest -q
-          uv build
+        run: uv lock --check
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: uv sync --locked --group dev
+
+      - name: Test source
+        shell: pwsh
+        run: uv run --locked --group dev python -m pytest -q
+
+      - name: Build package
+        shell: pwsh
+        run: uv build
 
       - name: Build release installer and checksums
         shell: pwsh
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 -Version $env:LOLMANAGER_VERSION
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release build failed (exit=$LASTEXITCODE)."
+          }
           $artifacts = @(
             "dist\release\LOLManager-v$env:LOLMANAGER_VERSION.exe",
             "dist\release\LOLManager-Setup-v$env:LOLMANAGER_VERSION.exe",

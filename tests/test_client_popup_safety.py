@@ -169,10 +169,9 @@ def popup(monkeypatch, tmp_path, client_window, mouse_input):
     matches = {"confirm#0": (POINT, object(), 0.99)}
     matcher = mock.Mock(return_value=matches)
     monkeypatch.setattr(entrypoint, "find_template_matches_once", matcher)
-    monkeypatch.setattr(entrypoint, "_last_popup_click_at", {})
-    monkeypatch.setattr(entrypoint, "RUNTIME_STATE", {
-        "client_state": entrypoint.ClientState.POSTGAME_SCORE,
-    })
+    monkeypatch.setattr(entrypoint, "RUNTIME_STATE", entrypoint.RuntimeState(
+        client_state=entrypoint.ClientState.POSTGAME_SCORE,
+    ))
     lcu = SimpleNamespace(
         get_gameflow_phase=lambda **_: entrypoint.PHASE_END_OF_GAME,
         consume_phase_transition=lambda _: None,
@@ -201,7 +200,7 @@ def test_popup_routes_skip_scanning_other_apps(popup, client_window, mouse_input
     popup.matcher.assert_not_called()
     mouse_input.click.assert_not_called()
     mouse_input.send_input.assert_not_called()
-    assert entrypoint._last_popup_click_at == {}
+    assert entrypoint.RUNTIME_STATE.last_popup_click_at == {}
 
 
 @pytest.mark.parametrize("route", POPUP_ROUTES)
@@ -210,7 +209,7 @@ def test_popup_routes_click_exposed_client_button(popup, mouse_input, route):
     assert popup.matcher.call_args.kwargs["fresh_capture"] is True
     mouse_input.send_input.assert_called_once()
     mouse_input.click.assert_not_called()
-    assert len(entrypoint._last_popup_click_at) == 1
+    assert len(entrypoint.RUNTIME_STATE.last_popup_click_at) == 1
 
 
 @pytest.mark.parametrize("route", POPUP_ROUTES)
@@ -232,7 +231,7 @@ def test_popup_routes_recheck_target_after_detection(popup, client_window, mouse
     mouse_input.click.assert_not_called()
     mouse_input.send_input.assert_not_called()
     mouse_input.restore.assert_not_called()
-    assert entrypoint._last_popup_click_at == {}
+    assert entrypoint.RUNTIME_STATE.last_popup_click_at == {}
 
 
 def test_guarded_click_dispatches_one_native_packet_without_pywinauto_waits(client_window, mouse_input):
