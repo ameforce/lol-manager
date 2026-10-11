@@ -11,9 +11,10 @@ def is_frozen() -> bool:
 def restore_inherited_output_streams() -> None:
     """Expose the GUI's inherited pipes in a PyInstaller windowed CLI child.
 
-    Windowed Python sets sys.stdout/stderr to None even when its parent supplied
-    pipes. Duplicate the inherited handles so closing Python streams cannot
-    close handles owned by the bootloader. A standalone GUI has no such pipes.
+    Windowed Python may clear stdout/stderr or expose them with the local code
+    page despite PYTHONIOENCODING. Normalize existing pipes to UTF-8; duplicate
+    missing streams so closing them cannot close the bootloader's handles.
+    A standalone GUI has no such pipes.
     """
     if sys.platform != "win32" or not is_frozen():
         return
@@ -37,10 +38,14 @@ def restore_inherited_output_streams() -> None:
     kernel.CloseHandle.restype = wintypes.BOOL
     opened: dict[int, TextIO] = {}
     for name, identifier in (("stdout", -11), ("stderr", -12)):
-        if getattr(sys, name) is not None:
-            continue
         handle = kernel.GetStdHandle(identifier & 0xFFFFFFFF)
         if not handle or kernel.GetFileType(handle) != 3:  # FILE_TYPE_PIPE
+            continue
+        existing = getattr(sys, name)
+        if existing is not None:
+            reconfigure = getattr(existing, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", line_buffering=True)
             continue
         if handle in opened:
             setattr(sys, name, opened[handle])
