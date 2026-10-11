@@ -91,6 +91,11 @@ def test_release_workflow_is_tag_only_pinned_and_publishes_all_artifacts() -> No
     assert "*>" not in workflow
     assert "--clobber" not in workflow
     assert "required assets are already published" in workflow
+    assert "group: lolmanager-release-publication" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "--latest=false" in workflow
+    assert "--published-tag $env:LOLMANAGER_RELEASE_TAG" in workflow
+    assert workflow.index("gh release create") < workflow.index("scripts/prune_github_releases.py")
 
 
 def test_installer_verifier_derives_its_default_from_project_metadata() -> None:
@@ -108,10 +113,10 @@ def test_project_and_lock_versions_are_bumped_together() -> None:
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text("utf-8")
     lockfile = (PROJECT_ROOT / "uv.lock").read_text("utf-8")
 
-    assert 'version = "1.1.29"' in pyproject
+    assert 'version = "1.1.30"' in pyproject
     package_match = re.search(
         r'(?ms)^\[\[package\]\]\nname = "lolmanager"\nversion = "(?P<version>[^"]+)"',
         lockfile,
     )
     assert package_match
-    assert package_match.group("version") == "1.1.29"
+    assert package_match.group("version") == "1.1.30"

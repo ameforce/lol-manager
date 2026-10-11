@@ -189,6 +189,11 @@ portable EXE, per-user installer, SHA-256 목록을 한 번에 생성합니다. 
 같은 태그의 공개 자산은 재실행으로 교체하지 않으며, 기존 태그를 소급 배포하지도
 않습니다.
 
+GitHub Releases에는 최신 정식 버전 하나만 유지합니다. 새 릴리스의 portable EXE,
+installer, 체크섬 업로드가 완료된 뒤 이전 릴리스와 첨부 파일을 자동으로 삭제합니다.
+Git 태그와 커밋 이력은 유지하며, 게시 실패 시에는 이전 릴리스를 보존합니다.
+과거 태그의 작업을 다시 실행해도 버전 번호가 가장 높은 정식 릴리스를 유지합니다.
+
 ```bat
 winget install --exact --id JRSoftware.InnoSetup
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1
