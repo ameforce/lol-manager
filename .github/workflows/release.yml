@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: lolmanager-release-publication
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Build and publish Windows artifacts
@@ -104,8 +108,15 @@ jobs:
             Write-Host "GitHub Release $tag required assets are already published; leaving them unchanged."
           }
           else {
-            gh release create $tag @artifacts --repo $env:GITHUB_REPOSITORY --title "LOLManager $tag" --generate-notes --verify-tag
+            gh release create $tag @artifacts --repo $env:GITHUB_REPOSITORY --title "LOLManager $tag" --generate-notes --verify-tag --latest=false
             if ($LASTEXITCODE -ne 0) {
               throw "Unable to create GitHub Release $tag."
             }
           }
+
+      - name: Retain only the latest complete GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOLMANAGER_RELEASE_TAG: ${{ github.ref_name }}
+        run: uv run --group dev python scripts/prune_github_releases.py --repo $env:GITHUB_REPOSITORY --published-tag $env:LOLMANAGER_RELEASE_TAG
