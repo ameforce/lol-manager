@@ -120,6 +120,8 @@ uv run --group dev python -m pytest -q
 `main`, `develop`, hotfix/release 브랜치의 push와 PR에서 Windows CI가 lockfile과
 전체 테스트를 검증합니다. 릴리스에서도 의존성 설치, 테스트, 패키지 빌드를 각각
 독립된 단계로 실행하므로 앞 단계가 실패하면 게시 단계로 진행하지 않습니다.
+게시 전에 실제 Windows EXE의 도움말을 실행해 시작 여부와 한글 출력 인코딩도
+검증합니다. 이 검증은 게임 클라이언트를 실행하거나 조작하지 않습니다.
 
 자동화 코드는 매칭 제어(`cli/matchmaking.py`), 픽 후보 가용성
 (`cli/champion_selection.py`), 게임 종료와 다음 게임 정책(`cli/postgame.py`)으로

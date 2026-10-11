@@ -95,19 +95,25 @@ def test_new_run_clears_all_state_without_sharing_cooldowns():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows inherited pipe contract")
-def test_windowed_child_can_restore_the_actual_parent_output_pipes():
+@pytest.mark.parametrize("existing_streams", [False, True])
+def test_windowed_child_can_restore_the_actual_parent_output_pipes(existing_streams):
     script = """
 import sys
 from lolmanager.platform.runtime import restore_inherited_output_streams
 original_streams = (sys.stdout, sys.stderr)
 sys.frozen = True
-sys.stdout = sys.stderr = None
+if sys.argv[1] == 'existing':
+    sys.stdout.reconfigure(encoding='cp949')
+    sys.stderr.reconfigure(encoding='cp949')
+else:
+    sys.stdout = sys.stderr = None
 restore_inherited_output_streams()
-print('output pipe restored')
-print('error pipe restored', file=sys.stderr)
+print('한글 output pipe restored')
+print('한글 error pipe restored', file=sys.stderr)
 """
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+    mode = "existing" if existing_streams else "missing"
+    result = subprocess.run([sys.executable, "-c", script, mode], capture_output=True,
                             text=True, encoding="utf-8", timeout=15)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "output pipe restored"
-    assert result.stderr.strip() == "error pipe restored"
+    assert result.stdout.strip() == "한글 output pipe restored"
+    assert result.stderr.strip() == "한글 error pipe restored"
