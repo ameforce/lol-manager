@@ -14,6 +14,8 @@ from mss import mss
 from pywinauto import mouse, keyboard
 import pyperclip
 
+from lolmanager.platform.resolution_detector import is_league_client_window_target
+
 logger = logging.getLogger(__name__)
 
 _PYWINAUTO_LITERAL_ESCAPES = {
@@ -383,7 +385,16 @@ def _assert_point_in_virtual_screen(x: int, y: int) -> None:
         )
 
 
-def _sendinput_click(x: int, y: int) -> bool:
+class _ClickTargetChangedError(RuntimeError):
+    pass
+
+
+def _sendinput_click(
+    x: int,
+    y: int,
+    *,
+    expected_window_rect: Optional[Tuple[int, int, int, int]] = None,
+) -> bool:
     vx, vy, vw, vh = _virtual_screen()
     if vw <= 1 or vh <= 1:
         return False
@@ -434,6 +445,10 @@ def _sendinput_click(x: int, y: int) -> bool:
     )
 
     inputs = (_INPUT * 3)(move, down, up)
+    if expected_window_rect is not None and not is_league_client_window_target(
+        expected_window_rect, (x, y)
+    ):
+        raise _ClickTargetChangedError("클릭 위치가 활성 롤 클라이언트 창에 속하지 않습니다.")
     sent = int(_USER32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(_INPUT)))
     if sent == 3:
         return True
@@ -730,10 +745,15 @@ def find_template_matches_once(
     threshold: float = 0.85,
     *,
     search_rois: Optional[dict[str, Tuple[int, int, int, int]]] = None,
+    fresh_capture: bool = False,
 ) -> dict[str, tuple[Tuple[int, int], np.ndarray, float]]:
     if not templates:
         return {}
 
+    if fresh_capture:
+        # A frame cached before the foreground check may belong to another app.
+        global _LAST_GRAB_RECT
+        _LAST_GRAB_RECT = None
     screen_bgra, screen_gray = _grab_region_bgra_and_gray(window_rect)
     screen_h, screen_w = screen_gray.shape[:2]
 
@@ -891,6 +911,33 @@ def click_screen(point: Tuple[int, int]) -> None:
         ) from last_exc
     finally:
         if prev_pos is not None and prev_pos != (x, y):
+            _restore_cursor_pos(prev_pos)
+
+
+def click_league_client(
+    window_rect: Tuple[int, int, int, int], point: Tuple[int, int]
+) -> bool:
+    """Click only while the foreground client still owns the matched point."""
+    if window_rect is None:
+        return False
+    x, y = _normalize_point(point)
+    _assert_point_in_virtual_screen(x, y)
+    prev_pos = _get_cursor_pos()
+    input_attempted = False
+    try:
+        # pywinauto waits for the double-click interval and cursor movement;
+        # focus can change during that wait. Validate at native input dispatch
+        # and submit movement/down/up together, without a delayed fallback.
+        sent = _sendinput_click(x, y, expected_window_rect=window_rect)
+        input_attempted = True
+        if not sent:
+            raise RuntimeError("롤 클라이언트 팝업 클릭 입력을 전송하지 못했습니다.")
+        return True
+    except _ClickTargetChangedError:
+        logger.debug("롤 클라이언트 밖이거나 다른 창에 가려진 팝업 클릭을 생략합니다.")
+        return False
+    finally:
+        if input_attempted and prev_pos is not None and prev_pos != (x, y):
             _restore_cursor_pos(prev_pos)
 
 

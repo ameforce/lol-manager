@@ -54,6 +54,7 @@ from lolmanager.core.runtime_logging import (
     install_exception_logger,
 )
 from lolmanager.core.image_search import (
+    click_league_client,
     click_relative,
     click_screen,
     find_best_template,
@@ -92,6 +93,7 @@ from lolmanager.platform.resolution_detector import (
     is_rect_minimized,
     find_league_window_rect,
     is_game_client_active,
+    is_league_client_window_target,
 )
 
 
@@ -1623,6 +1625,9 @@ def _dismiss_blocking_modal_ui_fallback(
     if is_rect_minimized(rect):
         return False
 
+    if not is_league_client_window_target(rect):
+        return False
+
     popup_roi = _popup_button_search_roi(rect)
     templates: list[tuple[str, Path]] = []
     name_to_path: dict[str, Path] = {}
@@ -1639,7 +1644,7 @@ def _dismiss_blocking_modal_ui_fallback(
         return False
 
     matches = find_template_matches_once(
-        rect, templates, threshold=threshold, search_rois=rois
+        rect, templates, threshold=threshold, search_rois=rois, fresh_capture=True
     )
     best_name: Optional[str] = None
     best_hit: Optional[tuple[tuple[int, int], object, float]] = None
@@ -1662,7 +1667,8 @@ def _dismiss_blocking_modal_ui_fallback(
 
     center, _roi_bgr, _score = best_hit
     try:
-        click_screen(center)
+        if not click_league_client(rect, center):
+            return False
     except Exception as exc:
         logger.warning("클라이언트 모달 UI fallback 클릭 실패(%s): %s", stage, exc)
         return False
@@ -2132,19 +2138,24 @@ def poll_match_state(
             return MatchPollAttempt(
                 False, False, LcuLoopAction.ACT_LCU, modal_attempt.outcome, phase
             )
-        popup_roi = _popup_button_search_roi(rect)
-        for idx, tpl_confirm in enumerate(tpl_confirm_templates):
-            if tpl_confirm is None or not tpl_confirm.exists():
-                continue
-            name = f"confirm#{idx}"
-            templates.append((name, tpl_confirm))
-            confirm_names.append(name)
-            confirm_name_to_path[name] = tpl_confirm
-            rois[name] = popup_roi
+        if is_league_client_window_target(rect):
+            popup_roi = _popup_button_search_roi(rect)
+            for idx, tpl_confirm in enumerate(tpl_confirm_templates):
+                if tpl_confirm is None or not tpl_confirm.exists():
+                    continue
+                name = f"confirm#{idx}"
+                templates.append((name, tpl_confirm))
+                confirm_names.append(name)
+                confirm_name_to_path[name] = tpl_confirm
+                rois[name] = popup_roi
 
     matches = (
         find_template_matches_once(
-            rect, templates, threshold=threshold, search_rois=(rois if rois else None)
+            rect,
+            templates,
+            threshold=threshold,
+            search_rois=(rois if rois else None),
+            fresh_capture=bool(confirm_names),
         )
         if templates
         else {}
@@ -2172,18 +2183,18 @@ def poll_match_state(
         last = _last_popup_click_at.get(key, 0.0)
         if now - last >= POPUP_CLICK_COOLDOWN_SEC:
             try:
-                click_screen(center)
-                _last_popup_click_at[key] = now
-                tpl = (
-                    confirm_name_to_path.get(best_confirm_name)
-                    if best_confirm_name
-                    else None
-                )
-                logger.info(
-                    "확인 팝업 클릭 처리(%s, tpl=%s).",
-                    stage,
-                    (tpl.name if tpl else "unknown"),
-                )
+                if click_league_client(rect, center):
+                    _last_popup_click_at[key] = now
+                    tpl = (
+                        confirm_name_to_path.get(best_confirm_name)
+                        if best_confirm_name
+                        else None
+                    )
+                    logger.info(
+                        "확인 팝업 클릭 처리(%s, tpl=%s).",
+                        stage,
+                        (tpl.name if tpl else "unknown"),
+                    )
             except Exception as exc:
                 logger.warning("확인 팝업 클릭 실패(%s): %s", stage, exc)
 
@@ -2484,10 +2495,9 @@ def detect_champion_select(
 def try_confirm(
     rect, tpl_confirm: Path, threshold: float, logger: logging.Logger
 ) -> bool:
-    clicked = search_and_act(rect, tpl_confirm, threshold=threshold, click=True)
-    if clicked:
-        logger.info("확인 팝업 클릭 처리.")
-    return clicked
+    return _dismiss_blocking_modal_ui_fallback(
+        rect, [tpl_confirm], threshold, "확인 팝업", logger
+    )
 
 
 def try_pick_popups(
@@ -2501,6 +2511,9 @@ def try_pick_popups(
     modal_attempt = _dismiss_blocking_modal_lcu_attempt(lcu, "픽 팝업", logger)
     if modal_attempt.completed:
         return True
+
+    if not is_league_client_window_target(rect):
+        return False
 
     now = time.monotonic()
     templates: list[tuple[str, Path]] = []
@@ -2526,7 +2539,7 @@ def try_pick_popups(
         rois["decline"] = popup_roi
 
     matches = find_template_matches_once(
-        rect, templates, threshold=threshold, search_rois=rois
+        rect, templates, threshold=threshold, search_rois=rois, fresh_capture=True
     )
     if not matches:
         return False
@@ -2558,7 +2571,8 @@ def try_pick_popups(
             return False
 
         try:
-            click_screen(center)
+            if not click_league_client(rect, center):
+                return False
         except Exception as exc:
             logger.warning("팝업 버튼 클릭 실패(%s): %s", name, exc)
             return False

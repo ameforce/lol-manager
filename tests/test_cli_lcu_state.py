@@ -2480,12 +2480,13 @@ class CliLcuStateTests(unittest.TestCase):
         )
 
         with (
+            mock.patch.object(entrypoint, "is_league_client_window_target", return_value=True),
             mock.patch.object(
                 entrypoint,
                 "find_template_matches_once",
                 return_value={"confirm#0": ((524, 683), object(), 0.99)},
             ) as find_matches,
-            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(entrypoint, "click_league_client", return_value=True) as click_client,
         ):
             result = entrypoint.poll_match_state(
                 (0, 0, 1280, 720),
@@ -2503,7 +2504,7 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertFalse(finding)
         find_matches.assert_called_once()
-        click_screen.assert_called_once_with((524, 683))
+        click_client.assert_called_once_with((0, 0, 1280, 720), (524, 683))
 
     def test_champion_select_detection_skips_images_when_lcu_phase_is_lobby(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
@@ -3474,12 +3475,13 @@ class CliLcuStateTests(unittest.TestCase):
         image_dir = ROOT / "src" / "lolmanager" / "resources" / "images" / "1280"
 
         with (
+            mock.patch.object(entrypoint, "is_league_client_window_target", return_value=True),
             mock.patch.object(
                 entrypoint,
                 "find_template_matches_once",
                 return_value={"confirm#2": ((640, 432), object(), 0.99)},
             ) as find_matches,
-            mock.patch.object(entrypoint, "click_screen") as click_screen,
+            mock.patch.object(entrypoint, "click_league_client", return_value=True) as click_client,
         ):
             handled = entrypoint._dismiss_blocking_modal_ui_fallback(
                 (0, 0, 1280, 720),
@@ -3490,7 +3492,7 @@ class CliLcuStateTests(unittest.TestCase):
             )
 
         self.assertTrue(handled)
-        click_screen.assert_called_once_with((640, 432))
+        click_client.assert_called_once_with((0, 0, 1280, 720), (640, 432))
         find_matches.assert_called_once()
         self.assertEqual(
             find_matches.call_args.kwargs["search_rois"]["confirm#2"],
@@ -4259,13 +4261,16 @@ class CliLcuStateTests(unittest.TestCase):
         logger = logging.getLogger("lolmanager-test-cli-lcu")
         rect = (0, 0, 1280, 720)
 
-        with mock.patch.object(
-            entrypoint, "find_template_matches_once", return_value={}
-        ) as find_matches:
+        with (
+            mock.patch.object(entrypoint, "is_league_client_window_target", return_value=True),
+            mock.patch.object(
+                entrypoint, "find_template_matches_once", return_value={}
+            ) as find_matches,
+        ):
             entrypoint.try_pick_popups(rect, [], None, 0.85, logger)
 
         find_matches.assert_called_once_with(
-            rect, [], threshold=0.85, search_rois={}
+            rect, [], threshold=0.85, search_rois={}, fresh_capture=True
         )
 
     def test_pick_popups_dismisses_confirm_via_lcu_before_image_scan(self) -> None:
@@ -4306,10 +4311,11 @@ class CliLcuStateTests(unittest.TestCase):
                 "confirm#0": ((640, 420), object(), 0.99),
             }
             with (
+                mock.patch.object(entrypoint, "is_league_client_window_target", return_value=True),
                 mock.patch.object(
                     entrypoint, "find_template_matches_once", return_value=matches
                 ),
-                mock.patch.object(entrypoint, "click_screen") as click_screen,
+                mock.patch.object(entrypoint, "click_league_client", return_value=True) as click_client,
                 mock.patch.object(entrypoint.time, "monotonic", return_value=100.0),
             ):
                 handled = entrypoint.try_pick_popups(
@@ -4317,7 +4323,7 @@ class CliLcuStateTests(unittest.TestCase):
                 )
 
         self.assertTrue(handled)
-        click_screen.assert_called_once_with((320, 420))
+        click_client.assert_called_once_with(rect, (320, 420))
 
     def test_myturn_image_fallback_helper_updates_pick_turn(self) -> None:
         logger = logging.getLogger("lolmanager-test-cli-lcu")
