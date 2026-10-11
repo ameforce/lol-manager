@@ -143,6 +143,8 @@ class ChampionConfig:
 
                 changed = False
                 for role, entry in list(self.data.items()):
+                    if role == "aram":
+                        continue
                     if not isinstance(entry, dict):
                         continue
                     champ = entry.get("champion")
