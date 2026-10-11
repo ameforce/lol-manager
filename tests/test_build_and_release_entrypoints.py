@@ -80,7 +80,7 @@ def test_release_workflow_is_tag_only_pinned_and_publishes_all_artifacts() -> No
     assert "$tag = $env:LOLMANAGER_RELEASE_TAG" in workflow
     assert "$tag = '${{ github.ref_name }}'" not in workflow
     assert "uv lock --check" in workflow
-    assert "uv run --group dev python -m pytest -q" in workflow
+    assert "uv run --locked --group dev python -m pytest -q" in workflow
     assert "uv build" in workflow
     assert "scripts\\build_release.ps1" in workflow
     assert '"dist\\release\\LOLManager-v$env:LOLMANAGER_VERSION.exe"' in workflow

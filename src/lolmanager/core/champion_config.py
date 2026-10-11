@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+from lolmanager.core.aram import AramPreferences
 from lolmanager.core.opgg_counter_recommendations import display_value_to_champion_name
+from lolmanager.platform.file_storage import atomic_write_text
 from lolmanager.platform.paths import champion_config_path, project_root, resource_path
 from lolmanager.platform.runtime import is_frozen
 
@@ -80,22 +80,6 @@ def _maybe_migrate_legacy_config(dst: Path) -> None:
             return
     except Exception:
         return
-
-
-def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=path.name, suffix=".tmp", dir=str(path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except FileNotFoundError:
-            pass
 
 
 def _normalize_reserve_picks(value: Any) -> List[Dict[str, str]]:
@@ -183,7 +167,17 @@ class ChampionConfig:
 
     def save(self) -> None:
         payload = json.dumps(self.data, ensure_ascii=False, indent=2) + "\n"
-        _atomic_write_text(self.path, payload, encoding="utf-8")
+        atomic_write_text(self.path, payload)
+
+    def is_automation_ready(self) -> bool:
+        aram = AramPreferences.from_config(self.data.get("aram"))
+        if aram.enabled and aram.preferred_champions:
+            return True
+        for role in ("top", "jungle", "mid", "adc", "support"):
+            entry = self.data.get(role)
+            if isinstance(entry, dict) and str(entry.get("champion") or "").strip():
+                return True
+        return False
 
     def get(self, role: str) -> Optional[Dict]:
         return self.data.get(role)

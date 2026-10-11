@@ -45,7 +45,7 @@ def resource_root() -> Path:
 
         return base_path
 
-    pkg_dir = Path(__file__).resolve().parent
+    pkg_dir = Path(__file__).resolve().parents[1]
     cand = pkg_dir / "resources"
     if cand.exists():
         return cand

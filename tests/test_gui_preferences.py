@@ -164,6 +164,7 @@ def test_start_keeps_continuation_checkbox_enabled_and_passes_live_path(
             "-m",
             "lolmanager",
             "--cli",
+            "--runtime-events",
             "--continue-after-game-preference-path",
             str(gui.gui_preferences_path),
             "--continue-after-game",
@@ -191,6 +192,7 @@ def test_start_keeps_continuation_checkbox_enabled_and_passes_live_path(
             "-m",
             "lolmanager",
             "--cli",
+            "--runtime-events",
             "--continue-after-game",
         ]
     ]

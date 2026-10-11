@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
 
 from lolmanager.core.champion_names import normalize_name
+from lolmanager.platform.file_storage import atomic_write_text, file_transaction
 
 
 CACHE_VERSION = 3
@@ -275,22 +274,6 @@ def default_counter_cache_path(config_path: Path) -> Path:
     return config_path.with_name("opgg_counter_recommendation_cache.json")
 
 
-def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=path.name, suffix=".tmp", dir=str(path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except FileNotFoundError:
-            pass
-
-
 def _entry_key(role: str, configured_pick: str) -> str:
     return f"{str(role or '').strip()}::{normalize_name(configured_pick)}"
 
@@ -354,9 +337,6 @@ def save_recommendation_cache(
     fetched_at_unix: Optional[float] = None,
 ) -> None:
     fetched_at = time.time() if fetched_at_unix is None else float(fetched_at_unix)
-    payload = _read_cache_payload(path) or {"v": CACHE_VERSION, "entries": []}
-    entries_obj = payload.get("entries")
-    entries = entries_obj if isinstance(entries_obj, list) else []
     key = _entry_key(role, configured_pick)
 
     next_entry = {
@@ -371,21 +351,16 @@ def save_recommendation_cache(
         ],
     }
 
-    replaced = False
-    next_entries: list[object] = []
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("key") == key:
-            next_entries.append(next_entry)
-            replaced = True
-        else:
-            next_entries.append(entry)
-    if not replaced:
+    with file_transaction(path):
+        payload = _read_cache_payload(path) or {"v": CACHE_VERSION, "entries": []}
+        entries = payload["entries"]
+        next_entries = [
+            entry for entry in entries
+            if not isinstance(entry, dict) or entry.get("key") != key
+        ]
         next_entries.append(next_entry)
-
-    payload = {"v": CACHE_VERSION, "entries": next_entries}
-    _atomic_write_text(
-        path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+        payload = {"v": CACHE_VERSION, "entries": next_entries}
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def load_recommendation_cache(

@@ -232,7 +232,7 @@ def test_game_start_loop_polls_aram_with_throttle_and_preserves_game_monitor(mon
     monkeypatch.setattr(entrypoint, "_poll_lcu_phase_attempt", lambda *_a, **_kw: SimpleNamespace(
         phase=next(phases), loop_action=LcuLoopAction.ACT_LCU,
     ))
-    monkeypatch.setattr(entrypoint, "_LEAGUE_EXIT_GUARD", None)
+    monkeypatch.setattr(entrypoint.RUNTIME_STATE, "league_exit_guard", None)
     monkeypatch.setattr(entrypoint, "_visible_rect_for_image_scan", lambda *_: None)
     monitor = mock.Mock(return_value=False)
     monkeypatch.setattr(entrypoint, "monitor_ingame_and_postgame", monitor)

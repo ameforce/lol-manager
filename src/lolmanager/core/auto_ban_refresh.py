@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,22 +159,35 @@ class AutoBanRefreshCoordinator:
         )
         self._closed = False
         self._generation = 0
+        self._state_lock = threading.Lock()
+        self._targets: dict[tuple[str, str], AutoBanRefreshTarget] = {}
         self._in_flight: set[tuple[str, str]] = set()
 
     def start(self) -> None:
-        if self._closed:
-            return
-        self._generation += 1
-        generation = self._generation
-        for target in collect_auto_ban_targets(self.config_path):
+        targets = collect_auto_ban_targets(self.config_path)
+        with self._state_lock:
+            if self._closed:
+                return
+            self._generation += 1
+            generation = self._generation
+            self._targets = {self._target_key(target): target for target in targets}
+            # A running worker owns rescheduling this target when it finishes.
+            # The newest generation must not be dropped as a duplicate.
+            ready = [
+                target for key, target in self._targets.items()
+                if key not in self._in_flight
+            ]
+        for target in ready:
             self._schedule_target(target, 0, generation)
 
     def refresh_configured_targets(self) -> None:
         self.start()
 
     def close(self) -> None:
-        self._closed = True
-        self._generation += 1
+        with self._state_lock:
+            self._closed = True
+            self._generation += 1
+            self._targets.clear()
 
     def _target_key(self, target: AutoBanRefreshTarget) -> tuple[str, str]:
         return (target.role, normalize_name(target.champion_name))
@@ -184,12 +198,11 @@ class AutoBanRefreshCoordinator:
         delay_ms: int,
         generation: int,
     ) -> None:
-        if self._closed:
-            return
-
-        def callback() -> None:
+        with self._state_lock:
             if self._closed or generation != self._generation:
                 return
+
+        def callback() -> None:
             self._begin_refresh(target, generation)
 
         self._schedule_after_ms(int(delay_ms), callback)
@@ -200,9 +213,10 @@ class AutoBanRefreshCoordinator:
         generation: int,
     ) -> None:
         key = self._target_key(target)
-        if key in self._in_flight:
-            return
-        self._in_flight.add(key)
+        with self._state_lock:
+            if self._closed or generation != self._generation or key in self._in_flight:
+                return
+            self._in_flight.add(key)
 
         def worker() -> None:
             success = False
@@ -215,40 +229,50 @@ class AutoBanRefreshCoordinator:
                     target.champion_name,
                     exc,
                 )
-            finally:
-                self._in_flight.discard(key)
-
-            if self._closed or generation != self._generation:
-                return
-
-            if success:
-                try:
-                    self._on_updated()
-                except Exception as exc:
-                    self._logger.warning("auto ban refresh update hook failed: %s", exc)
-                self._schedule_target(target, AUTO_BAN_REFRESH_SUCCESS_MS, generation)
-                return
-
-            self._logger.warning(
-                "auto ban refresh will retry in %d minutes for %s/%s",
-                AUTO_BAN_REFRESH_RETRY_MS // (60 * 1000),
-                target.role,
-                target.champion_name,
-            )
-            self._schedule_target(target, AUTO_BAN_REFRESH_RETRY_MS, generation)
+            self._finish_refresh(target, generation, success)
 
         try:
             self._run_background(worker)
         except Exception as exc:
-            self._in_flight.discard(key)
             self._logger.warning(
                 "auto ban refresh worker failed for %s/%s: %s",
                 target.role,
                 target.champion_name,
                 exc,
             )
-            if not self._closed and generation == self._generation:
-                self._schedule_target(target, AUTO_BAN_REFRESH_RETRY_MS, generation)
+            self._finish_refresh(target, generation, False)
+
+    def _finish_refresh(
+        self, target: AutoBanRefreshTarget, generation: int, success: bool
+    ) -> None:
+        key = self._target_key(target)
+        with self._state_lock:
+            self._in_flight.discard(key)
+            current_target = self._targets.get(key)
+            if self._closed or current_target is None:
+                return
+            current_generation = self._generation
+
+        # Never hold the state lock while calling the UI scheduler: Tk may wait
+        # for its owner thread, which can itself be updating the configuration.
+        if generation != current_generation:
+            self._schedule_target(current_target, 0, current_generation)
+            return
+        if success:
+            try:
+                self._on_updated()
+            except Exception as exc:
+                self._logger.warning("auto ban refresh update hook failed: %s", exc)
+            delay_ms = AUTO_BAN_REFRESH_SUCCESS_MS
+        else:
+            self._logger.warning(
+                "auto ban refresh will retry in %d minutes for %s/%s",
+                AUTO_BAN_REFRESH_RETRY_MS // (60 * 1000),
+                target.role,
+                target.champion_name,
+            )
+            delay_ms = AUTO_BAN_REFRESH_RETRY_MS
+        self._schedule_target(current_target, delay_ms, current_generation)
 
     def _refresh_target(self, target: AutoBanRefreshTarget) -> bool:
         _names, by_position, _source = self._get_champion_dataset(
