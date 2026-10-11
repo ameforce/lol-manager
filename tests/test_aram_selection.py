@@ -88,7 +88,7 @@ def test_invalid_preferences_do_not_enable_automation(value):
 @pytest.mark.parametrize("queue_id", [450, 2400])
 def test_swaps_highest_available_preference_and_confirms_local_champion(queue_id):
     client = client_with(
-        mode(queue_id), LcuResult(200, session()), LcuResult(200, GRID),
+        mode(queue_id), LcuResult(200, GRID), LcuResult(200, session()),
         LcuResult(204), LcuResult(200, session(current=103)),
     )
     result = client.select_aram_preferred_champion_decision(("아리", "럭스", "애쉬"))
@@ -114,14 +114,14 @@ def test_other_modes_never_issue_aram_requests(queue_id):
      (session(myTeam=[]), LcuOutcome.NO_LOCAL_PLAYER)],
 )
 def test_incomplete_or_inactive_bench_does_not_swap(payload, status):
-    client = client_with(mode(), LcuResult(200, payload))
+    client = client_with(mode(), LcuResult(200, GRID), LcuResult(200, payload))
     assert client.select_aram_preferred_champion_decision(("아리",)).status == status
     assert not writes(client)
 
 
 @pytest.mark.parametrize("current,bench", [(103, (99,)), (99, (22,))])
 def test_already_preferred_current_champion_is_kept(current, bench):
-    client = client_with(mode(), LcuResult(200, session(current, bench)), LcuResult(200, GRID))
+    client = client_with(mode(), LcuResult(200, GRID), LcuResult(200, session(current, bench)))
     assert client.select_aram_preferred_champion_decision(("아리", "럭스", "애쉬")).status == LcuOutcome.NO_CURRENT_ACTION
     assert not writes(client)
 
@@ -131,7 +131,7 @@ def test_unusable_first_preference_falls_back_to_next_available_champion(blocked
     grid = copy.deepcopy(GRID)
     grid[0].update(blocked)
     client = client_with(
-        mode(), LcuResult(200, session()), LcuResult(200, grid),
+        mode(), LcuResult(200, grid), LcuResult(200, session()),
         LcuResult(204), LcuResult(200, session(current=99)),
     )
     assert client.select_aram_preferred_champion_decision(("아리", "럭스")).value == "럭스"
@@ -139,7 +139,7 @@ def test_unusable_first_preference_falls_back_to_next_available_champion(blocked
 
 
 def test_unknown_preference_does_not_guess_or_swap():
-    client = client_with(mode(), LcuResult(200, session()), LcuResult(200, GRID))
+    client = client_with(mode(), LcuResult(200, GRID), LcuResult(200, session()))
     assert client.select_aram_preferred_champion_decision(("없는 챔피언", "럭스")).status == LcuOutcome.CHAMPION_NOT_FOUND
     assert not writes(client)
 
@@ -151,7 +151,7 @@ def test_unknown_preference_does_not_guess_or_swap():
      (LcuResult(None, error="ReadTimeout"), LcuOutcome.REQUEST_FAILED)],
 )
 def test_lost_bench_race_or_timeout_is_not_reported_as_success(response, status):
-    client = client_with(mode(), LcuResult(200, session()), LcuResult(200, GRID), response)
+    client = client_with(mode(), LcuResult(200, GRID), LcuResult(200, session()), response)
     assert client.select_aram_preferred_champion_decision(("아리",)).status == status
     assert len(writes(client)) == 1
 
@@ -159,7 +159,7 @@ def test_lost_bench_race_or_timeout_is_not_reported_as_success(response, status)
 def test_delayed_swap_confirmation_does_not_send_duplicate_post(monkeypatch):
     monkeypatch.setattr("lolmanager.core.lcu_client.time.sleep", lambda _: None)
     client = client_with(
-        mode(), LcuResult(200, session()), LcuResult(200, GRID), LcuResult(204),
+        mode(), LcuResult(200, GRID), LcuResult(200, session()), LcuResult(204),
         LcuResult(200, session()), LcuResult(200, session(current=103)),
     )
     assert client.select_aram_preferred_champion_decision(("아리",)).ok
@@ -175,7 +175,7 @@ def test_delayed_swap_confirmation_does_not_send_duplicate_post(monkeypatch):
 def test_unconfirmed_swap_or_new_session_is_not_success(monkeypatch, confirmed, status):
     monkeypatch.setattr("lolmanager.core.lcu_client.champ_select_action_confirm_timeout_sec", lambda: 0)
     client = client_with(
-        mode(), LcuResult(200, session()), LcuResult(200, GRID), LcuResult(204), confirmed,
+        mode(), LcuResult(200, GRID), LcuResult(200, session()), LcuResult(204), confirmed,
     )
     assert client.select_aram_preferred_champion_decision(("아리",)).status == status
     assert len(writes(client)) == 1
@@ -190,13 +190,36 @@ def test_empty_preferences_issue_no_api_calls():
 @pytest.mark.parametrize(
     "responses,status",
     [((LcuResult(None, error="lockfile unavailable"),), LcuOutcome.UNAVAILABLE),
-     ((mode(), LcuResult(404)), LcuOutcome.NO_SESSION),
-     ((mode(), LcuResult(200, [])), LcuOutcome.MALFORMED_SESSION),
-     ((mode(), LcuResult(200, session()), LcuResult(500)), LcuOutcome.REQUEST_FAILED)],
+     ((mode(), LcuResult(200, GRID), LcuResult(404)), LcuOutcome.NO_SESSION),
+     ((mode(), LcuResult(200, GRID), LcuResult(200, [])), LcuOutcome.MALFORMED_SESSION),
+     ((mode(), LcuResult(500)), LcuOutcome.REQUEST_FAILED)],
 )
 def test_failed_reads_never_fall_back_to_blind_selection(responses, status):
     client = client_with(*responses)
     assert client.select_aram_preferred_champion_decision(("아리",)).status == status
+    assert not writes(client)
+
+
+@pytest.mark.parametrize("changed_session", [session(current=103, bench=(99,)), session(bench=())])
+def test_catalog_request_race_rechecks_current_champion_and_bench(changed_session):
+    current_session = session(current=22, bench=(99,))
+
+    def request(method, endpoint):
+        nonlocal current_session
+        assert method == "GET", "stale state must not trigger a bench swap"
+        if endpoint == "/lol-gameflow/v1/session":
+            return mode()
+        if endpoint == "/lol-champ-select/v1/all-grid-champions":
+            current_session = changed_session
+            return LcuResult(200, GRID)
+        if endpoint == "/lol-champ-select/v1/session":
+            return LcuResult(200, current_session)
+        raise AssertionError(endpoint)
+
+    client = LcuClient()
+    client.request = mock.Mock(side_effect=request)
+    result = client.select_aram_preferred_champion_decision(("아리", "럭스", "애쉬"))
+    assert result.status == LcuOutcome.NO_CURRENT_ACTION
     assert not writes(client)
 
 

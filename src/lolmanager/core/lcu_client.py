@@ -1869,6 +1869,11 @@ class LcuClient:
         if mode.value.mode != GameMode.ARAM:
             return LcuDecision(LcuOutcome.UNSUPPORTED, reason="not an ARAM session")
 
+        # Fetch the catalog first: a reroll or teammate trade can change our
+        # champion while that request is in flight. Decide from the latest session.
+        champions = self._champ_select_grid_champions_decision()
+        if not champions.ok:
+            return champions
         result = self.get_champ_select_snapshot()
         if not result.ok:
             return result
@@ -1892,9 +1897,6 @@ class LcuClient:
         if not bench_ids:
             return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="empty ARAM bench")
 
-        champions = self._champ_select_grid_champions_decision()
-        if not champions.ok:
-            return champions
         name_to_id: dict[str, int] = {}
         eligible_ids: set[int] = set()
         for champion in champions.value:
