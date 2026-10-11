@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.aram import AramPreferences
+from lolmanager.core.opgg_aram_list import default_aram_cache_path, get_aram_champion_entries
 from lolmanager.core.opgg_champion_list import (
     build_normalized_index,
     default_cache_path,
@@ -645,6 +646,15 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     def _load_champion_list_async() -> None:
         cfg_path = config.path.resolve()
         cache_path = default_cache_path(cfg_path)
+
+        def _aram_worker() -> None:
+            entries, source = get_aram_champion_entries(default_aram_cache_path(cfg_path))
+            try:
+                root.after(0, lambda: aram_panel.set_ranked_entries(entries, source))
+            except (RuntimeError, tk.TclError):
+                pass  # The settings window may have closed during the request.
+
+        threading.Thread(target=_aram_worker, daemon=True).start()
 
         cache = load_champion_list_cache(cache_path)
         if cache is not None:
