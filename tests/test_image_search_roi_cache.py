@@ -335,6 +335,28 @@ class ImageSearchRoiCacheTests(unittest.TestCase):
 
                 click_screen.assert_not_called()
 
+    def test_popup_fresh_capture_does_not_reuse_frame_from_another_app(self) -> None:
+        template = _template()
+        foreign_screen = _screen_with_template(template, x=50, y=60)
+        client_screen = _screen_without_template()
+        rect = (0, 0, foreign_screen.shape[1], foreign_screen.shape[0])
+        grab = mock.Mock(side_effect=[
+            mock.Mock(raw=_bgra_from_gray(foreign_screen).tobytes()),
+            mock.Mock(raw=_bgra_from_gray(client_screen).tobytes()),
+        ])
+        with (
+            mock.patch.object(image_search, "_get_mss", return_value=mock.Mock(grab=grab)),
+            mock.patch.object(image_search, "_load_template_gray", return_value=template),
+            mock.patch.object(image_search.time, "monotonic", return_value=100.0),
+        ):
+            templates = [("confirm", self.template_path)]
+            self.assertIn("confirm", image_search.find_template_matches_once(rect, templates))
+            self.assertEqual(image_search.find_template_matches_once(
+                rect, templates, fresh_capture=True
+            ), {})
+
+        self.assertEqual(grab.call_count, 2)
+
     def test_click_relative_accepts_last_point_inside_window_rect(self) -> None:
         with mock.patch.object(image_search, "click_screen") as click_screen:
             image_search.click_relative((100, 200, 740, 680), (639, 479))

@@ -20,6 +20,21 @@ ALLOWED_PROCESSES = {
 }
 
 _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_GA_ROOT = 2
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
 
 _USER32 = None
 if os.name == "nt":
@@ -32,6 +47,16 @@ if os.name == "nt":
             ctypes.POINTER(ctypes.c_uint),
         ]
         _USER32.GetWindowThreadProcessId.restype = ctypes.c_uint
+        _USER32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        _USER32.GetAncestor.restype = ctypes.c_void_p
+        _USER32.WindowFromPoint.argtypes = [_POINT]
+        _USER32.WindowFromPoint.restype = ctypes.c_void_p
+        _USER32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        _USER32.GetWindowRect.restype = ctypes.c_int
+        _USER32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        _USER32.IsWindowVisible.restype = ctypes.c_int
+        _USER32.IsIconic.argtypes = [ctypes.c_void_p]
+        _USER32.IsIconic.restype = ctypes.c_int
     except Exception:
         _USER32 = None
 
@@ -104,15 +129,6 @@ def is_game_foreground() -> bool:
     return bool(n and n == str(GAME_PROCESS).strip().casefold())
 
 
-class _RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    ]
-
-
 _DWMAPI = None
 if os.name == "nt":
     try:
@@ -152,6 +168,65 @@ def _try_get_extended_frame_bounds(hwnd: int) -> Optional[Tuple[int, int, int, i
     return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
 
 
+def _is_league_client_window(hwnd: int) -> bool:
+    # Do not reuse the foreground PID cache for input authorization: a process
+    # may have exited or its PID may have been reused since the last poll.
+    if not hwnd or _USER32 is None:
+        return False
+    pid = ctypes.c_uint(0)
+    if not _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
+        return False
+    return psutil.Process(pid.value).name().strip().casefold() in ALLOWED_PROCESSES
+
+
+def is_league_client_window_target(
+    window_rect: Optional[Tuple[int, int, int, int]],
+    point: Optional[Tuple[int, int]] = None,
+) -> bool:
+    """Require the current client window, and optionally its exposed click point.
+
+    Desktop captures include covering apps. A matching image or window title
+    alone cannot authorize a click; any missing window/process evidence denies it.
+    """
+    if _USER32 is None or window_rect is None:
+        return False
+    try:
+        left, top, right, bottom = window_rect
+        if right <= left or bottom <= top or is_rect_minimized(window_rect):
+            return False
+
+        hwnd = int(_USER32.GetForegroundWindow() or 0)
+        if not _is_league_client_window(hwnd):
+            return False
+        if not _USER32.IsWindowVisible(hwnd) or _USER32.IsIconic(hwnd):
+            return False
+
+        current_rect = _try_get_extended_frame_bounds(hwnd)
+        if current_rect is None:
+            rect = _RECT()
+            if not _USER32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return False
+            current_rect = (rect.left, rect.top, rect.right, rect.bottom)
+        if current_rect != tuple(window_rect):
+            return False
+
+        if point is not None:
+            x, y = point
+            if not (left <= x < right and top <= y < bottom):
+                return False
+            target = int(_USER32.WindowFromPoint(_POINT(x, y)) or 0)
+            if not target or int(_USER32.GetAncestor(target, _GA_ROOT) or 0) != hwnd:
+                return False
+            if not _is_league_client_window(target):
+                return False
+
+        return int(_USER32.GetForegroundWindow() or 0) == hwnd
+    except Exception:
+        # Closed windows, access-denied processes and unavailable Win32 APIs
+        # must never turn an uncertain match into a desktop click.
+        return False
+
+
 def find_league_window_rect(
     target_title: str = "League of Legends",
     *,
@@ -173,7 +248,7 @@ def find_league_window_rect(
                 name = psutil.Process(pid).name().lower()
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 name = None
-        if name and name not in ALLOWED_PROCESSES:
+        if name not in ALLOWED_PROCESSES:
             continue
 
         hwnd = 0
