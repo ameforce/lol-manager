@@ -12,6 +12,12 @@
 - Unless the task is explicitly validating a release/hotfix branch or another non-main branch-specific artifact, run package builds such as `uv build` from `main`.
 - If an ordinary build is requested while on a feature, release, or hotfix branch, switch back to `main` first or build after the branch has been merged to `main`.
 
+## GitHub Release Retention Rule
+
+- Keep only the newest stable semantic version as a published GitHub Release.
+- After a successful release publication, verify its portable EXE, installer, and checksum assets, then run `scripts/prune_github_releases.py` to delete older published releases and their assets. Preserve Git tags and commit history.
+- Never delete the previous release when the new release is missing or incomplete. Serialize publication and cleanup, and retain the highest semantic version even when an older tag's workflow is rerun.
+
 ## Hotfix Scope Rule
 
 - Treat bugfix and application improvement work as hotfix work by default, even when the user does not explicitly say "hotfix".
