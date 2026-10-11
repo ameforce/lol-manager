@@ -1305,6 +1305,12 @@ class CliLcuStateTests(unittest.TestCase):
     def test_cli_main_aram_skips_ranked_role_and_pick_actions(self) -> None:
         fake_lcu = _FakeCliAramLcu()
         marker = "aram game-start monitor reached"
+        config = _FakeCliChampionConfig()
+        original_get = config.get
+        config.get = lambda role: (
+            {"enabled": True, "preferred_champions": ["아리", "럭스"]}
+            if role == "aram" else original_get(role)
+        )
 
         with (
             mock.patch.object(
@@ -1319,7 +1325,7 @@ class CliLcuStateTests(unittest.TestCase):
                 return_value=mock.Mock(should_exit=mock.Mock(return_value=False)),
             ),
             mock.patch.object(entrypoint, "LcuClient", return_value=fake_lcu),
-            mock.patch.object(entrypoint, "ChampionConfig", _FakeCliChampionConfig),
+            mock.patch.object(entrypoint, "ChampionConfig", return_value=config),
             mock.patch.object(
                 entrypoint,
                 "default_counter_cache_path",
@@ -1354,6 +1360,10 @@ class CliLcuStateTests(unittest.TestCase):
         self.assertEqual(fake_lcu.select_calls, [])
         wait_for_game.assert_called_once()
         self.assertIs(wait_for_game.call_args.kwargs["lcu"], fake_lcu)
+        self.assertEqual(
+            wait_for_game.call_args.kwargs["aram_preferences"],
+            entrypoint.AramPreferences(True, ("아리", "럭스")),
+        )
 
     def test_cli_main_reserve_pick_when_primary_lcu_action_rejected(
         self,

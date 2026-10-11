@@ -1,4 +1,8 @@
 {
+  "aram": {
+    "enabled": false,
+    "preferred_champions": []
+  },
   "top": {
     "champion": "케일",
     "ban": "트린다미어",
