@@ -8,6 +8,7 @@ import threading
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.aram import AramPreferences
 from lolmanager.core.opgg_champion_list import (
     build_normalized_index,
     default_cache_path,
@@ -211,6 +212,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         raise RuntimeError(
             "tkinter를 import할 수 없습니다. Python 설치에 Tk 지원이 필요합니다."
         ) from exc
+
+    from lolmanager.gui.aram_settings import AramSettingsPanel
 
     config = ChampionConfig(path=(config_path or champion_config_path()))
     counter_cache_path = default_counter_cache_path(config.path.resolve())
@@ -489,6 +492,13 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             reserve2_ban_cb=r2b_cb,
         )
 
+    aram_panel = AramSettingsPanel(
+        notebook,
+        preferences=AramPreferences.from_config(config.get("aram")),
+        on_change=lambda: _schedule_autosave(),
+    )
+    notebook.add(aram_panel, text="칼바람")
+
     bottom = ttk.Frame(root, padding=10)
     bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -619,6 +629,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         values = [v for v in values if v]
         all_champion_values = values
         champion_index = build_normalized_index(values)
+        aram_panel.set_champion_names(values)
         for cb in champion_combos:
             try:
                 cb.configure(values=values)
@@ -1206,6 +1217,11 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
             new_data[role] = entry
 
+        old_aram = new_data.get("aram")
+        new_data["aram"] = {
+            **(old_aram if isinstance(old_aram, dict) else {}),
+            **aram_panel.get_preferences().as_config(),
+        }
         try:
             config.data = new_data
             config.save()
@@ -1234,6 +1250,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         old = _autosave_suspended
         _autosave_suspended = True
         try:
+            aram_panel.set_preferences(AramPreferences.from_config(config.get("aram")))
             for role in ROLE_ORDER:
                 info = config.get(role) or {}
                 v = role_vars[role]
@@ -1283,6 +1300,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
     ttk.Button(btns, text="다시 불러오기", command=_reload).pack(side=tk.LEFT, padx=6)
     ttk.Button(btns, text="닫기", command=_close).pack(side=tk.LEFT, padx=6)
+    root.protocol("WM_DELETE_WINDOW", _close)
 
     _load_champion_list_async()
 

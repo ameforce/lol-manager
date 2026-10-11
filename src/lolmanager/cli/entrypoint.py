@@ -62,6 +62,7 @@ from lolmanager.core.image_search import (
     search_and_act,
 )
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.aram import AramPreferences
 from lolmanager.core.champion_fetcher import (
     fetch_top_champions,
     fetch_champion_slug,
@@ -2998,15 +2999,22 @@ def _wait_for_game_start_and_monitor(
     logger: logging.Logger,
     continue_after_game: object,
     passive_champ_select: bool = False,
+    aram_preferences: Optional[AramPreferences] = None,
 ) -> Optional[bool]:
     """Wait through champ select and return None only when the cycle must restart."""
 
-    if passive_champ_select:
+    aram_active = bool(
+        aram_preferences and aram_preferences.enabled and aram_preferences.preferred_champions
+    )
+    if aram_active:
+        logger.info("칼바람 선호 챔피언 자동 선택 감시 중(벤치 우선순위 교환).")
+    elif passive_champ_select:
         logger.info("인게임 시작 대기 중(챔피언 선택 비개입 감시).")
     else:
         logger.info("인게임 시작 대기 중(픽 팝업/거절 감시 포함).")
     _set_client_state(ClientState.WAIT_GAME_START, time.monotonic(), logger)
     wait_iter = 0
+    next_aram_poll_at = 0.0
     while True:
         if _LEAGUE_EXIT_GUARD is not None and _LEAGUE_EXIT_GUARD.should_exit():
             _exit_after_league_client_closed(logger)
@@ -3045,6 +3053,23 @@ def _wait_for_game_start_and_monitor(
         ):
             _set_client_state(ClientState.INGAME, time.monotonic(), logger)
             break
+        if (
+            aram_active
+            and aram_preferences is not None
+            and phase == PHASE_CHAMP_SELECT
+            and time.monotonic() >= next_aram_poll_at
+        ):
+            try:
+                selection = lcu.select_aram_preferred_champion_decision(
+                    aram_preferences.preferred_champions
+                )
+                if selection.ok:
+                    logger.info("칼바람 선호 챔피언 자동 선택 완료: %s", selection.value)
+                else:
+                    logger.debug("칼바람 자동 선택 대기: %s", selection.reason)
+            except Exception as exc:
+                logger.debug("칼바람 자동 선택 확인 실패: %s", exc)
+            next_aram_poll_at = time.monotonic() + 1.0
         rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
         if rect is not None:
             if not passive_champ_select:
@@ -4142,7 +4167,7 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
         ):
             if game_mode_snapshot.mode == GameMode.ARAM:
                 logger.info(
-                    "칼바람 모드에서는 포지션 기반 픽/밴을 건너뛰고 인게임 시작을 감시합니다."
+                    "칼바람 모드 감지. 칼바람 선호 설정에 따라 챔피언 선택을 감시합니다."
                 )
             else:
                 logger.warning(
@@ -4171,6 +4196,11 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
                 logger=logger,
                 continue_after_game=current_continue_after_game,
                 passive_champ_select=True,
+                aram_preferences=(
+                    AramPreferences.from_config(config.get("aram"))
+                    if game_mode_snapshot.mode == GameMode.ARAM
+                    else None
+                ),
             )
             if should_continue is None:
                 continue
