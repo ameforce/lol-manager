@@ -927,42 +927,18 @@ class LeagueClientExitGuard:
         self._target_norm_path = _norm_exe_path(league_exe) if league_exe else ""
         self._use_path_check = bool(league_exe and Path(league_exe).exists())
 
-    def poll_is_running(self) -> bool:
+    def poll_is_running(self) -> Optional[bool]:
         league_exe = self.league_exe
         if not league_exe:
             return False
 
+        inspection_incomplete = False
         if self._use_path_check and self._target_name_cf and self._target_norm_path:
             target_name_cf = self._target_name_cf
             target_norm = self._target_norm_path
             running = False
-            for proc in psutil.process_iter(["pid", "name"]):
-                try:
-                    name = proc.info.get("name") or ""
-                except (
-                    psutil.NoSuchProcess,
-                    psutil.AccessDenied,
-                    psutil.ZombieProcess,
-                ):
-                    continue
-                if not name or str(name).casefold() != target_name_cf:
-                    continue
-                try:
-                    exe = proc.exe()
-                except (
-                    psutil.NoSuchProcess,
-                    psutil.AccessDenied,
-                    psutil.ZombieProcess,
-                ):
-                    continue
-                if exe and _norm_exe_path(exe) == target_norm:
-                    running = True
-                    break
-        else:
-            running = False
-            target_name_cf = self._target_name_cf
-            if target_name_cf:
-                for proc in psutil.process_iter(["name"]):
+            try:
+                for proc in psutil.process_iter(["pid", "name"]):
                     try:
                         name = proc.info.get("name") or ""
                     except (
@@ -970,15 +946,52 @@ class LeagueClientExitGuard:
                         psutil.AccessDenied,
                         psutil.ZombieProcess,
                     ):
+                        inspection_incomplete = True
                         continue
-                    if name and str(name).casefold() == target_name_cf:
+                    if not name or str(name).casefold() != target_name_cf:
+                        continue
+                    try:
+                        exe = proc.exe()
+                    except (
+                        psutil.NoSuchProcess,
+                        psutil.AccessDenied,
+                        psutil.ZombieProcess,
+                    ):
+                        inspection_incomplete = True
+                        continue
+                    if exe and _norm_exe_path(exe) == target_norm:
                         running = True
                         break
+            except (psutil.Error, OSError):
+                return None
+        else:
+            running = False
+            target_name_cf = self._target_name_cf
+            if target_name_cf:
+                try:
+                    for proc in psutil.process_iter(["name"]):
+                        try:
+                            name = proc.info.get("name") or ""
+                        except (
+                            psutil.NoSuchProcess,
+                            psutil.AccessDenied,
+                            psutil.ZombieProcess,
+                        ):
+                            inspection_incomplete = True
+                            continue
+                        if name and str(name).casefold() == target_name_cf:
+                            running = True
+                            break
+                except (psutil.Error, OSError):
+                    return None
 
         if running:
             self.seen_running = True
+            return True
+        if inspection_incomplete:
+            return None
         return running
 
     def should_exit(self) -> bool:
         running = self.poll_is_running()
-        return bool(self.seen_running and not running)
+        return bool(self.seen_running and running is False)

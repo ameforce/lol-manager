@@ -114,6 +114,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui._log_window = _LogWindow()
         gui._external_sync_q = queue.Queue(maxsize=1)
         gui._external_sync_last = None
+        gui._last_confirmed_league_running = None
         gui._last_config_mtime_ns = 0
         gui._pending_config_apply_at = None
         gui._auto_start_pending = False
@@ -139,7 +140,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         in_game: bool,
         rect: tuple[int, int, int, int] | None = None,
         minimized: bool = False,
-        league_running: bool = True,
+        league_running: bool | None = True,
         league_foreground: bool = False,
     ) -> _ExternalSyncSnapshot:
         return _ExternalSyncSnapshot(
@@ -587,6 +588,24 @@ class GuiRuntimePolicyTests(unittest.TestCase):
 
         gui._on_close.assert_called_once_with(close_opgg=True)
         self.assertEqual(gui.root.iconify_calls, 0)
+
+    def test_unknown_league_probe_does_not_override_last_confirmed_running_state(
+        self,
+    ) -> None:
+        gui = self._make_windowing_gui()
+        gui._last_confirmed_league_running = True
+        gui._client_seen_once = True
+        gui._client_closed_at = 10.0
+        gui._on_close = mock.Mock()
+        gui._external_sync_q.put(
+            self._snapshot(in_game=False, league_running=None)
+        )
+
+        with mock.patch("lolmanager.gui.app_gui.time.monotonic", return_value=20.0):
+            gui._sync_external_state()
+
+        gui._on_close.assert_not_called()
+        self.assertIs(gui._last_confirmed_league_running, True)
 
     def test_client_close_waits_for_cli_owned_opgg_cleanup_before_forcing_exit(self) -> None:
         gui = self._make_windowing_gui()

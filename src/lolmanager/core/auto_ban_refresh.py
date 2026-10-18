@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,9 @@ from lolmanager.core.opgg_counter_recommendations import (
 
 ROLE_ORDER: tuple[str, ...] = ("top", "jungle", "mid", "adc", "support")
 AUTO_BAN_REFRESH_SUCCESS_MS = DEFAULT_MAX_AGE_SEC * 1000
+# If rankings are unavailable, avoid repeating the same failed scrape for each
+# configured target while keeping the retry window short.
+RANKED_DATASET_FAILURE_RETRY_SEC = 60
 # Counter recommendations are slow-moving.  A failed refresh should not retry
 # aggressively enough to repeatedly wake the UI or hammer the same source.
 AUTO_BAN_REFRESH_RETRY_MS = 60 * 60 * 1000
@@ -162,6 +166,11 @@ class AutoBanRefreshCoordinator:
         self._state_lock = threading.Lock()
         self._targets: dict[tuple[str, str], AutoBanRefreshTarget] = {}
         self._in_flight: set[tuple[str, str]] = set()
+        self._ranked_dataset_lock = threading.Lock()
+        self._ranked_dataset_cache: Optional[
+            tuple[float, float, dict[str, list[tuple[str, str, str]]]]
+        ] = None
+        self._refresh_semaphore = threading.BoundedSemaphore(2)
 
     def start(self) -> None:
         targets = collect_auto_ban_targets(self.config_path)
@@ -221,7 +230,8 @@ class AutoBanRefreshCoordinator:
         def worker() -> None:
             success = False
             try:
-                success = self._refresh_target(target)
+                with self._refresh_semaphore:
+                    success = self._refresh_target(target)
             except Exception as exc:
                 self._logger.warning(
                     "auto ban refresh failed for %s/%s: %s",
@@ -275,11 +285,7 @@ class AutoBanRefreshCoordinator:
         self._schedule_target(current_target, delay_ms, current_generation)
 
     def _refresh_target(self, target: AutoBanRefreshTarget) -> bool:
-        _names, by_position, _source = self._get_champion_dataset(
-            self._champion_dataset_cache_path,
-            max_age_sec=0,
-            timeout_sec=10.0,
-        )
+        by_position = self._get_ranked_dataset()
         ranked_entries = _ranked_entries_for_role(by_position, target.role)
         detail_href = _href_for_target(ranked_entries, target)
         if not detail_href and self._fetch_champion_slug is not None:
@@ -296,3 +302,43 @@ class AutoBanRefreshCoordinator:
             max_age_sec=0,
         )
         return result.status == "opgg" and bool(result.recommendations)
+
+    def _get_ranked_dataset(self) -> dict[str, list[tuple[str, str, str]]]:
+        """Fetch shared role rankings once per cache lifetime, not once per target."""
+        now = time.monotonic()
+        with self._ranked_dataset_lock:
+            cached = self._ranked_dataset_cache
+            if cached is not None and now - cached[0] <= cached[1]:
+                return {role: list(entries) for role, entries in cached[2].items()}
+
+            _names, by_position, _source = self._get_champion_dataset(
+                self._champion_dataset_cache_path,
+                max_age_sec=0,
+                timeout_sec=10.0,
+            )
+            if isinstance(by_position, dict) and by_position:
+                normalized = {
+                    str(role): list(entries)
+                    for role, entries in by_position.items()
+                    if isinstance(role, str) and isinstance(entries, (list, tuple))
+                }
+                if any(
+                    _ranked_entries_for_role(normalized, role)
+                    for role in normalized
+                ):
+                    self._ranked_dataset_cache = (
+                        time.monotonic(),
+                        DEFAULT_MAX_AGE_SEC,
+                        normalized,
+                    )
+                    return {role: list(entries) for role, entries in normalized.items()}
+
+            # A Data Dragon fallback has champion names but no role-ranked hrefs.
+            # Preserve a prior usable snapshot when OP.GG is temporarily unavailable.
+            stale_entries = cached[2] if cached is not None else {}
+            self._ranked_dataset_cache = (
+                time.monotonic(),
+                RANKED_DATASET_FAILURE_RETRY_SEC,
+                stale_entries,
+            )
+            return {role: list(entries) for role, entries in stale_entries.items()}
