@@ -16,7 +16,10 @@ import psutil
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
-from lolmanager.core.aram import choose_aram_bench_champion
+from lolmanager.core.aram import (
+    choose_aram_bench_champion,
+    choose_aram_initial_champion,
+)
 
 
 DEFAULT_LOCKFILE = Path(r"C:\Riot Games\League of Legends\lockfile")
@@ -1855,7 +1858,7 @@ class LcuClient:
     def select_aram_preferred_champion_decision(
         self, preferred_champions: Sequence[str]
     ) -> LcuDecision:
-        """Swap an available bench champion, then confirm the local selection.
+        """Choose an initial ARAM card or upgrade to a preferred bench champion.
 
         Contract: the client 26.16 Swagger's TeamBuilderDirect-ChampSelectSession,
         ChampGridChampion and POST /lol-champ-select/v1/session/bench/swap/{id}.
@@ -1881,23 +1884,33 @@ class LcuClient:
         raw = snapshot.raw
         if raw.get("benchEnabled") is not True or raw.get("isSpectating") is True:
             return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM bench unavailable")
-        current_id = _parse_optional_int(snapshot.local_player.get("championId"))
-        if current_id is None or current_id <= 0:
-            return LcuDecision(LcuOutcome.NO_LOCAL_PLAYER, reason="ARAM champion not assigned")
+        if not snapshot.local_player:
+            return LcuDecision(
+                LcuOutcome.NO_LOCAL_PLAYER,
+                reason="ARAM local player unavailable",
+            )
+        current_id = _parse_optional_int(snapshot.local_player.get("championId")) or 0
         bench = raw.get("benchChampions")
         if not isinstance(bench, list):
             return LcuDecision(LcuOutcome.MALFORMED_SESSION, reason="invalid ARAM bench")
-        bench_ids = {
-            champion_id
-            for item in bench
-            if isinstance(item, dict)
-            and (champion_id := _parse_optional_int(item.get("championId"))) is not None
-            and champion_id > 0
-        }
+        bench_order: list[int] = []
+        for item in bench:
+            if not isinstance(item, dict):
+                continue
+            champion_id = _parse_optional_int(item.get("championId"))
+            if (
+                champion_id is not None
+                and champion_id > 0
+                and champion_id not in bench_order
+            ):
+                bench_order.append(champion_id)
+        bench_ids = set(bench_order)
         if not bench_ids:
-            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="empty ARAM bench")
+            reason = "no ARAM cards offered" if current_id <= 0 else "empty ARAM bench"
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason=reason)
 
         name_to_id: dict[str, int] = {}
+        id_to_name: dict[int, str] = {}
         eligible_ids: set[int] = set()
         for champion in champions.value:
             champion_id = _parse_optional_int(champion.get("id"))
@@ -1907,6 +1920,15 @@ class LcuClient:
                 name = _normalize_lookup_key(champion.get(key))
                 if name:
                     name_to_id[name] = champion_id
+            display_name = next(
+                (
+                    str(champion.get(key)).strip()
+                    for key in ("name", "displayName", "alias")
+                    if str(champion.get(key) or "").strip()
+                ),
+                str(champion_id),
+            )
+            id_to_name[champion_id] = display_name
             if champion.get("disabled") is not True and any(
                 champion.get(key) is True
                 for key in (
@@ -1925,11 +1947,22 @@ class LcuClient:
                     reason=f"ARAM preferred champion not found: {name}",
                 )
             preferred_ids.append(champion_id)
-        target_id = choose_aram_bench_champion(
-            preferred_ids, current_id, bench_ids & eligible_ids
-        )
+        available_ids = bench_ids & eligible_ids
+        initial_pick = current_id <= 0
+        if initial_pick:
+            target_id = choose_aram_initial_champion(
+                preferred_ids,
+                (champion_id for champion_id in bench_order if champion_id in available_ids),
+            )
+        else:
+            target_id = choose_aram_bench_champion(
+                preferred_ids, current_id, available_ids
+            )
         if target_id is None:
-            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="keep current ARAM champion")
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no eligible ARAM card" if initial_pick else "keep current ARAM champion",
+            )
 
         swap = _write_result_decision(
             self.request("POST", f"/lol-champ-select/v1/session/bench/swap/{target_id}"),
@@ -1945,19 +1978,32 @@ class LcuClient:
                 return confirmed
             updated: ChampSelectSnapshot = confirmed.value
             if (
-                champ_select_session_identity(updated.raw) != champ_select_session_identity(raw)
+                champ_select_session_identity(updated.raw)
+                != champ_select_session_identity(raw)
                 or updated.local_player_cell_id != snapshot.local_player_cell_id
             ):
-                return LcuDecision(LcuOutcome.NO_SESSION, reason="ARAM session changed during swap")
+                return LcuDecision(
+                    LcuOutcome.NO_SESSION,
+                    reason="ARAM session changed during selection",
+                )
             if _parse_optional_int(updated.local_player.get("championId")) == target_id:
                 return LcuDecision(
                     LcuOutcome.SUCCESS,
-                    value=preferred_champions[preferred_ids.index(target_id)],
-                    reason="ARAM bench swap confirmed",
+                    value=id_to_name.get(target_id, str(target_id)),
+                    reason=(
+                        "ARAM initial card selection confirmed"
+                        if initial_pick
+                        else "ARAM bench swap confirmed"
+                    ),
                     status_code=swap.status_code,
                 )
             if time.monotonic() >= deadline:
-                return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ARAM bench swap not confirmed")
+                reason = (
+                    "ARAM initial card selection not confirmed"
+                    if initial_pick
+                    else "ARAM bench swap not confirmed"
+                )
+                return LcuDecision(LcuOutcome.REQUEST_FAILED, reason=reason)
             time.sleep(0.1)
 
     def get_local_player_position(self) -> LcuDecision:
