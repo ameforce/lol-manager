@@ -1860,8 +1860,9 @@ class LcuClient:
     ) -> LcuDecision:
         """Choose an initial ARAM card or upgrade to a preferred bench champion.
 
-        Contract: the client 26.16 Swagger's TeamBuilderDirect-ChampSelectSession,
-        ChampGridChampion and POST /lol-champ-select/v1/session/bench/swap/{id}.
+        Contract: the client's TeamBuilderDirect-ChampSelectSession and
+        ChampGridChampion schemas. The bench-swap route depends on whether the
+        active session uses legacy champ select.
         https://github.com/KebsCS/lcu-and-riotclient-api/blob/main/lcu/swagger.json
         """
         if not preferred_champions:
@@ -1964,8 +1965,16 @@ class LcuClient:
                 reason="no eligible ARAM card" if initial_pick else "keep current ARAM champion",
             )
 
+        # The client exposes separate mutation routes for its legacy and direct
+        # champ-select implementations. Older session payloads may omit the
+        # flag, so preserve the legacy route as the compatibility default.
+        bench_swap_route = (
+            "/lol-champ-select/v1/session/bench/swap"
+            if raw.get("isLegacyChampSelect") is not False
+            else "/lol-lobby-team-builder/champ-select/v1/session/bench/swap"
+        )
         swap = _write_result_decision(
-            self.request("POST", f"/lol-champ-select/v1/session/bench/swap/{target_id}"),
+            self.request("POST", f"{bench_swap_route}/{target_id}"),
             success_reason="ARAM bench swap accepted",
             rejected_reason="ARAM bench swap rejected",
         )
