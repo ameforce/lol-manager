@@ -8,6 +8,7 @@ import pytest
 from lolmanager.core.auto_ban_refresh import (
     AUTO_BAN_REFRESH_RETRY_MS,
     AUTO_BAN_REFRESH_SUCCESS_MS,
+    RANKED_DATASET_FAILURE_RETRY_SEC,
     AutoBanRefreshCoordinator,
     collect_auto_ban_targets,
 )
@@ -123,6 +124,87 @@ def test_refresh_coordinator_forces_startup_refresh_and_schedules_success(
         ("말파이트", "1티어", "/ko/lol/champions/malphite/build/top")
     ]
     assert updated == [True]
+
+
+def test_multiple_targets_share_one_ranked_dataset_fetch(tmp_path: Path) -> None:
+    config_path = tmp_path / "champion_config.json"
+    _write_config(
+        config_path,
+        {
+            "top": {"champion": "말파이트", "ban": AUTO_BAN_VALUE},
+            "mid": {"champion": "아리", "ban": AUTO_BAN_VALUE},
+        },
+    )
+    dataset_calls: list[Path] = []
+    refreshed_roles: list[str] = []
+
+    def get_champion_dataset(path, **_kwargs):
+        dataset_calls.append(path)
+        return (
+            ["말파이트", "아리"],
+            {
+                "top": [("말파이트", "1티어", "/top/malphite")],
+                "mid": [("아리", "1티어", "/mid/ahri")],
+            },
+            "opgg",
+        )
+
+    def get_counter_recommendations(_path, *, role, **_kwargs):
+        refreshed_roles.append(role)
+        return RecommendationCacheResult(
+            "opgg",
+            (
+                CounterRecommendation(
+                    role=role,
+                    configured_pick="configured",
+                    champion="counter",
+                    tier="1티어",
+                    matchup_winrate=50.0,
+                    pick_winrate=50.0,
+                    tier_score_value=50,
+                    matchup_score=50,
+                    total_score=100,
+                    source_order=0,
+                ),
+            ),
+            123.0,
+        )
+
+    coordinator = AutoBanRefreshCoordinator(
+        config_path=config_path,
+        schedule_after_ms=lambda delay, callback: callback() if delay == 0 else None,
+        run_background=lambda callback: callback(),
+        on_updated=lambda: None,
+        get_champion_dataset=get_champion_dataset,
+        get_counter_recommendations=get_counter_recommendations,
+    )
+
+    coordinator.start()
+
+    assert len(dataset_calls) == 1
+    assert refreshed_roles == ["top", "mid"]
+
+
+def test_empty_ranked_dataset_is_temporarily_cached(tmp_path: Path) -> None:
+    config_path = tmp_path / "champion_config.json"
+    dataset_calls = []
+    coordinator = AutoBanRefreshCoordinator(
+        config_path=config_path,
+        schedule_after_ms=lambda _delay, _callback: None,
+        run_background=lambda _callback: None,
+        on_updated=lambda: None,
+        get_champion_dataset=lambda *_args, **_kwargs: (
+            dataset_calls.append(True) or [],
+            {"top": []},
+            "ddragon",
+        ),
+    )
+
+    assert coordinator._get_ranked_dataset() == {}
+    assert coordinator._get_ranked_dataset() == {}
+    assert dataset_calls == [True]
+    assert coordinator._ranked_dataset_cache is not None
+    assert coordinator._ranked_dataset_cache[1] == RANKED_DATASET_FAILURE_RETRY_SEC
 
 
 def test_refresh_coordinator_retries_failed_refresh_after_a_long_interval(

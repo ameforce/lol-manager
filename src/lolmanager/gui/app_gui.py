@@ -5,7 +5,6 @@ import ctypes
 from dataclasses import dataclass
 import logging
 import os
-from pathlib import Path
 import queue
 import subprocess
 import sys
@@ -47,7 +46,7 @@ from lolmanager.gui.log_view_model import (
     ROLE_CLEAR_STATES,
     ROLE_LABEL_KO,
     compact_role_ban_label_for_main_ui,
-    role_key_from_log_line,
+    role_key_from_log_line as role_key_from_log_line,
 )
 from lolmanager.platform.paths import (
     champion_config_path,
@@ -277,7 +276,7 @@ class _ExternalSyncSnapshot:
     in_game: bool
     rect: Optional[tuple[int, int, int, int]]
     minimized: bool
-    league_running: bool
+    league_running: Optional[bool]
     league_foreground: bool
 
 
@@ -559,6 +558,7 @@ class LolManagerGui:
         )
         self._external_sync_thread: Optional[threading.Thread] = None
         self._external_sync_last: Optional[_ExternalSyncSnapshot] = None
+        self._last_confirmed_league_running: Optional[bool] = None
         self._stop_requested_at: Optional[float] = None
         self._restart_after_exit = False
         self._unexpected_cli_restart_count = 0
@@ -2451,11 +2451,11 @@ class LolManagerGui:
             code = proc.poll()
         stop_requested = self._stop_requested_at is not None
         planned_restart = bool(self._restart_after_exit)
-        league_running = False
+        league_running = True
         try:
-            league_running = bool(self._league_exit_guard.poll_is_running())
+            league_running = self._league_exit_guard.poll_is_running() is not False
         except Exception:
-            league_running = False
+            league_running = True
 
         self.proc = None
         self._stop_requested_at = None
@@ -2735,9 +2735,9 @@ class LolManagerGui:
         minimized = bool(rect is not None and is_rect_minimized(rect))
 
         try:
-            league_running = bool(self._league_exit_guard.poll_is_running())
+            league_running = self._league_exit_guard.poll_is_running()
         except Exception:
-            league_running = False
+            league_running = None
 
         try:
             league_foreground = bool(is_league_client_foreground())
@@ -2799,6 +2799,12 @@ class LolManagerGui:
         if not isinstance(state, _ExternalSyncSnapshot):
             self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
             return
+        if state.league_running is not None:
+            self._last_confirmed_league_running = state.league_running
+        league_running = getattr(self, "_last_confirmed_league_running", None)
+        if league_running is None:
+            # An inconclusive first probe cannot establish that the client closed.
+            league_running = True
         self._external_sync_last = state
 
         mtime_ns = int(state.config_mtime_ns)
@@ -2833,7 +2839,7 @@ class LolManagerGui:
             self._refresh_match_stats(force=False)
 
         in_game = bool(state.in_game)
-        league_running = bool(state.league_running)
+        league_running = bool(league_running)
 
         if not in_game and bool(getattr(self, "_update_apply_authorized", False)):
             if self._maybe_apply_staged_update(trigger="external-idle"):
