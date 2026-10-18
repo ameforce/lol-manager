@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import Optional, Tuple
 
+from lolmanager.platform.file_storage import atomic_write_text, file_transaction
 from lolmanager.platform.paths import match_timing_stats_path
 
 
@@ -55,6 +55,9 @@ def load_match_timing_stats(
     except Exception:
         return ([], None)
 
+    if not isinstance(data, dict):
+        return ([], None)
+
     durations_raw = data.get("durations_sec", [])
     if not isinstance(durations_raw, list):
         return ([], None)
@@ -72,17 +75,8 @@ def load_match_timing_stats(
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    with tmp.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except Exception:
-            pass
-    os.replace(tmp, path)
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    atomic_write_text(path, text)
 
 
 def append_match_duration(
@@ -92,27 +86,28 @@ def append_match_duration(
     max_samples: int = DEFAULT_MAX_SAMPLES,
 ) -> Tuple[list[float], Optional[float]]:
     p = match_timing_stats_path() if path is None else path
-    durations, _avg = load_match_timing_stats(p)
 
     try:
         d = float(duration_sec)
     except Exception:
-        return (durations, _avg)
+        return load_match_timing_stats(p)
     if not (MIN_DURATION_SEC <= d <= MAX_DURATION_SEC):
-        return (durations, _avg)
+        return load_match_timing_stats(p)
 
-    durations.append(d)
-    if max_samples > 0 and len(durations) > int(max_samples):
-        durations = durations[-int(max_samples) :]
-
-    payload = {
-        "version": STATS_VERSION,
-        "durations_sec": durations,
-        "updated_at_unix": int(time.time()),
-    }
     try:
-        _atomic_write_json(p, payload)
+        with file_transaction(p):
+            durations, _avg = load_match_timing_stats(p)
+            durations.append(d)
+            if max_samples > 0 and len(durations) > int(max_samples):
+                durations = durations[-int(max_samples) :]
+
+            payload = {
+                "version": STATS_VERSION,
+                "durations_sec": durations,
+                "updated_at_unix": int(time.time()),
+            }
+            _atomic_write_json(p, payload)
     except Exception:
-        return (durations, _avg_sec(durations))
+        return load_match_timing_stats(p)
 
     return (durations, _avg_sec(durations))

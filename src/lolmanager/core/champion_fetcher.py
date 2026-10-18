@@ -8,7 +8,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError
 
 from lolmanager.core.champion_names import normalize_name as _normalize_name
 from lolmanager.core.opgg_http import (
@@ -84,6 +83,8 @@ def sort_counter_candidates_by_role_rank(
 def _scrape(
     position: str, limit: int, headless: bool
 ) -> List[Tuple[str, Tuple[str, str], Optional[str]]]:
+    from playwright.sync_api import TimeoutError, sync_playwright
+
     url = POSITION_URLS.get(position)
     if not url:
         raise ValueError(f"지원하지 않는 포지션: {position}")

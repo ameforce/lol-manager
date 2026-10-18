@@ -93,7 +93,6 @@ def _apply_windows_chrome(root, *, prefer_dark: Optional[bool]) -> None:
 
 
 def apply_modern_theme(root, *, prefer: Optional[str] = None) -> AppliedTheme:
-    import tkinter as tk
     from tkinter import ttk
 
     requested = (prefer or os.environ.get("LOLMANAGER_TTK_THEME") or "auto").strip()

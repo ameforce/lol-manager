@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.champion_config import ChampionConfig, ChampionConfigError
 from lolmanager.core.aram import AramPreferences
 from lolmanager.core.opgg_aram_list import default_aram_cache_path, get_aram_champion_entries
 from lolmanager.core.opgg_champion_list import (
@@ -216,7 +216,21 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
     from lolmanager.gui.aram_settings import AramSettingsPanel
 
-    config = ChampionConfig(path=(config_path or champion_config_path()))
+    selected_config_path = config_path or champion_config_path()
+    try:
+        config = ChampionConfig(path=selected_config_path)
+    except ChampionConfigError as exc:
+        error_root = tk.Tk()
+        error_root.withdraw()
+        try:
+            messagebox.showerror(
+                "설정 파일 오류",
+                f"설정 파일을 안전하게 읽지 못했습니다. 파일을 수정하거나 백업한 뒤 다시 여세요.\n\n{exc}",
+                parent=error_root,
+            )
+        finally:
+            error_root.destroy()
+        return
     counter_cache_path = default_counter_cache_path(config.path.resolve())
 
     _set_app_user_model_id()
@@ -1243,6 +1257,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         return True
 
     def _reload() -> None:
+        nonlocal config
         nonlocal _autosave_suspended
         try:
             fresh = ChampionConfig(path=config.path)
@@ -1253,7 +1268,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             status_var.set("불러오기 실패")
             return
 
-        config.data = fresh.data
+        config = fresh
 
         _cancel_pending_autosave()
 

@@ -49,6 +49,11 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     try:
         with os.fdopen(fd, "w", encoding=encoding) as stream:
             stream.write(text)
+            stream.flush()
+            try:
+                os.fsync(stream.fileno())
+            except OSError:
+                pass
         os.replace(temporary, path)
     finally:
         try:

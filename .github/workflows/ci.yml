@@ -29,6 +29,8 @@ jobs:
         run: uv lock --check
       - name: Install locked dependencies
         run: uv sync --locked --group dev
+      - name: Lint source
+        run: uv run --locked --group dev ruff check --select E4,E7,E9,F src/lolmanager
       - name: Test source
         run: uv run --locked --group dev python -m pytest -q
       - name: Build main package

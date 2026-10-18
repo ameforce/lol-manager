@@ -82,8 +82,7 @@ from lolmanager.core.opgg_counter_recommendations import (
     load_recommendation_cache,
 )
 from lolmanager.cli.champion_selection import (
-    choose_available_pick_index,
-    _resolve_pick_pool_champion_ids,
+    choose_available_pick_index as choose_available_pick_index,
     _reconcile_pick_pool_availability,
     _lcu_status_label,
 )
@@ -91,12 +90,13 @@ from lolmanager.cli.postgame import (
     ContinueAfterGamePolicy,
     should_continue_after_game,
     PostgameController,
-    _should_force_first_cycle_postgame,
-    _should_process_postgame_at_cycle,
+    # Compatibility re-exports used by existing callers.
+    _should_force_first_cycle_postgame as _should_force_first_cycle_postgame,
+    _should_process_postgame_at_cycle as _should_process_postgame_at_cycle,
 )
 from lolmanager.cli.matchmaking import (
     MatchPollAttempt,
-    MatchmakingSearchTracker,
+    MatchmakingSearchTracker as MatchmakingSearchTracker,
     MatchmakingContext,
     MatchmakingActions,
     MatchmakingController,
@@ -106,7 +106,6 @@ from lolmanager.cli.runtime_state import (
     RuntimeState,
     ClientState,
     LCU_UI_ACTION_CLASSIFICATION as LCU_UI_ACTION_CLASSIFICATION,
-    POSTGAME_PHASES,
     client_state_from_lcu_phase,
     should_preserve_champ_select_state,
 )

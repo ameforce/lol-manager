@@ -967,3 +967,37 @@ def test_close_running_opgg_skips_untrusted_opgg_override(
 
     assert closed == 0
     assert external_apps.ENV_ALLOW_UNTRUSTED_APP_PATHS in caplog.text
+
+
+def test_league_exit_guard_treats_incomplete_process_scan_as_unknown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    league = _touch_exe(tmp_path / "Riot Games" / "LeagueClient.exe")
+    guard = external_apps.LeagueClientExitGuard(str(league), seen_running=True)
+
+    def inaccessible_processes(_attrs):
+        class _Process:
+            info = {"name": "LeagueClient.exe"}
+
+            def exe(self):
+                raise external_apps.psutil.AccessDenied(pid=42)
+
+        return iter([_Process()])
+
+    monkeypatch.setattr(external_apps.psutil, "process_iter", inaccessible_processes)
+
+    assert guard.poll_is_running() is None
+    assert guard.should_exit() is False
+
+
+def test_league_exit_guard_reports_closed_after_a_complete_empty_scan(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    league = _touch_exe(tmp_path / "Riot Games" / "LeagueClient.exe")
+    guard = external_apps.LeagueClientExitGuard(str(league), seen_running=True)
+    monkeypatch.setattr(external_apps.psutil, "process_iter", lambda _attrs: iter(()))
+
+    assert guard.poll_is_running() is False
+    assert guard.should_exit() is True
