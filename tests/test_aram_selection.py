@@ -35,6 +35,7 @@ GRID = [
 def session(current=22, bench=(99, 103), **overrides):
     return {
         "gameId": 123,
+        "isLegacyChampSelect": True,
         "benchEnabled": True,
         "benchChampions": [{"championId": cid} for cid in bench],
         "localPlayerCellId": 0,
@@ -132,6 +133,34 @@ def test_initial_card_selection_uses_first_offer_when_no_preference_is_offered()
     assert result.ok and result.value == "럭스"
     assert result.reason == "ARAM initial card selection confirmed"
     assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/99")]
+
+
+@pytest.mark.parametrize("current", [0, 22])
+def test_direct_champ_select_uses_team_builder_bench_swap_route(current):
+    client = client_with(
+        mode(),
+        LcuResult(200, GRID),
+        LcuResult(200, session(current=current, isLegacyChampSelect=False)),
+        LcuResult(204),
+        LcuResult(
+            200,
+            session(
+                current=103,
+                bench=(99,),
+                isLegacyChampSelect=False,
+            ),
+        ),
+    )
+
+    result = client.select_aram_preferred_champion_decision(("아리", "럭스"))
+
+    assert result.ok and result.value == "아리"
+    assert writes(client) == [
+        (
+            "POST",
+            "/lol-lobby-team-builder/champ-select/v1/session/bench/swap/103",
+        )
+    ]
 
 
 def test_initial_card_selection_with_empty_offer_does_not_write():
