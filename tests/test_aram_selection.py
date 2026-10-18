@@ -10,7 +10,11 @@ from unittest import mock
 import pytest
 
 from lolmanager.cli import entrypoint
-from lolmanager.core.aram import AramPreferences, choose_aram_bench_champion
+from lolmanager.core.aram import (
+    AramPreferences,
+    choose_aram_bench_champion,
+    choose_aram_initial_champion,
+)
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.lcu_client import (
     LcuClient,
@@ -62,6 +66,14 @@ def test_bench_selection_respects_priority_without_downgrading(current, bench, e
     assert choose_aram_bench_champion((103, 99, 22), current, bench) == expected
 
 
+@pytest.mark.parametrize(
+    "preferred,offered,expected",
+    [((103, 99), (99, 103), 103), ((22,), (99, 103), 99), ((103,), (), None)],
+)
+def test_initial_card_selection_prefers_list_order_then_first_offer(preferred, offered, expected):
+    assert choose_aram_initial_champion(preferred, offered) == expected
+
+
 def test_preferences_are_opt_in_and_normalize_order_without_touching_ranked(tmp_path):
     path = tmp_path / "champions.json"
     ranked = {"champion": "아리", "ban": "제드"}
@@ -96,6 +108,57 @@ def test_swaps_highest_available_preference_and_confirms_local_champion(queue_id
     assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/103")]
 
 
+def test_initial_card_selection_uses_highest_priority_offer_and_confirms_local_champion():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, session(current=0)),
+        LcuResult(204), LcuResult(200, session(current=103, bench=(99,))),
+    )
+
+    result = client.select_aram_preferred_champion_decision(("아리", "럭스"))
+
+    assert result.ok and result.value == "아리"
+    assert result.reason == "ARAM initial card selection confirmed"
+    assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/103")]
+
+
+def test_initial_card_selection_uses_first_offer_when_no_preference_is_offered():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, session(current=0, bench=(99, 103))),
+        LcuResult(204), LcuResult(200, session(current=99, bench=(103,))),
+    )
+
+    result = client.select_aram_preferred_champion_decision(("애쉬",))
+
+    assert result.ok and result.value == "럭스"
+    assert result.reason == "ARAM initial card selection confirmed"
+    assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/99")]
+
+
+def test_initial_card_selection_with_empty_offer_does_not_write():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, session(current=0, bench=())),
+    )
+
+    result = client.select_aram_preferred_champion_decision(("아리",))
+
+    assert result.status == LcuOutcome.NO_CURRENT_ACTION
+    assert result.reason == "no ARAM cards offered"
+    assert not writes(client)
+
+
+def test_initial_card_selection_rejection_is_not_reported_as_success():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, session(current=0)),
+        LcuResult(409),
+    )
+
+    result = client.select_aram_preferred_champion_decision(("아리",))
+
+    assert result.status == LcuOutcome.ACTION_REJECTED
+    assert result.reason == "ARAM bench swap rejected"
+    assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/103")]
+
+
 @pytest.mark.parametrize("queue_id", [420, 440, 400])
 def test_other_modes_never_issue_aram_requests(queue_id):
     client = client_with(mode(queue_id))
@@ -110,7 +173,6 @@ def test_other_modes_never_issue_aram_requests(queue_id):
      (session(benchEnabled=False), LcuOutcome.NO_CURRENT_ACTION),
      (session(isSpectating=True), LcuOutcome.NO_CURRENT_ACTION),
      (session(benchChampions=None), LcuOutcome.MALFORMED_SESSION),
-     (session(current=0), LcuOutcome.NO_LOCAL_PLAYER),
      (session(myTeam=[]), LcuOutcome.NO_LOCAL_PLAYER)],
 )
 def test_incomplete_or_inactive_bench_does_not_swap(payload, status):
