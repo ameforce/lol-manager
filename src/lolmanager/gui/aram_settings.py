@@ -37,8 +37,8 @@ class AramSettingsPanel(ttk.Frame):
         ttk.Label(
             self,
             text=(
-                "위쪽 챔피언을 더 선호합니다. 현재 챔피언보다 우선순위가 높은 챔피언이\n"
-                "교환 대기 목록(벤치)에 나타나면 자동으로 선택합니다. 없으면 현재 챔피언을 유지합니다."
+                "위쪽 챔피언을 더 선호합니다. 처음 제시된 카드 중 선호 챔피언을 자동으로 고르고,\n"
+                "없으면 첫 번째 카드를 선택합니다. 이후 더 높은 순위의 챔피언이 벤치에 나오면 교환합니다."
             ),
             wraplength=640,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 12))

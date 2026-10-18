@@ -31,6 +31,7 @@ from lolmanager.core.lcu_client import (
     GameModeSnapshot,
     LcuClient,
     LcuLoopAction,
+    LcuOutcome,
     PHASE_CHAMP_SELECT,
     PHASE_END_OF_GAME,
     PHASE_IN_PROGRESS,
@@ -2893,7 +2894,7 @@ def _wait_for_game_start_and_monitor(
         aram_preferences and aram_preferences.enabled and aram_preferences.preferred_champions
     )
     if aram_active:
-        logger.info("칼바람 선호 챔피언 자동 선택 감시 중(벤치 우선순위 교환).")
+        logger.info("칼바람 초기 카드 선택 및 선호 벤치 교환 감시 중.")
     elif passive_champ_select:
         logger.info("인게임 시작 대기 중(챔피언 선택 비개입 감시).")
     else:
@@ -2901,6 +2902,7 @@ def _wait_for_game_start_and_monitor(
     _set_client_state(ClientState.WAIT_GAME_START, time.monotonic(), logger)
     wait_iter = 0
     next_aram_poll_at = 0.0
+    last_aram_failure: Optional[tuple[LcuOutcome, str]] = None
     while True:
         if RUNTIME_STATE.league_exit_guard is not None and RUNTIME_STATE.league_exit_guard.should_exit():
             _exit_after_league_client_closed(logger)
@@ -2951,10 +2953,34 @@ def _wait_for_game_start_and_monitor(
                 )
                 if selection.ok:
                     logger.info("칼바람 선호 챔피언 자동 선택 완료: %s", selection.value)
-                else:
+                    last_aram_failure = None
+                elif selection.status == LcuOutcome.NO_CURRENT_ACTION and selection.reason in {
+                    "no ARAM cards offered",
+                    "no eligible ARAM card",
+                }:
+                    failure = (selection.status, selection.reason)
+                    if failure != last_aram_failure:
+                        logger.info("칼바람 초기 카드 선택 대기: %s", selection.reason)
+                        last_aram_failure = failure
+                elif selection.status in {
+                    LcuOutcome.NO_CURRENT_ACTION,
+                    LcuOutcome.NO_SESSION,
+                }:
                     logger.debug("칼바람 자동 선택 대기: %s", selection.reason)
+                else:
+                    failure = (selection.status, selection.reason)
+                    if failure != last_aram_failure:
+                        logger.warning(
+                            "칼바람 챔피언 선택 실패(outcome=%s): %s",
+                            selection.status.value,
+                            selection.reason,
+                        )
+                        last_aram_failure = failure
             except Exception as exc:
-                logger.debug("칼바람 자동 선택 확인 실패: %s", exc)
+                failure = (LcuOutcome.REQUEST_FAILED, str(exc))
+                if failure != last_aram_failure:
+                    logger.warning("칼바람 자동 선택 확인 실패: %s", exc)
+                    last_aram_failure = failure
             next_aram_poll_at = time.monotonic() + 1.0
         rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
         if rect is not None:
