@@ -38,6 +38,7 @@ AUTO_BAN_REFRESH_RETRY_MS = 60 * 60 * 1000
 class AutoBanRefreshTarget:
     role: str
     champion_name: str
+    excluded_champions: tuple[str, ...] = ()
 
 
 class _WarningLogger(Protocol):
@@ -54,7 +55,12 @@ def collect_auto_ban_targets(config_path: Path) -> list[AutoBanRefreshTarget]:
     targets: list[AutoBanRefreshTarget] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(role: str, champion_name: object, ban_value: object) -> None:
+    def add(
+        role: str,
+        champion_name: object,
+        ban_value: object,
+        excluded_champions: tuple[str, ...],
+    ) -> None:
         champ = str(champion_name or "").strip()
         if not champ or not is_auto_ban_value(ban_value):
             return
@@ -62,7 +68,13 @@ def collect_auto_ban_targets(config_path: Path) -> list[AutoBanRefreshTarget]:
         if key in seen:
             return
         seen.add(key)
-        targets.append(AutoBanRefreshTarget(role=role, champion_name=champ))
+        targets.append(
+            AutoBanRefreshTarget(
+                role=role,
+                champion_name=champ,
+                excluded_champions=excluded_champions,
+            )
+        )
 
     for role in ROLE_ORDER:
         info = cfg.get(role)
@@ -73,10 +85,21 @@ def collect_auto_ban_targets(config_path: Path) -> list[AutoBanRefreshTarget]:
             primary_champ = champ_raw[0] if champ_raw else ""
         else:
             primary_champ = champ_raw
-        add(role, primary_champ, info.get("ban"))
+        reserves = cfg.get_reserve_picks(role)
+        role_champions = [primary_champ, *(champ for champ, _ban in reserves)]
+        excluded: list[str] = []
+        excluded_keys: set[str] = set()
+        for role_champion in role_champions:
+            name = str(role_champion or "").strip()
+            key = normalize_name(name)
+            if name and key not in excluded_keys:
+                excluded.append(name)
+                excluded_keys.add(key)
+        excluded_champions = tuple(excluded)
 
-        for reserve_champ, reserve_ban in cfg.get_reserve_picks(role):
-            add(role, reserve_champ, reserve_ban)
+        add(role, primary_champ, info.get("ban"), excluded_champions)
+        for reserve_champ, reserve_ban in reserves:
+            add(role, reserve_champ, reserve_ban, excluded_champions)
 
     return targets
 
@@ -290,9 +313,6 @@ class AutoBanRefreshCoordinator:
         detail_href = _href_for_target(ranked_entries, target)
         if not detail_href and self._fetch_champion_slug is not None:
             detail_href = self._fetch_champion_slug(target.role, target.champion_name)
-        if not detail_href:
-            return False
-
         result = self._get_counter_recommendations(
             self._counter_cache_path,
             role=target.role,
@@ -300,8 +320,11 @@ class AutoBanRefreshCoordinator:
             ranked_entries=ranked_entries,
             detail_href=detail_href,
             max_age_sec=0,
+            excluded_champions=target.excluded_champions,
         )
-        return result.status == "opgg" and bool(result.recommendations)
+        return result.status in {"opgg", "ranked_fallback", "cache_fresh"} and bool(
+            result.recommendations
+        )
 
     def _get_ranked_dataset(self) -> dict[str, list[tuple[str, str, str]]]:
         """Fetch shared role rankings once per cache lifetime, not once per target."""

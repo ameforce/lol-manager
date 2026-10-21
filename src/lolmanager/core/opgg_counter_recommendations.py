@@ -44,6 +44,7 @@ class CounterRecommendation:
     href: Optional[str] = None
     source_url: Optional[str] = None
     raw_text: str = ""
+    source_type: str = "counter"
 
 
 @dataclass(frozen=True)
@@ -222,8 +223,69 @@ def build_recommendations(
     )
 
 
+def build_role_rank_fallback_recommendations(
+    *,
+    role: str,
+    configured_pick: str,
+    ranked_entries: Iterable[object],
+    excluded_champions: Iterable[object] = (),
+    limit: int = 10,
+) -> list[CounterRecommendation]:
+    excluded = {
+        normalize_name(name)
+        for name in (configured_pick, *tuple(excluded_champions))
+        if str(name or "").strip()
+    }
+    recommendations: list[CounterRecommendation] = []
+    seen: set[str] = set()
+
+    for rank_order, entry in enumerate(ranked_entries):
+        champion = _entry_name(entry)
+        if not is_plausible_champion_name(champion):
+            continue
+        key = normalize_name(champion)
+        if key in excluded or key in seen:
+            continue
+        seen.add(key)
+
+        tier = _entry_tier(entry)
+        tier_points = tier_score(tier)
+        recommendations.append(
+            CounterRecommendation(
+                role=str(role or "").strip(),
+                configured_pick=str(configured_pick or "").strip(),
+                champion=champion,
+                tier=tier,
+                matchup_winrate=None,
+                pick_winrate=None,
+                tier_score_value=tier_points,
+                matchup_score=0,
+                total_score=tier_points,
+                source_order=rank_order,
+                href=_entry_href(entry),
+                raw_text="OP.GG 포지션 순위 기반 대체 후보",
+                source_type="role_rank_fallback",
+            )
+        )
+
+    recommendations.sort(
+        key=lambda recommendation: (
+            -recommendation.tier_score_value,
+            recommendation.source_order,
+            recommendation.champion,
+        )
+    )
+    return recommendations[: max(0, int(limit))]
+
+
 def format_recommendation_label(recommendation: CounterRecommendation) -> str:
     tier = recommendation.tier or "unknown"
+    if recommendation.source_type == "role_rank_fallback":
+        return (
+            f"{recommendation.champion} "
+            f"({tier}, 포지션 순위 기반, 상성 정보 없음, "
+            f"score {recommendation.total_score:.1f})"
+        )
     if recommendation.matchup_winrate is None:
         winrate = "-"
     else:
@@ -328,6 +390,7 @@ def _recommendation_from_dict(obj: object) -> Optional[CounterRecommendation]:
             href=str(obj.get("href") or "").strip() or None,
             source_url=str(obj.get("source_url") or "").strip() or None,
             raw_text=str(obj.get("raw_text") or ""),
+            source_type=str(obj.get("source_type") or "counter").strip() or "counter",
         )
     except (TypeError, ValueError):
         return None
@@ -426,8 +489,11 @@ def get_counter_recommendations(
     max_age_sec: float = DEFAULT_MAX_AGE_SEC,
     now: Optional[float] = None,
     limit: int = 10,
+    excluded_champions: Iterable[object] = (),
     fetch_matchups: Optional[Callable[[str, int], Iterable[object]]] = None,
 ) -> RecommendationCacheResult:
+    ranked_entries = tuple(ranked_entries)
+    excluded_champions = tuple(excluded_champions)
     cached = load_recommendation_cache(
         cache_path,
         role=role,
@@ -435,14 +501,78 @@ def get_counter_recommendations(
         max_age_sec=max_age_sec,
         now=now,
     )
+
+    def cached_for_current_exclusions() -> RecommendationCacheResult:
+        if not cached.recommendations or not all(
+            recommendation.source_type == "role_rank_fallback"
+            for recommendation in cached.recommendations
+        ):
+            return cached
+        refreshed = build_role_rank_fallback_recommendations(
+            role=role,
+            configured_pick=configured_pick,
+            ranked_entries=ranked_entries,
+            excluded_champions=excluded_champions,
+            limit=limit,
+        )
+        if not refreshed:
+            excluded = {
+                normalize_name(name)
+                for name in (configured_pick, *excluded_champions)
+                if str(name or "").strip()
+            }
+            refreshed = [
+                recommendation
+                for recommendation in cached.recommendations
+                if normalize_name(recommendation.champion) not in excluded
+            ]
+        return RecommendationCacheResult(
+            cached.status, tuple(refreshed), cached.fetched_at_unix
+        )
+
     if cached.status == "cache_fresh" and cached.recommendations:
-        return cached
+        if not all(
+            recommendation.source_type == "role_rank_fallback"
+            for recommendation in cached.recommendations
+        ):
+            return cached
+        refreshed_result = cached_for_current_exclusions()
+        refreshed_fallback = list(refreshed_result.recommendations)
+        if refreshed_fallback:
+            fetched_at = time.time() if now is None else float(now)
+            save_recommendation_cache(
+                cache_path,
+                role=role,
+                configured_pick=configured_pick,
+                recommendations=refreshed_fallback,
+                fetched_at_unix=fetched_at,
+            )
+            return RecommendationCacheResult(
+                "ranked_fallback", tuple(refreshed_fallback), fetched_at
+            )
 
     if not detail_href:
-        return (
-            cached
-            if cached.status == "cache_stale" and cached.recommendations
-            else RecommendationCacheResult("cache_miss", tuple(), None)
+        if cached.status == "cache_stale" and cached.recommendations:
+            return cached_for_current_exclusions()
+        recommendations = build_role_rank_fallback_recommendations(
+            role=role,
+            configured_pick=configured_pick,
+            ranked_entries=ranked_entries,
+            excluded_champions=excluded_champions,
+            limit=limit,
+        )
+        if not recommendations:
+            return RecommendationCacheResult("cache_miss", tuple(), None)
+        fetched_at = time.time() if now is None else float(now)
+        save_recommendation_cache(
+            cache_path,
+            role=role,
+            configured_pick=configured_pick,
+            recommendations=recommendations,
+            fetched_at_unix=fetched_at,
+        )
+        return RecommendationCacheResult(
+            "ranked_fallback", tuple(recommendations), fetched_at
         )
 
     try:
@@ -462,14 +592,33 @@ def get_counter_recommendations(
             source_url=str(detail_href),
         )
         if not recommendations:
-            return (
-                cached
-                if cached.status == "cache_stale" and cached.recommendations
-                else RecommendationCacheResult(
+            if cached.status == "cache_stale" and cached.recommendations:
+                stale = cached_for_current_exclusions()
+                if stale.recommendations:
+                    return stale
+            recommendations = build_role_rank_fallback_recommendations(
+                role=role,
+                configured_pick=configured_pick,
+                ranked_entries=ranked_entries,
+                excluded_champions=excluded_champions,
+                limit=limit,
+            )
+            if not recommendations:
+                return RecommendationCacheResult(
                     "no_candidates",
                     tuple(),
                     time.time() if now is None else float(now),
                 )
+            fetched_at = time.time() if now is None else float(now)
+            save_recommendation_cache(
+                cache_path,
+                role=role,
+                configured_pick=configured_pick,
+                recommendations=recommendations,
+                fetched_at_unix=fetched_at,
+            )
+            return RecommendationCacheResult(
+                "ranked_fallback", tuple(recommendations), fetched_at
             )
         fetched_at = time.time() if now is None else float(now)
         save_recommendation_cache(
@@ -482,5 +631,7 @@ def get_counter_recommendations(
         return RecommendationCacheResult("opgg", tuple(recommendations), fetched_at)
     except Exception:
         if cached.status == "cache_stale" and cached.recommendations:
-            return cached
+            stale = cached_for_current_exclusions()
+            if stale.recommendations:
+                return stale
         return RecommendationCacheResult("fetch_failed", tuple(), None)
