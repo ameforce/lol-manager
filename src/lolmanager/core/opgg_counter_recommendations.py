@@ -7,7 +7,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
 
-from lolmanager.core.champion_names import normalize_name
+from lolmanager.core.champion_names import (
+    is_plausible_champion_name,
+    normalize_name,
+)
 from lolmanager.platform.file_storage import atomic_write_text, file_transaction
 
 
@@ -147,7 +150,7 @@ def _ranked_entry_map(
     out: dict[str, tuple[str, Optional[str]]] = {}
     for entry in ranked_entries:
         name = _entry_name(entry)
-        if not name:
+        if not is_plausible_champion_name(name):
             continue
         out.setdefault(normalize_name(name), (_entry_tier(entry), _entry_href(entry)))
     return out
@@ -167,9 +170,11 @@ def build_recommendations(
 
     for fallback_order, matchup in enumerate(matchups):
         champion = str(getattr(matchup, "champion", "") or "").strip()
-        if not champion:
+        if not is_plausible_champion_name(champion):
             continue
         key = normalize_name(champion)
+        if ranked_by_name and key not in ranked_by_name:
+            continue
         if key in seen:
             continue
         seen.add(key)
@@ -301,7 +306,7 @@ def _recommendation_from_dict(obj: object) -> Optional[CounterRecommendation]:
     if not isinstance(obj, dict):
         return None
     champion = str(obj.get("champion") or "").strip()
-    if not champion:
+    if not is_plausible_champion_name(champion):
         return None
     try:
         return CounterRecommendation(
@@ -347,7 +352,7 @@ def save_recommendation_cache(
         "recommendations": [
             _recommendation_to_dict(recommendation)
             for recommendation in recommendations
-            if recommendation.champion
+            if is_plausible_champion_name(recommendation.champion)
         ],
     }
 
@@ -396,6 +401,10 @@ def load_recommendation_cache(
             )
             if recommendation is not None
         )
+        if raw_recommendations and not recommendations:
+            return RecommendationCacheResult(
+                "cache_stale", tuple(), float(fetched_at)
+            )
         status = (
             "cache_fresh"
             if ((time.time() if now is None else float(now)) - float(fetched_at))
@@ -426,7 +435,7 @@ def get_counter_recommendations(
         max_age_sec=max_age_sec,
         now=now,
     )
-    if cached.status == "cache_fresh":
+    if cached.status == "cache_fresh" and cached.recommendations:
         return cached
 
     if not detail_href:

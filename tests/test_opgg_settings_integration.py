@@ -353,3 +353,39 @@ def test_config_load_strips_recommendation_metadata_before_runtime(tmp_path: Pat
 
     assert config.get("mid")["ban"] == AUTO_BAN_VALUE
     assert config.get_reserve_picks("mid") == [("오리아나", "제라스")]
+
+
+def test_runtime_auto_ban_ignores_invalid_fresh_recommendation_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "v": 3,
+                "entries": [
+                    {
+                        "key": "top::말파이트",
+                        "role": "top",
+                        "configured_pick": "말파이트",
+                        "fetched_at_unix": 100.0,
+                        "recommendations": [{"champion": "service@op.gg"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        entrypoint.resolve_ban_name_for_runtime(
+            cache_path,
+            role="top",
+            champion_name="말파이트",
+            configured_ban=AUTO_BAN_VALUE,
+            logger=logging.getLogger("test.invalid-auto-ban-cache"),
+            now=120.0,
+        )
+        == ""
+    )

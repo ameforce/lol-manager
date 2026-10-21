@@ -9,7 +9,10 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 from bs4 import BeautifulSoup
 
-from lolmanager.core.champion_names import normalize_name as _normalize_name
+from lolmanager.core.champion_names import (
+    is_plausible_champion_name as _is_plausible_champion_name,
+    normalize_name as _normalize_name,
+)
 from lolmanager.core.opgg_http import (
     MAX_OPGG_CHAMPION_ROWS,
     MAX_OPGG_COUNTER_LINK_SCAN,
@@ -282,18 +285,20 @@ def _counter_links_from_difficult_section(
     if header_text is not None:
         header = getattr(header_text, "parent", None)
         if header is not None:
-            ul = header.find_next("ul")
-            if ul is not None:
-                links = ul.select("li a", limit=max_links)
-                if links:
-                    return list(links)
+            ul_or_heading = header.find_next(["ul", "h1", "h2", "h3", "h4"])
+            container = header.find_parent(["section", "main"])
+            if (
+                ul_or_heading is None
+                or ul_or_heading.name != "ul"
+                or (container is not None and container not in ul_or_heading.parents)
+            ):
+                return []
+            return list(ul_or_heading.select("li a", limit=max_links))
 
     links = soup.select(
         "section:nth-of-type(1) div:nth-of-type(3) ul li a", limit=max_links
     )
-    if links:
-        return list(links)
-    return list(soup.select("section ul li a", limit=max_links))
+    return list(links)
 
 
 def parse_counter_matchups_from_html(
@@ -311,6 +316,10 @@ def parse_counter_matchups_from_html(
     seen: set[str] = set()
 
     for link in links:
+        href = str(link.get("href") or "").strip()
+        if not _absolute_opgg_url(href):
+            continue
+
         img = link.select_one("img")
         champion = ""
         if img is not None:
@@ -319,6 +328,8 @@ def parse_counter_matchups_from_html(
             text = _compact_text(link.get_text(" ", strip=True))
             champion = re.sub(r"\d+(?:\.\d+)?\s*%.*$", "", text).strip()
         if not champion:
+            continue
+        if not _is_plausible_champion_name(champion):
             continue
 
         key = _normalize_name(champion)
@@ -336,7 +347,7 @@ def parse_counter_matchups_from_html(
                 games=_parse_games(raw_text),
                 source_order=len(matchups),
                 raw_text=raw_text,
-                href=str(link.get("href") or "").strip() or None,
+                href=href,
                 source_url=source_url,
             )
         )
