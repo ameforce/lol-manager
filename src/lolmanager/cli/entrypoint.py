@@ -70,14 +70,13 @@ from lolmanager.core.champion_fetcher import (
     fetch_top_champions,
     fetch_champion_slug,
     fetch_counter_matchups_from_detail,
-    fetch_counters_from_detail,
-    sort_counter_candidates_by_role_rank,
 )
 from lolmanager.core.opgg_counter_recommendations import (
     AUTO_BAN_LABEL,
     DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     build_label_name_map,
     build_recommendations,
+    build_role_rank_fallback_recommendations,
     default_counter_cache_path,
     is_auto_ban_value,
     load_recommendation_cache,
@@ -1673,7 +1672,15 @@ def prompt_ban_selection(
     logger: logging.Logger,
     ranked_entries: Optional[Iterable[object]] = None,
 ) -> Optional[str]:
-    slug = href or fetch_champion_slug(role, selected_name)
+    try:
+        slug = href or fetch_champion_slug(role, selected_name)
+    except Exception as exc:
+        logger.info("OP.GG 상세 페이지 조회 실패: %s", exc)
+        slug = None
+        fetch_failed = True
+    else:
+        fetch_failed = False
+
     labels: list[str] = []
     label_to_name: dict[str, str] = {}
     if slug:
@@ -1687,37 +1694,39 @@ def prompt_ban_selection(
             )
             labels, label_to_name = build_label_name_map(recommendations)
         except Exception as exc:
+            fetch_failed = True
             logger.info("OP.GG 추천 밴 후보 계산 실패: %s", exc)
 
-    if labels:
+    def choose(labels_to_show: list[str], names: dict[str, str]) -> str:
         print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
-        for idx, label in enumerate(labels, start=1):
+        for idx, label in enumerate(labels_to_show, start=1):
             print(f"  {idx}. {label}")
         ban_choice = input("번호 입력 (기본 1): ").strip()
         try:
             ban_idx = int(ban_choice) - 1 if ban_choice else 0
         except ValueError:
             ban_idx = 0
-        ban_idx = max(0, min(ban_idx, len(labels) - 1))
-        return label_to_name.get(labels[ban_idx], labels[ban_idx])
+        ban_idx = max(0, min(ban_idx, len(labels_to_show) - 1))
+        selected_label = labels_to_show[ban_idx]
+        return names.get(selected_label, selected_label)
 
-    ban_candidates: list[str] = []
-    if slug:
-        ban_candidates = sort_counter_candidates_by_role_rank(
-            fetch_counters_from_detail(slug, limit=10),
-            ranked_entries or (),
+    if labels:
+        return choose(labels, label_to_name)
+
+    if not fetch_failed:
+        fallback_recommendations = build_role_rank_fallback_recommendations(
+            role=role,
+            configured_pick=selected_name,
+            ranked_entries=ranked_entries or (),
+            limit=10,
         )
-    if ban_candidates:
-        print(f"[{role}] 밴할 챔피언을 번호로 선택하세요 (기본 1):")
-        for idx, name in enumerate(ban_candidates, start=1):
-            print(f"  {idx}. {name}")
-        ban_choice = input("번호 입력 (기본 1): ").strip()
-        try:
-            ban_idx = int(ban_choice) - 1 if ban_choice else 0
-        except ValueError:
-            ban_idx = 0
-        ban_idx = max(0, min(ban_idx, len(ban_candidates) - 1))
-        return ban_candidates[ban_idx]
+        fallback_labels, fallback_label_to_name = build_label_name_map(
+            fallback_recommendations
+        )
+        if fallback_labels:
+            print(f"[{role}] 카운터 정보가 없어 포지션 순위 기반 대체 후보를 표시합니다.")
+            return choose(fallback_labels, fallback_label_to_name)
+
     logger.warning("밴 후보를 가져오지 못했습니다. 밴 챔피언이 설정되지 않습니다.")
     return None
 
