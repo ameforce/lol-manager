@@ -790,6 +790,16 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             status_var.set(
                 f"[{role_label}] 밴 후보 갱신 완료 ({len(labels)}개, {source})"
             )
+        elif source == "no_candidates":
+            status_var.set(
+                f"[{role_label}] {champion_name}의 OP.GG 카운터 후보가 없습니다 "
+                "(전체 챔피언에서 수동 선택 가능)"
+            )
+        elif source == "fetch_failed":
+            status_var.set(
+                f"[{role_label}] OP.GG 카운터 조회에 실패했습니다 "
+                "(전체 챔피언에서 수동 선택 가능)"
+            )
         else:
             status_var.set(
                 f"[{role_label}] 밴 후보를 가져오지 못했습니다(수동 입력 가능)"

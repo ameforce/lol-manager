@@ -30,14 +30,14 @@ COUNTER_HTML = """
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
         <li>
-          <a href="/ko/lol/champions/quinn/build/top">
+          <a href="/ko/lol/champions/malphite/counters/top?target_champion=quinn">
             <img alt="퀸" />
             <span>42.82%</span>
             <span>376 게임</span>
           </a>
         </li>
         <li>
-          <a href="/ko/lol/champions/singed/build/top">
+          <a href="/ko/lol/champions/malphite/counters/top?target_champion=singed">
             <img alt="신지드" />
             <span>44.27%</span>
             <span>2,354 게임</span>
@@ -254,6 +254,35 @@ def test_counter_parser_ignores_footer_contact_links_when_data_is_empty() -> Non
     assert parse_counter_matchups_from_html(html, source_url="/katarina") == []
 
 
+def test_counter_parser_accepts_current_opgg_counter_hrefs_and_rejects_bad_targets() -> None:
+    html = """
+    <main>
+      <section>
+        <h3>상대하기 어려운 챔피언</h3>
+        <ul>
+          <li>
+            <a href="/ko/lol/champions/jinx/counters/adc?target_champion=xayah">
+              <img alt="자야" /><span>42.11%</span><span>38 게임</span>
+            </a>
+          </li>
+          <li>
+            <a href="/ko/lol/champions/jinx/counters/adc?target_champion=service%40op.gg">
+              <img alt="service@op.gg" /><span>0%</span>
+            </a>
+          </li>
+        </ul>
+      </section>
+    </main>
+    """
+
+    matchups = parse_counter_matchups_from_html(html, source_url="/jinx")
+
+    assert [
+        (matchup.champion, matchup.pick_winrate, matchup.games)
+        for matchup in matchups
+    ] == [("자야", 42.11, 38)]
+
+
 def test_recommendations_reject_non_champions_and_names_missing_from_catalog() -> None:
     recommendations = build_recommendations(
         role="top",
@@ -289,8 +318,46 @@ def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
         max_age_sec=0.0,
     )
 
-    assert result.status == "cache_miss"
+    assert result.status == "no_candidates"
     assert calls == []
+
+
+def test_empty_counter_refresh_has_a_distinct_no_candidates_status(
+    tmp_path: Path,
+) -> None:
+    cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
+
+    result = get_counter_recommendations(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[("애니", ("2티어", "green"), "/annie")],
+        detail_href="/ko/lol/champions/katarina/build/mid",
+        fetch_matchups=lambda _href, _limit: [],
+    )
+
+    assert result.status == "no_candidates"
+    assert result.recommendations == ()
+
+
+def test_failed_counter_refresh_has_a_distinct_status_without_a_fallback(
+    tmp_path: Path,
+) -> None:
+    cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
+
+    result = get_counter_recommendations(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[("애니", ("2티어", "green"), "/annie")],
+        detail_href="/ko/lol/champions/katarina/build/mid",
+        fetch_matchups=lambda _href, _limit: (_ for _ in ()).throw(
+            RuntimeError("network down")
+        ),
+    )
+
+    assert result.status == "fetch_failed"
+    assert result.recommendations == ()
 
 
 def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
@@ -353,7 +420,7 @@ def test_recommendation_cache_is_separate_versioned_and_stale_safe(tmp_path: Pat
     assert stale.status == "cache_stale"
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    payload["v"] = 2
+    payload["v"] = 3
     cache_path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert (
