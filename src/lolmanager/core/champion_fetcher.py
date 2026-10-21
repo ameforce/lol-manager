@@ -396,7 +396,7 @@ def fetch_counter_matchups_from_detail(
     url = _absolute_opgg_url(detail_href)
     if not url:
         logger.warning("허용되지 않는 OP.GG 상세 href를 차단했습니다.")
-        return []
+        raise ValueError("허용되지 않는 OP.GG 상세 href")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -407,12 +407,15 @@ def fetch_counter_matchups_from_detail(
     )
     if resp.status_code != 200:
         logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
-        return []
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError(f"OP.GG 상세 페이지 요청 실패: HTTP {resp.status_code}")
     try:
         html_text = read_limited_text_response(resp)
     except ValueError as exc:
         logger.error("OP.GG 상세 페이지 응답 거부: %s", exc)
-        return []
+        raise
     return parse_counter_matchups_from_html(html_text, source_url=url, limit=limit)
 
 

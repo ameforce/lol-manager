@@ -48,6 +48,8 @@ def test_collect_auto_ban_targets_includes_primary_and_reserves_and_dedupes(
         ("top", "말파이트"),
         ("top", "오른"),
     ]
+    assert targets[0].excluded_champions == ("말파이트", "오른", "아트록스")
+    assert targets[1].excluded_champions == ("말파이트", "오른", "아트록스")
 
 
 def test_refresh_coordinator_forces_startup_refresh_and_schedules_success(
@@ -286,6 +288,82 @@ def test_refresh_coordinator_treats_missing_href_as_retryable_failure(
     coordinator.start()
 
     assert scheduled_ms == [0, AUTO_BAN_REFRESH_RETRY_MS]
+
+
+def test_refresh_coordinator_accepts_role_rank_fallback_without_detail_href(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "champion_config.json"
+    _write_config(
+        config_path,
+        {
+            "top": {
+                "champion": "말파이트",
+                "ban": AUTO_BAN_VALUE,
+                "reserve_picks": [{"champion": "오른", "ban": AUTO_BAN_VALUE}],
+            }
+        },
+    )
+    scheduled_ms: list[int] = []
+    refresh_calls: list[dict[str, object]] = []
+
+    def schedule_after_ms(delay_ms: int, callback):
+        scheduled_ms.append(delay_ms)
+        if delay_ms == 0:
+            callback()
+        return f"after-{len(scheduled_ms)}"
+
+    def get_counter_recommendations(_path, **kwargs):
+        refresh_calls.append(dict(kwargs))
+        target = str(kwargs["configured_pick"])
+        recommendation = CounterRecommendation(
+            role="top",
+            configured_pick=target,
+            champion="퀸",
+            tier="1티어",
+            matchup_winrate=None,
+            pick_winrate=None,
+            tier_score_value=50,
+            matchup_score=0,
+            total_score=50,
+            source_order=0,
+            source_type="role_rank_fallback",
+        )
+        return RecommendationCacheResult("ranked_fallback", (recommendation,), 123.0)
+
+    coordinator = AutoBanRefreshCoordinator(
+        config_path=config_path,
+        schedule_after_ms=schedule_after_ms,
+        run_background=lambda callback: callback(),
+        on_updated=lambda: None,
+        get_champion_dataset=lambda _path, **_kwargs: (
+            ["말파이트", "오른", "퀸"],
+            {
+                "top": [
+                    ("말파이트", "2티어", ""),
+                    ("오른", "2티어", ""),
+                    ("퀸", "1티어", "/quinn"),
+                ]
+            },
+            "opgg",
+        ),
+        get_counter_recommendations=get_counter_recommendations,
+        fetch_champion_slug=lambda _role, _champion: None,
+    )
+
+    coordinator.start()
+
+    assert scheduled_ms == [
+        0,
+        AUTO_BAN_REFRESH_SUCCESS_MS,
+        0,
+        AUTO_BAN_REFRESH_SUCCESS_MS,
+    ]
+    assert len(refresh_calls) == 2
+    assert all(call["detail_href"] is None for call in refresh_calls)
+    assert all(
+        call["excluded_champions"] == ("말파이트", "오른") for call in refresh_calls
+    )
 
 
 def test_refresh_coordinator_does_not_start_duplicate_in_flight_target(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lolmanager.core.champion_fetcher import (
     CounterMatchup,
     fetch_counter_matchups_from_detail,
@@ -12,6 +14,7 @@ from lolmanager.core.champion_fetcher import (
 from lolmanager.core.opgg_counter_recommendations import (
     build_label_name_map,
     build_recommendations,
+    build_role_rank_fallback_recommendations,
     default_counter_cache_path,
     format_recommendation_label,
     get_counter_recommendations,
@@ -175,12 +178,8 @@ def test_detail_fetch_rejects_absolute_non_opgg_url_before_request(monkeypatch) 
 
     monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
 
-    assert (
-        fetch_counter_matchups_from_detail(
-            "http://127.0.0.1:65535/internal-metadata"
-        )
-        == []
-    )
+    with pytest.raises(ValueError, match="허용되지 않는 OP.GG"):
+        fetch_counter_matchups_from_detail("http://127.0.0.1:65535/internal-metadata")
     assert fetch_counters_from_detail("https://example.invalid/not-opgg") == []
     assert calls == []
 
@@ -212,13 +211,35 @@ def test_detail_fetch_rejects_oversized_response_before_text_read(monkeypatch) -
 
     monkeypatch.setattr("lolmanager.core.champion_fetcher.requests.get", fake_get)
 
-    assert (
+    with pytest.raises(ValueError, match="too large"):
         fetch_counter_matchups_from_detail(
             "https://op.gg/ko/lol/champions/malphite/build/top"
         )
-        == []
-    )
     assert calls[0]["stream"] is True
+
+
+def test_detail_fetch_treats_non_success_http_status_as_fetch_failure(
+    monkeypatch,
+) -> None:
+    class _ErrorResponse:
+        status_code = 503
+        headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    response = _ErrorResponse()
+    monkeypatch.setattr(
+        "lolmanager.core.champion_fetcher.requests.get",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        fetch_counter_matchups_from_detail("/ko/lol/champions/malphite/build/top")
+    assert response.closed
 
 
 def test_counter_parser_caps_link_scan_before_far_late_matches() -> None:
@@ -254,7 +275,9 @@ def test_counter_parser_ignores_footer_contact_links_when_data_is_empty() -> Non
     assert parse_counter_matchups_from_html(html, source_url="/katarina") == []
 
 
-def test_counter_parser_accepts_current_opgg_counter_hrefs_and_rejects_bad_targets() -> None:
+def test_counter_parser_accepts_current_opgg_counter_hrefs_and_rejects_bad_targets() -> (
+    None
+):
     html = """
     <main>
       <section>
@@ -278,8 +301,7 @@ def test_counter_parser_accepts_current_opgg_counter_hrefs_and_rejects_bad_targe
     matchups = parse_counter_matchups_from_html(html, source_url="/jinx")
 
     assert [
-        (matchup.champion, matchup.pick_winrate, matchup.games)
-        for matchup in matchups
+        (matchup.champion, matchup.pick_winrate, matchup.games) for matchup in matchups
     ] == [("자야", 42.11, 38)]
 
 
@@ -318,11 +340,11 @@ def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
         max_age_sec=0.0,
     )
 
-    assert result.status == "no_candidates"
+    assert result.status == "fetch_failed"
     assert calls == []
 
 
-def test_empty_counter_refresh_has_a_distinct_no_candidates_status(
+def test_empty_counter_refresh_uses_role_rank_fallback_and_excludes_own_picks(
     tmp_path: Path,
 ) -> None:
     cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
@@ -331,13 +353,82 @@ def test_empty_counter_refresh_has_a_distinct_no_candidates_status(
         cache_path,
         role="mid",
         configured_pick="카타리나",
-        ranked_entries=[("애니", ("2티어", "green"), "/annie")],
+        ranked_entries=[
+            ("카타리나", ("1티어", "blue"), "/katarina"),
+            ("애니", ("2티어", "green"), "/annie"),
+            ("럭스", ("1티어", "blue"), "/lux"),
+            ("제라스", ("1티어", "blue"), "/xerath"),
+        ],
+        detail_href="/ko/lol/champions/katarina/build/mid",
+        excluded_champions=("럭스",),
+        limit=2,
+        fetch_matchups=lambda _href, _limit: [],
+    )
+
+    assert result.status == "ranked_fallback"
+    assert [recommendation.champion for recommendation in result.recommendations] == [
+        "제라스",
+        "애니",
+    ]
+    assert all(
+        recommendation.source_type == "role_rank_fallback"
+        for recommendation in result.recommendations
+    )
+    assert "포지션 순위 기반" in format_recommendation_label(result.recommendations[0])
+
+
+def test_empty_counter_refresh_without_ranked_candidates_stays_no_candidates(
+    tmp_path: Path,
+) -> None:
+    result = get_counter_recommendations(
+        default_counter_cache_path(tmp_path / "champion_config.json"),
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[("카타리나", ("2티어", "green"), "/katarina")],
         detail_href="/ko/lol/champions/katarina/build/mid",
         fetch_matchups=lambda _href, _limit: [],
     )
 
     assert result.status == "no_candidates"
     assert result.recommendations == ()
+
+
+def test_role_rank_fallback_orders_by_tier_then_rank_and_excludes_picks() -> None:
+    recommendations = build_role_rank_fallback_recommendations(
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[
+            ("카타리나", "1티어", "/katarina"),
+            ("애니", "2티어", "/annie"),
+            ("럭스", "1티어", "/lux"),
+            ("제라스", "1티어", "/xerath"),
+        ],
+        excluded_champions=("럭스", "제라스"),
+    )
+
+    assert [recommendation.champion for recommendation in recommendations] == ["애니"]
+    assert recommendations[0].matchup_winrate is None
+    assert recommendations[0].source_type == "role_rank_fallback"
+
+
+def test_missing_detail_href_uses_role_rank_fallback(tmp_path: Path) -> None:
+    result = get_counter_recommendations(
+        default_counter_cache_path(tmp_path / "champion_config.json"),
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[
+            ("카타리나", "1티어", "/katarina"),
+            ("애니", "2티어", "/annie"),
+            ("럭스", "1티어", "/lux"),
+        ],
+        detail_href=None,
+        excluded_champions=("애니",),
+    )
+
+    assert result.status == "ranked_fallback"
+    assert [recommendation.champion for recommendation in result.recommendations] == [
+        "럭스"
+    ]
 
 
 def test_failed_counter_refresh_has_a_distinct_status_without_a_fallback(
@@ -377,7 +468,72 @@ def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
     assert label_to_name[label] == "퀸"
 
 
-def test_recommendation_cache_is_separate_versioned_and_stale_safe(tmp_path: Path) -> None:
+def test_role_rank_fallback_cache_round_trips_its_source_type(tmp_path: Path) -> None:
+    cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
+    recommendations = build_role_rank_fallback_recommendations(
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[("애니", "2티어", "/annie")],
+    )
+
+    save_recommendation_cache(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        recommendations=recommendations,
+        fetched_at_unix=100.0,
+    )
+    loaded = load_recommendation_cache(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        max_age_sec=10.0,
+        now=105.0,
+    )
+
+    assert loaded.recommendations[0].source_type == "role_rank_fallback"
+
+
+def test_cached_role_rank_fallback_respects_current_excluded_picks(
+    tmp_path: Path,
+) -> None:
+    cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
+    fallback = build_role_rank_fallback_recommendations(
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[
+            ("럭스", "1티어", "/lux"),
+            ("애니", "2티어", "/annie"),
+        ],
+    )
+    save_recommendation_cache(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        recommendations=fallback,
+        fetched_at_unix=100.0,
+    )
+
+    result = get_counter_recommendations(
+        cache_path,
+        role="mid",
+        configured_pick="카타리나",
+        ranked_entries=[],
+        detail_href=None,
+        max_age_sec=60.0,
+        now=120.0,
+        excluded_champions=("럭스",),
+    )
+
+    assert result.status == "ranked_fallback"
+    assert [recommendation.champion for recommendation in result.recommendations] == [
+        "애니"
+    ]
+
+
+def test_recommendation_cache_is_separate_versioned_and_stale_safe(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "champion_config.json"
     cache_path = default_counter_cache_path(config_path)
     recommendations = build_recommendations(

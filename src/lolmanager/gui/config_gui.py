@@ -23,6 +23,7 @@ from lolmanager.core.opgg_counter_recommendations import (
     DEFAULT_MAX_AGE_SEC as COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     build_auto_ban_label as _build_auto_ban_label,
     build_label_name_map,
+    build_role_rank_fallback_recommendations,
     default_counter_cache_path,
     display_value_to_champion_name as _display_value_to_champion_name,
     get_counter_recommendations,
@@ -109,8 +110,8 @@ def build_ban_candidate_values(
 
 
 def should_reuse_ban_candidate_values(values: BanCandidateValues) -> bool:
-    labels, _label_to_name, _source = values
-    return bool(labels)
+    labels, _label_to_name, source = values
+    return bool(labels) and source != "ranked_fallback"
 
 
 def _set_app_user_model_id(app_id: str = APP_USER_MODEL_ID) -> None:
@@ -716,6 +717,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         champion_name: str,
         *,
         allow_refresh: bool,
+        excluded_champions: Tuple[str, ...] = (),
     ) -> BanCandidateValues:
         ranked_entries = role_ranked_entries.get(role) or []
         if allow_refresh:
@@ -726,6 +728,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 ranked_entries=ranked_entries,
                 detail_href=_resolve_opgg_href(role, champion_name),
                 max_age_sec=COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+                excluded_champions=excluded_champions,
             )
         else:
             result = load_recommendation_cache(
@@ -735,8 +738,49 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 max_age_sec=COUNTER_RECOMMENDATION_MAX_AGE_SEC,
             )
 
-        labels, label_to_name = build_label_name_map(result.recommendations)
-        return (labels, label_to_name, result.status)
+        recommendations = result.recommendations
+        if (
+            not allow_refresh
+            and recommendations
+            and all(
+                recommendation.source_type == "role_rank_fallback"
+                for recommendation in recommendations
+            )
+        ):
+            refreshed = build_role_rank_fallback_recommendations(
+                role=role,
+                configured_pick=champion_name,
+                ranked_entries=ranked_entries,
+                excluded_champions=excluded_champions,
+                limit=10,
+            )
+            if not refreshed:
+                excluded = {
+                    normalize_name(name)
+                    for name in (champion_name, *excluded_champions)
+                    if str(name or "").strip()
+                }
+                refreshed = [
+                    recommendation
+                    for recommendation in recommendations
+                    if normalize_name(recommendation.champion) not in excluded
+                ]
+            recommendations = tuple(refreshed)
+
+        labels, label_to_name = build_label_name_map(recommendations)
+        source = (
+            "ranked_fallback"
+            if any(
+                recommendation.source_type == "role_rank_fallback"
+                for recommendation in recommendations
+            )
+            else (
+                "no_candidates"
+                if result.recommendations and not recommendations
+                else result.status
+            )
+        )
+        return (labels, label_to_name, source)
 
     def _set_ban_candidates(
         *,
@@ -786,13 +830,18 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 _last_valid_raw[f"{field_key}:ban"] = selected_raw
 
         role_label = ROLE_LABEL_KO.get(role, role)
-        if labels:
+        if labels and source == "ranked_fallback":
+            status_var.set(
+                f"[{role_label}] 상성 후보가 없어 포지션 순위 기반 대체 추천 "
+                f"({len(labels)}개)"
+            )
+        elif labels:
             status_var.set(
                 f"[{role_label}] 밴 후보 갱신 완료 ({len(labels)}개, {source})"
             )
         elif source == "no_candidates":
             status_var.set(
-                f"[{role_label}] {champion_name}의 OP.GG 카운터 후보가 없습니다 "
+                f"[{role_label}] {champion_name}의 카운터·포지션 순위 후보가 없습니다 "
                 "(전체 챔피언에서 수동 선택 가능)"
             )
         elif source == "fetch_failed":
@@ -854,6 +903,20 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
             champ = canon if canon else champ_name_raw
 
+            rv = role_vars.get(role)
+            excluded_champions: list[str] = [champ]
+            if rv is not None:
+                for own_pick_var in (
+                    rv.champion,
+                    rv.reserve1_champion,
+                    rv.reserve2_champion,
+                ):
+                    own_pick = _display_to_champion_name(
+                        str(own_pick_var.get() or "").strip()
+                    )
+                    if own_pick:
+                        excluded_champions.append(own_pick)
+
             if canon and canon != champ_name_raw and champ_raw == champ_name_raw:
                 champion_var.set(canon)
 
@@ -886,6 +949,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     role,
                     champ,
                     allow_refresh=allow_refresh,
+                    excluded_champions=tuple(excluded_champions),
                 )
                 if should_reuse_ban_candidate_values(values):
                     counter_cache[cache_key] = values

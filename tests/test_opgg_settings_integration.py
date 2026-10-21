@@ -58,6 +58,56 @@ def test_cli_ban_prompt_displays_recommendation_labels_and_returns_plain_name(
     assert "퀸 (1티어, 42.8%, score 85.9)" in out
 
 
+def test_cli_ban_prompt_uses_transparent_role_rank_fallback_when_counter_list_is_empty(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        entrypoint, "fetch_counter_matchups_from_detail", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+
+    selected = entrypoint.prompt_ban_selection(
+        "mid",
+        "카타리나",
+        "/ko/lol/champions/katarina/build/mid",
+        logging.getLogger("test"),
+        ranked_entries=[
+            ("카타리나", "1티어", "/katarina"),
+            ("럭스", "1티어", "/lux"),
+            ("애니", "2티어", "/annie"),
+        ],
+    )
+
+    out = capsys.readouterr().out
+    assert selected == "럭스"
+    assert "포지션 순위 기반 대체 후보" in out
+    assert "카타리나 (1티어" not in out
+    assert "럭스 (1티어, 포지션 순위 기반, 상성 정보 없음" in out
+
+
+def test_cli_ban_prompt_does_not_use_rank_fallback_after_fetch_failure(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        entrypoint,
+        "fetch_counter_matchups_from_detail",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+
+    selected = entrypoint.prompt_ban_selection(
+        "mid",
+        "카타리나",
+        "/ko/lol/champions/katarina/build/mid",
+        logging.getLogger("test"),
+        ranked_entries=[("럭스", "1티어", "/lux")],
+    )
+
+    assert selected is None
+    assert "포지션 순위 기반 대체 후보" not in capsys.readouterr().out
+
+
 def test_gui_display_value_maps_recommendation_label_to_plain_name() -> None:
     label_to_name = {"퀸 (1티어, 42.8%, score 85.9)": "퀸"}
 
@@ -82,7 +132,9 @@ def test_gui_display_value_maps_recommendation_label_to_plain_name() -> None:
     )
 
 
-def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions() -> None:
+def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions() -> (
+    None
+):
     values = build_ban_candidate_values(
         labels=[
             "블라디미르 (2티어, 45.6%, score 62.0)",
@@ -101,7 +153,9 @@ def test_gui_ban_candidates_keep_auto_then_recommendations_above_all_champions()
         "블라디미르 (2티어, 45.6%, score 62.0)",
         "제라스 (1티어, 48.9%, score 55.5)",
     ]
-    assert f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}" in values
+    assert (
+        f"{DISPLAY_SEPARATOR_PREFIX} 기타 챔피언 {DISPLAY_SEPARATOR_PREFIX}" in values
+    )
     assert values[-2:] == ["가렌", "아리"]
 
 
@@ -125,6 +179,29 @@ def test_auto_ban_label_helper_uses_current_top_recommendation_detail() -> None:
 
     assert label == "자동 추천 (현재 최고: 퀸, 1티어, 42.8%, score 85.9)"
     assert build_auto_ban_label_from_recommendations([]) == AUTO_BAN_LABEL
+
+
+def test_auto_ban_label_discloses_role_rank_fallback_basis() -> None:
+    label = build_auto_ban_label_from_recommendations(
+        [
+            CounterRecommendation(
+                role="mid",
+                configured_pick="카타리나",
+                champion="럭스",
+                tier="1티어",
+                matchup_winrate=None,
+                pick_winrate=None,
+                tier_score_value=50,
+                matchup_score=0,
+                total_score=50,
+                source_order=0,
+                source_type="role_rank_fallback",
+            )
+        ]
+    )
+
+    assert "포지션 순위 기반" in label
+    assert "상성 정보 없음" in label
 
 
 def test_role_setting_data_displays_cached_auto_ban_recommendation_details(
@@ -287,7 +364,18 @@ def test_gui_does_not_reuse_failed_ban_candidate_attempts() -> None:
     assert not should_reuse_ban_candidate_values(([], {}, "cache_miss"))
     assert not should_reuse_ban_candidate_values(([], {}, "opgg"))
     assert should_reuse_ban_candidate_values(
-        (["퀸 (1티어, 42.8%, score 85.9)"], {"퀸 (1티어, 42.8%, score 85.9)": "퀸"}, "opgg")
+        (
+            ["퀸 (1티어, 42.8%, score 85.9)"],
+            {"퀸 (1티어, 42.8%, score 85.9)": "퀸"},
+            "opgg",
+        )
+    )
+    assert not should_reuse_ban_candidate_values(
+        (
+            ["럭스 (1티어, 포지션 순위 기반, 상성 정보 없음, score 50.0)"],
+            {"럭스 (1티어, 포지션 순위 기반, 상성 정보 없음, score 50.0)": "럭스"},
+            "ranked_fallback",
+        )
     )
 
 
@@ -329,7 +417,9 @@ def test_autosave_traces_watch_every_config_field() -> None:
     assert changed == [("mid", field_name) for field_name in ROLE_VAR_FIELD_NAMES]
 
 
-def test_config_load_strips_recommendation_metadata_before_runtime(tmp_path: Path) -> None:
+def test_config_load_strips_recommendation_metadata_before_runtime(
+    tmp_path: Path,
+) -> None:
     config_path = tmp_path / "champion_config.json"
     config_path.write_text(
         json.dumps(
