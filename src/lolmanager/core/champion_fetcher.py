@@ -4,7 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -252,6 +252,38 @@ def _absolute_opgg_url(detail_href: str) -> str:
     return urlunsplit(("https", "op.gg", parts.path, parts.query, ""))
 
 
+def _is_opgg_counter_candidate_href(href: str) -> bool:
+    url = str(href or "").strip()
+    if not url:
+        return False
+
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc:
+        if parts.scheme != "https" or parts.netloc.casefold() != "op.gg":
+            return False
+    elif not url.startswith("/"):
+        return False
+
+    champion_slug = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+    role = r"(?:top|jungle|mid|adc|support)"
+    if re.fullmatch(
+        rf"/ko/lol/champions/{champion_slug}/build/{role}/?",
+        parts.path,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if not re.fullmatch(
+        rf"/ko/lol/champions/{champion_slug}/counters/{role}/?",
+        parts.path,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    target_champion = parse_qs(parts.query).get("target_champion", [""])[0]
+    return bool(re.fullmatch(champion_slug, target_champion, flags=re.IGNORECASE))
+
+
 def _parse_percent(value: str) -> Optional[float]:
     match = re.search(r"(\d+(?:\.\d+)?)\s*%", value or "")
     if not match:
@@ -317,7 +349,7 @@ def parse_counter_matchups_from_html(
 
     for link in links:
         href = str(link.get("href") or "").strip()
-        if not _absolute_opgg_url(href):
+        if not _is_opgg_counter_candidate_href(href):
             continue
 
         img = link.select_one("img")
@@ -389,43 +421,5 @@ def fetch_counters_from_detail(detail_href: str, limit: int = 10) -> List[str]:
         matchups = fetch_counter_matchups_from_detail(detail_href, limit=limit)
     except Exception as exc:
         logger.info("상세 카운터 구조화 파싱 실패: %s", exc)
-        matchups = []
-    if matchups:
-        return [matchup.champion for matchup in matchups[:limit]]
-
-    url = _absolute_opgg_url(detail_href)
-    if not url:
-        logger.warning("허용되지 않는 OP.GG 상세 href를 차단했습니다.")
         return []
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-    resp = requests.get(
-        url, headers=headers, timeout=10, allow_redirects=False, stream=True
-    )
-    if resp.status_code != 200:
-        logger.error("상세 페이지 요청 실패: %s (%s)", url, resp.status_code)
-        return []
-    try:
-        html_text = read_limited_text_response(resp)
-    except ValueError as exc:
-        logger.error("OP.GG 상세 페이지 응답 거부: %s", exc)
-        return []
-    soup = BeautifulSoup(html_text, "lxml")
-    imgs = soup.select(
-        "section:nth-of-type(1) div:nth-of-type(3) ul li a img",
-        limit=min(MAX_OPGG_COUNTER_LINK_SCAN, max(1, int(limit)) * 4),
-    )
-    counters: List[str] = []
-    for img in imgs[:limit]:
-        alt = img.get("alt")
-        if alt:
-            counters.append(alt.strip())
-        else:
-            src = img.get("src", "")
-            if "/" in src:
-                name_part = src.split("/")[-1].split(".")[0]
-                counters.append(name_part)
-    return counters
+    return [matchup.champion for matchup in matchups[:limit]]
