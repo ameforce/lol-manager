@@ -10,6 +10,7 @@ from lolmanager.core.champion_fetcher import CounterMatchup
 from lolmanager.core.opgg_counter_recommendations import (
     AUTO_BAN_LABEL,
     AUTO_BAN_VALUE,
+    CACHE_VERSION,
     CounterRecommendation,
     build_auto_ban_label_from_recommendations,
     default_counter_cache_path,
@@ -362,7 +363,7 @@ def test_runtime_auto_ban_ignores_invalid_fresh_recommendation_cache(
     cache_path.write_text(
         json.dumps(
             {
-                "v": 3,
+                "v": CACHE_VERSION,
                 "entries": [
                     {
                         "key": "top::말파이트",

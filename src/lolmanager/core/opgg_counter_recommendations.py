@@ -14,7 +14,7 @@ from lolmanager.core.champion_names import (
 from lolmanager.platform.file_storage import atomic_write_text, file_transaction
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 DEFAULT_MAX_AGE_SEC = 12 * 60 * 60
 DEFAULT_DISPLAY_SEPARATOR_PREFIX = "────────"
 AUTO_BAN_VALUE = "__auto__"
@@ -441,7 +441,7 @@ def get_counter_recommendations(
     if not detail_href:
         return (
             cached
-            if cached.status == "cache_stale"
+            if cached.status == "cache_stale" and cached.recommendations
             else RecommendationCacheResult("cache_miss", tuple(), None)
         )
 
@@ -464,8 +464,12 @@ def get_counter_recommendations(
         if not recommendations:
             return (
                 cached
-                if cached.status == "cache_stale"
-                else RecommendationCacheResult("cache_miss", tuple(), None)
+                if cached.status == "cache_stale" and cached.recommendations
+                else RecommendationCacheResult(
+                    "no_candidates",
+                    tuple(),
+                    time.time() if now is None else float(now),
+                )
             )
         fetched_at = time.time() if now is None else float(now)
         save_recommendation_cache(
@@ -477,6 +481,6 @@ def get_counter_recommendations(
         )
         return RecommendationCacheResult("opgg", tuple(recommendations), fetched_at)
     except Exception:
-        if cached.status == "cache_stale":
+        if cached.status == "cache_stale" and cached.recommendations:
             return cached
-        return RecommendationCacheResult("cache_miss", tuple(), None)
+        return RecommendationCacheResult("fetch_failed", tuple(), None)
