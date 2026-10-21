@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from lolmanager.core.champion_fetcher import (
+    CounterMatchup,
     fetch_counter_matchups_from_detail,
     fetch_counters_from_detail,
     parse_counter_matchups_from_html,
@@ -80,8 +81,8 @@ def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None
     <section>
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
-        <li><a><img alt="블라디미르" /><span>45.60%</span></a></li>
-        <li><a><img alt="제라스" /><span>48.90%</span></a></li>
+        <li><a href="/ko/lol/champions/vladimir/build/mid"><img alt="블라디미르" /><span>45.60%</span></a></li>
+        <li><a href="/ko/lol/champions/xerath/build/mid"><img alt="제라스" /><span>48.90%</span></a></li>
       </ul>
     </section>
     """
@@ -122,8 +123,8 @@ def test_sort_tie_break_uses_raw_matchup_winrate_after_score_clamp() -> None:
     <section>
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
-        <li><a><img alt="니코" /><span>39.00%</span></a></li>
-        <li><a><img alt="퀸" /><span>38.00%</span></a></li>
+        <li><a href="/ko/lol/champions/neeko/build/top"><img alt="니코" /><span>39.00%</span></a></li>
+        <li><a href="/ko/lol/champions/quinn/build/top"><img alt="퀸" /><span>38.00%</span></a></li>
       </ul>
     </section>
     """
@@ -227,12 +228,45 @@ def test_counter_parser_caps_link_scan_before_far_late_matches() -> None:
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
         {noisy_links}
-        <li><a><img alt="퀸" /><span>42.82%</span></a></li>
+        <li><a href="/ko/lol/champions/quinn/build/top"><img alt="퀸" /><span>42.82%</span></a></li>
       </ul>
     </section>
     """
 
     assert parse_counter_matchups_from_html(html, source_url="/malphite", limit=1) == []
+
+
+def test_counter_parser_ignores_footer_contact_links_when_data_is_empty() -> None:
+    html = """
+    <main>
+      <section>
+        <h3>상대하기 어려운 챔피언</h3>
+        <p>데이터 표본 수가 부족합니다.</p>
+      </section>
+      <footer>
+        <section>
+          <ul><li><a href="mailto:service@op.gg">service@op.gg</a></li></ul>
+        </section>
+      </footer>
+    </main>
+    """
+
+    assert parse_counter_matchups_from_html(html, source_url="/katarina") == []
+
+
+def test_recommendations_reject_non_champions_and_names_missing_from_catalog() -> None:
+    recommendations = build_recommendations(
+        role="top",
+        configured_pick="말파이트",
+        matchups=[
+            CounterMatchup("service@op.gg", None, None, 0, "service@op.gg"),
+            CounterMatchup("알 수 없는 항목", 40.0, 10, 1, "40.0% 10 게임"),
+            CounterMatchup("퀸", 42.8, 100, 2, "42.8% 100 게임"),
+        ],
+        ranked_entries=[("퀸", ("1티어", "blue"), "/ko/lol/champions/quinn/build/top")],
+    )
+
+    assert [recommendation.champion for recommendation in recommendations] == ["퀸"]
 
 
 def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
@@ -283,7 +317,10 @@ def test_recommendation_cache_is_separate_versioned_and_stale_safe(tmp_path: Pat
         role="top",
         configured_pick="말파이트",
         matchups=parse_counter_matchups_from_html(COUNTER_HTML, source_url="/malphite"),
-        ranked_entries=[("퀸", ("1티어", "blue"), "/quinn")],
+        ranked_entries=[
+            ("퀸", ("1티어", "blue"), "/quinn"),
+            ("신지드", ("2티어", "green"), "/singed"),
+        ],
         source_url="/malphite",
     )
 

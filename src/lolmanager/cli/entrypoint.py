@@ -65,6 +65,7 @@ from lolmanager.core.image_search import (
 )
 from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.aram import AramPreferences
+from lolmanager.core.champion_names import is_plausible_champion_name
 from lolmanager.core.champion_fetcher import (
     fetch_top_champions,
     fetch_champion_slug,
@@ -249,7 +250,11 @@ def resolve_ban_name_for_runtime(
 ) -> str:
     ban_name = str(configured_ban or "").strip()
     if not is_auto_ban_value(ban_name):
-        return ban_name
+        if is_plausible_champion_name(ban_name):
+            return ban_name
+        if ban_name:
+            logger.warning("유효하지 않은 밴 챔피언 값을 건너뜁니다: %s", ban_name)
+        return ""
 
     result = load_recommendation_cache(
         cache_path,
@@ -260,7 +265,7 @@ def resolve_ban_name_for_runtime(
     )
     if result.recommendations:
         selected = str(result.recommendations[0].champion or "").strip()
-        if selected:
+        if is_plausible_champion_name(selected):
             logger.info(
                 "자동 추천 밴 적용: %s -> %s (%s)",
                 champion_name,
