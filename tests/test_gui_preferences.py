@@ -11,51 +11,33 @@ from lolmanager.core.gui_preferences import (
 from lolmanager.gui.app_gui import LolManagerGui, should_schedule_initial_auto_start
 
 
-def test_first_launch_waits_for_explicit_continuation_choice(tmp_path) -> None:
+def test_first_launch_waits_for_explicit_start(tmp_path) -> None:
     preferences_path = tmp_path / "gui_preferences.json"
 
     saved = load_continue_after_game_preference(preferences_path)
 
     assert saved is None
-    assert (
-        should_schedule_initial_auto_start(
-            auto_start_requested=True,
-            saved_continue_after_game=saved,
-        )
-        is False
-    )
+    assert should_schedule_initial_auto_start() is False
 
 
-def test_saved_continuation_choice_restores_value_and_auto_start(tmp_path) -> None:
+def test_saved_continuation_choice_does_not_auto_start_app(tmp_path) -> None:
     preferences_path = tmp_path / "gui_preferences.json"
     save_continue_after_game_preference(preferences_path, True)
 
     saved = load_continue_after_game_preference(preferences_path)
 
     assert saved is True
-    assert (
-        should_schedule_initial_auto_start(
-            auto_start_requested=True,
-            saved_continue_after_game=saved,
-        )
-        is True
-    )
+    assert should_schedule_initial_auto_start() is False
 
 
-def test_explicit_one_game_choice_also_restores_auto_start(tmp_path) -> None:
+def test_saved_one_game_choice_does_not_auto_start_app(tmp_path) -> None:
     preferences_path = tmp_path / "gui_preferences.json"
     save_continue_after_game_preference(preferences_path, False)
 
     saved = load_continue_after_game_preference(preferences_path)
 
     assert saved is False
-    assert (
-        should_schedule_initial_auto_start(
-            auto_start_requested=True,
-            saved_continue_after_game=saved,
-        )
-        is True
-    )
+    assert should_schedule_initial_auto_start() is False
 
 
 def test_preference_save_preserves_other_gui_keys_and_replaces_invalid_file(
