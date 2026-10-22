@@ -118,11 +118,9 @@ def external_sync_delay_ms(*, in_game: bool) -> int:
     return EXTERNAL_SYNC_INGAME_MS if in_game else EXTERNAL_SYNC_MS
 
 
-def should_schedule_initial_auto_start(
-    *, auto_start_requested: bool, saved_continue_after_game: Optional[bool]
-) -> bool:
-    """Wait for an explicit continuation choice on the first GUI launch."""
-    return bool(auto_start_requested and saved_continue_after_game is not None)
+def should_schedule_initial_auto_start() -> bool:
+    """Keep automation stopped until the user explicitly presses Start."""
+    return False
 
 
 def should_auto_iconify_ingame(*, manager_has_focus: bool, root_iconic: bool) -> bool:
@@ -506,7 +504,7 @@ def show_native_update_error(title: str, message: str) -> None:
 
 
 class LolManagerGui:
-    def __init__(self, root: tk.Tk, *, auto_start: bool = True) -> None:
+    def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("LOLManager")
 
@@ -584,10 +582,7 @@ class LolManagerGui:
         except OSError:
             self._last_config_mtime_ns = 0
         self._pending_config_apply_at: Optional[float] = None
-        self._auto_start_pending = should_schedule_initial_auto_start(
-            auto_start_requested=auto_start,
-            saved_continue_after_game=saved_continue_after_game,
-        )
+        self._auto_start_pending = should_schedule_initial_auto_start()
         self._auto_ban_refresher: Optional[AutoBanRefreshCoordinator] = None
 
         self._client_seen_once = False
@@ -3229,7 +3224,7 @@ def main() -> None:
     _apply_readable_fonts(root)
     _apply_window_icon(root)
 
-    app = LolManagerGui(root, auto_start=True)
+    app = LolManagerGui(root)
     try:
         root.deiconify()
         root.lift()
