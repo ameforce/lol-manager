@@ -30,6 +30,7 @@ from lolmanager.gui.app_gui import (
     normalize_process_cpu_percent,
     should_apply_staged_update,
     should_auto_iconify_ingame,
+    should_auto_iconify_manager_window,
     should_prefer_release_candidate,
     should_recover_cli_exit,
 )
@@ -125,11 +126,11 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui._client_closed_at = None
         gui.client_visible_var = _Value()
         gui._is_root_iconic = mock.Mock(return_value=False)
+        gui._is_manager_window_foreground = mock.Mock(return_value=False)
         gui._is_ui_busy = mock.Mock(return_value=False)
         gui._refresh_match_stats = mock.Mock()
         gui._append_log = mock.Mock()
         gui._apply_lol_topmost = mock.Mock()
-        gui._restore_active_window_after_topmost_release = mock.Mock()
         gui._show_root_noactivate = mock.Mock()
         gui._snap_to_client = mock.Mock()
         return gui
@@ -176,6 +177,18 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             should_auto_iconify_ingame(
                 manager_has_focus=False,
                 root_iconic=True,
+            )
+        )
+        self.assertTrue(
+            should_auto_iconify_manager_window(
+                manager_has_focus=False,
+                root_iconic=False,
+            )
+        )
+        self.assertFalse(
+            should_auto_iconify_manager_window(
+                manager_has_focus=True,
+                root_iconic=False,
             )
         )
 
@@ -573,6 +586,122 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(gui.client_visible_var.value, "InGame")
         self.assertEqual(gui.root.iconify_calls, 0)
         self.assertEqual(gui._log_window.iconify_calls, 0)
+
+    def test_visible_client_hides_manager_when_another_app_has_focus(self) -> None:
+        gui = self._make_windowing_gui()
+        rect = (10, 20, 1290, 740)
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=rect,
+                league_foreground=False,
+            )
+        )
+
+        gui._sync_external_state()
+
+        self.assertEqual(gui.client_visible_var.value, "Visible")
+        self.assertEqual(gui.root.iconify_calls, 1)
+        self.assertEqual(gui._log_window.iconify_calls, 1)
+        self.assertTrue(gui._auto_iconified)
+        gui._show_root_noactivate.assert_not_called()
+        gui._snap_to_client.assert_not_called()
+
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=rect,
+                league_foreground=False,
+            )
+        )
+        gui._sync_external_state()
+        self.assertEqual(gui.root.iconify_calls, 1)
+        gui._show_root_noactivate.assert_not_called()
+
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=rect,
+                league_foreground=True,
+            )
+        )
+        gui._sync_external_state()
+        gui._show_root_noactivate.assert_called_once_with()
+        self.assertFalse(gui._auto_iconified)
+        gui._snap_to_client.assert_called_once_with(rect)
+
+    def test_directly_focused_manager_stays_visible_outside_client_foreground(
+        self,
+    ) -> None:
+        gui = self._make_windowing_gui()
+        gui._is_manager_window_foreground.return_value = True
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=(10, 20, 1290, 740),
+                league_foreground=False,
+            )
+        )
+
+        gui._sync_external_state()
+
+        self.assertEqual(gui.root.iconify_calls, 0)
+        self.assertEqual(gui._log_window.iconify_calls, 0)
+        self.assertFalse(gui._auto_iconified)
+
+    def test_user_minimized_manager_is_not_auto_restored_when_client_returns(
+        self,
+    ) -> None:
+        gui = self._make_windowing_gui()
+        gui._is_root_iconic.return_value = True
+        rect = (10, 20, 1290, 740)
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=rect,
+                league_foreground=False,
+            )
+        )
+
+        gui._sync_external_state()
+
+        self.assertEqual(gui.root.iconify_calls, 0)
+        self.assertFalse(gui._auto_iconified)
+
+        gui._external_sync_q.put(
+            self._snapshot(
+                in_game=False,
+                rect=rect,
+                league_foreground=True,
+            )
+        )
+        gui._sync_external_state()
+
+        gui._show_root_noactivate.assert_not_called()
+
+    def test_manager_taskbar_restore_clears_auto_hide_until_focus_leaves(self) -> None:
+        gui = self._make_windowing_gui()
+        gui._auto_iconified = True
+        gui._is_manager_window_foreground.return_value = True
+        snapshot = self._snapshot(
+            in_game=False,
+            rect=(10, 20, 1290, 740),
+            league_foreground=False,
+        )
+        gui._external_sync_q.put(snapshot)
+
+        gui._sync_external_state()
+
+        self.assertFalse(gui._auto_iconified)
+        self.assertEqual(gui.root.iconify_calls, 0)
+        gui._show_root_noactivate.assert_not_called()
+
+        gui._is_manager_window_foreground.return_value = False
+        gui._external_sync_q.put(snapshot)
+        gui._sync_external_state()
+
+        self.assertTrue(gui._auto_iconified)
+        self.assertEqual(gui.root.iconify_calls, 1)
 
     def test_closed_league_process_wins_over_stale_ingame_snapshot(self) -> None:
         gui = self._make_windowing_gui()
