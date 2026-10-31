@@ -123,9 +123,19 @@ def should_schedule_initial_auto_start() -> bool:
     return False
 
 
+def should_auto_iconify_manager_window(
+    *, manager_has_focus: bool, root_iconic: bool
+) -> bool:
+    """Auto-iconify only a visible manager that does not own foreground focus."""
+    return not bool(manager_has_focus) and not bool(root_iconic)
+
+
 def should_auto_iconify_ingame(*, manager_has_focus: bool, root_iconic: bool) -> bool:
     """Keep an explicitly focused LOLManager usable while a game is active."""
-    return not bool(manager_has_focus) and not bool(root_iconic)
+    return should_auto_iconify_manager_window(
+        manager_has_focus=manager_has_focus,
+        root_iconic=root_iconic,
+    )
 
 
 def normalize_process_cpu_percent(
@@ -204,7 +214,6 @@ _DWMWA_EXTENDED_FRAME_BOUNDS = 9
 
 _GA_ROOT = 2
 
-_HWND_TOP = 0
 _HWND_TOPMOST = -1
 _HWND_NOTOPMOST = -2
 
@@ -396,26 +405,6 @@ def _show_hwnd_noactivate(hwnd: int) -> None:
         return
     try:
         _USER32.ShowWindow(ctypes.c_void_p(int(hwnd)), ctypes.c_int(_SW_SHOWNOACTIVATE))
-    except Exception:
-        pass
-
-
-def _bring_hwnd_to_top_noactivate(hwnd: int) -> None:
-    if os.name != "nt":
-        return
-    if not hwnd:
-        return
-    flags = int(_SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_NOOWNERZORDER)
-    try:
-        _USER32.SetWindowPos(
-            ctypes.c_void_p(int(hwnd)),
-            ctypes.c_void_p(int(_HWND_TOP)),
-            0,
-            0,
-            0,
-            0,
-            ctypes.c_uint(flags),
-        )
     except Exception:
         pass
 
@@ -1228,6 +1217,41 @@ class LolManagerGui:
                 pass
         return int(foreground) in handles
 
+    def _auto_iconify_manager_if_unfocused(
+        self,
+        *,
+        league_has_focus: bool,
+        manager_has_focus: bool,
+    ) -> None:
+        root_iconic = self._is_root_iconic()
+        if manager_has_focus:
+            if not root_iconic:
+                self._auto_iconified = False
+            return
+        if league_has_focus:
+            return
+
+        if (
+            not bool(getattr(self, "_auto_iconified", False))
+            and should_auto_iconify_manager_window(
+                manager_has_focus=False,
+                root_iconic=root_iconic,
+            )
+        ):
+            try:
+                self.root.iconify()
+                self._auto_iconified = True
+            except Exception:
+                pass
+
+        win = getattr(self, "_log_window", None)
+        if win is not None:
+            try:
+                if str(win.state() or "").strip().casefold() != "iconic":
+                    win.iconify()
+            except Exception:
+                pass
+
     def _enforce_compact_root_size(self) -> None:
         target = getattr(self, "_compact_root_size", None)
         if not target or self._is_root_iconic():
@@ -1272,33 +1296,6 @@ class LolManagerGui:
                 hwnd_log = 0
             if hwnd_log:
                 _set_hwnd_topmost_noactivate(hwnd_log, want)
-
-    def _restore_active_window_after_topmost_release(self) -> None:
-        if os.name != "nt":
-            return
-
-        fg = _get_foreground_hwnd()
-        if not fg:
-            return
-
-        hwnd_root = 0
-        try:
-            hwnd_root = _top_hwnd(int(self.root.winfo_id()))
-        except Exception:
-            hwnd_root = 0
-
-        hwnd_log = 0
-        win = getattr(self, "_log_window", None)
-        if win is not None:
-            try:
-                hwnd_log = _top_hwnd(int(win.winfo_id()))
-            except Exception:
-                hwnd_log = 0
-
-        if fg and (fg == hwnd_root or (hwnd_log and fg == hwnd_log)):
-            return
-
-        _bring_hwnd_to_top_noactivate(fg)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self.root, padding=10)
@@ -2784,7 +2781,6 @@ class LolManagerGui:
     def _sync_external_state(self) -> None:
         if bool(getattr(self, "_closing", False)):
             return
-        prev_topmost = bool(getattr(self, "_lol_topmost_enabled", False))
         state = None
         try:
             while True:
@@ -2877,10 +2873,13 @@ class LolManagerGui:
             else:
                 self._client_closed_at = None
                 self._client_close_cleanup_deadline = None
+            if self._client_seen_once:
+                self._auto_iconify_manager_if_unfocused(
+                    league_has_focus=False,
+                    manager_has_focus=self._is_manager_window_foreground(),
+                )
             if not self._is_ui_busy():
                 self._apply_lol_topmost(want_topmost)
-            if prev_topmost:
-                self._restore_active_window_after_topmost_release()
             self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
             return
 
@@ -2893,27 +2892,13 @@ class LolManagerGui:
                 pass
 
             manager_has_focus = self._is_manager_window_foreground()
-            if should_auto_iconify_ingame(
+            self._auto_iconify_manager_if_unfocused(
+                league_has_focus=False,
                 manager_has_focus=manager_has_focus,
-                root_iconic=self._is_root_iconic(),
-            ):
-                try:
-                    self.root.iconify()
-                    self._auto_iconified = True
-                except Exception:
-                    pass
-            win = getattr(self, "_log_window", None)
-            if win is not None and not manager_has_focus:
-                try:
-                    if str(win.state() or "").strip().casefold() != "iconic":
-                        win.iconify()
-                except Exception:
-                    pass
+            )
 
             want_topmost = False
             self._apply_lol_topmost(want_topmost)
-            if prev_topmost and not want_topmost:
-                self._restore_active_window_after_topmost_release()
             self.root.after(
                 external_sync_delay_ms(in_game=True), self._sync_external_state
             )
@@ -2922,6 +2907,7 @@ class LolManagerGui:
         rect = state.rect
         minimized = bool(state.minimized)
         league_foreground = bool(state.league_foreground)
+        manager_has_focus = self._is_manager_window_foreground()
         if rect is not None and not isinstance(rect, tuple):
             rect = None
         want_topmost = False
@@ -2934,38 +2920,38 @@ class LolManagerGui:
             if minimized:
                 self.client_visible_var.set("Minimized")
                 want_topmost = False
-                if not self._auto_iconified:
-                    try:
-                        self.root.iconify()
-                        self._auto_iconified = True
-                    except Exception:
-                        pass
+                self._auto_iconify_manager_if_unfocused(
+                    league_has_focus=False,
+                    manager_has_focus=manager_has_focus,
+                )
             else:
                 self.client_visible_var.set("Visible")
                 want_topmost = bool(league_foreground)
-                if self._auto_iconified:
+                if league_foreground and self._auto_iconified:
                     self._show_root_noactivate()
                     self._auto_iconified = False
                     self._enforce_compact_root_size()
-                if not self._is_ui_busy():
+                self._auto_iconify_manager_if_unfocused(
+                    league_has_focus=league_foreground,
+                    manager_has_focus=manager_has_focus,
+                )
+                if (
+                    league_foreground or manager_has_focus
+                ) and not self._is_ui_busy():
                     self._snap_to_client(rect)
         else:
             if league_running:
                 self.client_visible_var.set("Hidden")
                 self._client_seen_once = True
                 want_topmost = False
-                if not self._auto_iconified:
-                    try:
-                        self.root.iconify()
-                        self._auto_iconified = True
-                    except Exception:
-                        pass
+                self._auto_iconify_manager_if_unfocused(
+                    league_has_focus=False,
+                    manager_has_focus=manager_has_focus,
+                )
                 self._client_closed_at = None
                 self._client_close_cleanup_deadline = None
         if not self._is_ui_busy():
             self._apply_lol_topmost(want_topmost)
-        if prev_topmost and not want_topmost:
-            self._restore_active_window_after_topmost_release()
         self.root.after(
             external_sync_delay_ms(in_game=in_game), self._sync_external_state
         )
