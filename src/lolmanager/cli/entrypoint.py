@@ -45,6 +45,7 @@ from lolmanager.core.lcu_client import (
     PHASE_WATCH_IN_PROGRESS,
     champ_select_session_identity,
     champ_select_time_left_seconds,
+    completed_champ_select_champion_ids,
     is_known_gameflow_phase,
     lcu_loop_action_for,
 )
@@ -86,6 +87,7 @@ from lolmanager.cli.champion_selection import (
     _reconcile_pick_pool_availability,
     _lcu_status_label,
 )
+from lolmanager.cli.champ_select_swaps import monitor_champ_select_swaps
 from lolmanager.cli.postgame import (
     ContinueAfterGamePolicy,
     should_continue_after_game,
@@ -246,6 +248,9 @@ def resolve_ban_name_for_runtime(
     logger: logging.Logger,
     max_age_sec: float = COUNTER_RECOMMENDATION_MAX_AGE_SEC,
     now: Optional[float] = None,
+    excluded_champions: Iterable[str] = (),
+    unavailable_ids: frozenset[int] = frozenset(),
+    lcu: Optional[LcuClient] = None,
 ) -> str:
     ban_name = str(configured_ban or "").strip()
     if not is_auto_ban_value(ban_name):
@@ -261,17 +266,16 @@ def resolve_ban_name_for_runtime(
         configured_pick=champion_name,
         max_age_sec=max_age_sec,
         now=now,
+        excluded_champions=excluded_champions,
     )
-    if result.recommendations:
-        selected = str(result.recommendations[0].champion or "").strip()
-        if is_plausible_champion_name(selected):
-            logger.info(
-                "자동 추천 밴 적용: %s -> %s (%s)",
-                champion_name,
-                selected,
-                result.status,
-            )
-            return selected
+    for recommendation in result.recommendations:
+        selected = recommendation.champion
+        if lcu is not None and unavailable_ids:
+            resolved = lcu.resolve_champ_select_champion_id_decision(selected)
+            if not resolved.ok or resolved.value in unavailable_ids:
+                continue
+        logger.info("자동 추천 밴 적용: %s -> %s (%s)", champion_name, selected, result.status)
+        return selected
 
     logger.warning(
         "자동 추천 밴 후보가 없습니다: role=%s champion=%s status=%s",
@@ -2402,6 +2406,10 @@ def try_pick_popups(
     if not is_league_client_window_target(rect):
         return False
 
+    if getattr(lcu, "background_swap_monitor", False) is True:
+        # The image cannot tell a lane swap from a pick-order request.
+        tpl_decline = None
+
     now = time.monotonic()
     templates: list[tuple[str, Path]] = []
     confirm_names: list[str] = []
@@ -2908,6 +2916,7 @@ def _wait_for_game_start_and_monitor(
     )
     if aram_active:
         logger.info("칼바람 초기 카드 선택 및 선호 벤치 교환 감시 중.")
+        lcu.reset_aram_selection()
     elif passive_champ_select:
         logger.info("인게임 시작 대기 중(챔피언 선택 비개입 감시).")
     else:
@@ -2994,7 +3003,7 @@ def _wait_for_game_start_and_monitor(
                 if failure != last_aram_failure:
                     logger.warning("칼바람 자동 선택 확인 실패: %s", exc)
                     last_aram_failure = failure
-            next_aram_poll_at = time.monotonic() + 1.0
+            next_aram_poll_at = time.monotonic() + 0.25
         rect = _visible_rect_for_image_scan(logger, "인게임 시작 대기")
         if rect is not None:
             if not passive_champ_select:
@@ -3128,6 +3137,7 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             {},
         )
 
+    excluded_picks = tuple(champion for champion, _ban in pick_pool)
     snapshot_fn = getattr(lcu, "get_champ_select_snapshot", None)
     if not callable(snapshot_fn):
         champion_name, configured_ban = pick_pool[current_index]
@@ -3137,6 +3147,7 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             champion_name=champion_name,
             configured_ban=configured_ban,
             logger=logger,
+            excluded_champions=excluded_picks,
         )
         return (
             current_index,
@@ -3233,6 +3244,7 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
             champion_name=champion_name,
             configured_ban=configured_ban,
             logger=logger,
+            excluded_champions=excluded_picks,
         )
         actions = getattr(snapshot, "actions", ())
         pick_in_progress = any(
@@ -3288,6 +3300,13 @@ def _wait_for_late_ban_and_reconcile_pick_pool(
                 last_delay_bucket = bucket
             time.sleep(min(interval_sec, max(0.05, time_left - BAN_COMMIT_WINDOW_SEC)))
             continue
+        unavailable_ids = completed_champ_select_champion_ids(raw)
+        if is_auto_ban_value(configured_ban) and unavailable_ids:
+            ban_name = resolve_ban_name_for_runtime(
+                counter_cache_path, role=role, champion_name=champion_name,
+                configured_ban=configured_ban, logger=logger, excluded_champions=excluded_picks,
+                unavailable_ids=unavailable_ids, lcu=lcu,
+            )
         return (
             current_index,
             champion_name,
@@ -3366,7 +3385,13 @@ def cli_main(argv: Optional[list[str]] = None) -> None:
     ensure_external_apps_running_once(logger=logger)
     RUNTIME_STATE.league_exit_guard = LeagueClientExitGuard(league_client_exe_path())
     lcu = LcuClient()
+    with monitor_champ_select_swaps(lcu, logger):
+        _run_automation(lcu, logger, current_continue_after_game)
 
+
+def _run_automation(
+    lcu: LcuClient, logger: logging.Logger, current_continue_after_game: Callable[[], bool]
+) -> None:
     config = ChampionConfig()
     counter_cache_path = default_counter_cache_path(config.path.resolve())
 

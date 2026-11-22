@@ -26,6 +26,7 @@ from lolmanager.core.lcu_client import (
     LcuDecision,
     LcuLoopAction,
     LcuOutcome,
+    LcuResult,
     RANKED_SOLO_DUO_QUEUE_ID,
     _default_lcu_connection_validator,
     champ_select_action_confirm_timeout_sec,
@@ -64,6 +65,30 @@ class _FakeSession:
 
 def _no_ongoing_pick_order_swap_response() -> _FakeResponse:
     return _FakeResponse(404, {"message": "not found"})
+
+
+def test_champ_select_swap_monitor_distinguishes_requests_and_deduplicates():
+    client = LcuClient()
+    open_session = {
+        "gameId": 123,
+        "positionSwaps": [{"id": 2, "state": "RECEIVED"}],
+        "pickOrderSwaps": [{"id": 3, "state": "SENT"}],
+    }
+    responses = {
+        ("GET", "/lol-champ-select/v1/session"): LcuResult(200, open_session),
+        ("GET", "/lol-champ-select/v1/ongoing-pick-order-swap"): LcuResult(200, {"id": 4, "state": "RECEIVED"}),
+        ("POST", "/lol-champ-select/v1/session/position-swaps/2/decline"): LcuResult(204),
+        ("POST", "/lol-champ-select/v1/session/pick-order-swaps/4/accept"): LcuResult(404),
+        ("POST", "/lol-lobby-team-builder/champ-select/v1/session/pick-order-swaps/4/accept"): LcuResult(204),
+    }
+    client.request = mock.Mock(side_effect=lambda method, path: responses[method, path])
+    assert client.respond_to_champ_select_swaps() == ["position", "pick-order"]
+    assert client.respond_to_champ_select_swaps() == []
+    assert [call.args[1] for call in client.request.call_args_list if call.args[0] == "POST"] == [
+        "/lol-champ-select/v1/session/position-swaps/2/decline",
+        "/lol-champ-select/v1/session/pick-order-swaps/4/accept",
+        "/lol-lobby-team-builder/champ-select/v1/session/pick-order-swaps/4/accept",
+    ]
 
 
 def _no_pick_order_swap_responses() -> list[_FakeResponse]:

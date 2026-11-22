@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import dataclass
 import os
 from pathlib import Path
 from typing import Optional, Tuple
@@ -20,7 +21,13 @@ ALLOWED_PROCESSES = {
 }
 
 _DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_DWMWA_CLOAKED = 14
 _GA_ROOT = 2
+_GW_HWNDPREV = 3
+_GWL_EXSTYLE = -20
+_WS_EX_LAYERED = 0x80000
+_LWA_ALPHA = 2
+WindowRect = tuple[int, int, int, int]
 
 
 class _RECT(ctypes.Structure):
@@ -36,6 +43,17 @@ class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+@dataclass(frozen=True)
+class LeagueWindow:
+    hwnd: int
+    rect: WindowRect
+    minimized: bool
+    visible: bool
+
+
+_MONITOR_CALLBACK = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_RECT), ctypes.c_ssize_t
+)
 _USER32 = None
 if os.name == "nt":
     try:
@@ -57,6 +75,18 @@ if os.name == "nt":
         _USER32.IsWindowVisible.restype = ctypes.c_int
         _USER32.IsIconic.argtypes = [ctypes.c_void_p]
         _USER32.IsIconic.restype = ctypes.c_int
+        _USER32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        _USER32.GetWindow.restype = ctypes.c_void_p
+        _USER32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _USER32.GetWindowLongW.restype = ctypes.c_long
+        _USER32.GetLayeredWindowAttributes.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(ctypes.c_uint)
+        ]
+        _USER32.GetLayeredWindowAttributes.restype = ctypes.c_int
+        _USER32.EnumDisplayMonitors.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, _MONITOR_CALLBACK, ctypes.c_ssize_t
+        ]
+        _USER32.EnumDisplayMonitors.restype = ctypes.c_int
     except Exception:
         _USER32 = None
 
@@ -227,11 +257,21 @@ def is_league_client_window_target(
         return False
 
 
-def find_league_window_rect(
+def _is_cloaked(hwnd: int) -> bool:
+    if _DWMAPI is None:
+        return False
+    cloaked = ctypes.c_uint()
+    return bool(
+        _DWMAPI.DwmGetWindowAttribute(hwnd, _DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0
+        and cloaked.value
+    )
+
+
+def find_league_window(
     target_title: str = "League of Legends",
     *,
     visible_only: bool = True,
-) -> Optional[Tuple[int, int, int, int]]:
+) -> Optional[LeagueWindow]:
     try:
         elements = findwindows.find_elements(
             title=target_title, visible_only=bool(visible_only)
@@ -239,7 +279,7 @@ def find_league_window_rect(
     except findwindows.ElementNotFoundError:
         return None
 
-    minimized_candidate: Optional[Tuple[int, int, int, int]] = None
+    hidden_candidate: Optional[LeagueWindow] = None
     for elem in elements:
         pid = getattr(elem, "process_id", None)
         name = None
@@ -261,10 +301,87 @@ def find_league_window_rect(
             rect = elem.rectangle
             tup = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
 
-        if not is_rect_minimized(tup):
-            return tup
-        minimized_candidate = tup
-    return minimized_candidate
+        minimized = is_rect_minimized(tup)
+        visible = True
+        if _USER32 is not None and hwnd:
+            minimized = minimized or bool(_USER32.IsIconic(hwnd))
+            visible = bool(_USER32.IsWindowVisible(hwnd)) and not _is_cloaked(hwnd)
+        window = LeagueWindow(hwnd, tup, minimized, visible)
+        if visible and not minimized:
+            return window
+        if visible or not visible_only:
+            hidden_candidate = window
+    return hidden_candidate
+
+
+def find_league_window_rect(
+    target_title: str = "League of Legends", *, visible_only: bool = True
+) -> Optional[WindowRect]:
+    window = find_league_window(target_title, visible_only=visible_only)
+    return window.rect if window else None
+
+
+def _intersect_rect(first: WindowRect, second: WindowRect) -> Optional[WindowRect]:
+    left, top = max(first[0], second[0]), max(first[1], second[1])
+    right, bottom = min(first[2], second[2]), min(first[3], second[3])
+    return (left, top, right, bottom) if left < right and top < bottom else None
+
+
+def _subtract_rect(rect: WindowRect, cover: WindowRect) -> list[WindowRect]:
+    overlap = _intersect_rect(rect, cover)
+    if overlap is None:
+        return [rect]
+    left, top, right, bottom = rect
+    x1, y1, x2, y2 = overlap
+    return [
+        (x, y, r, b)
+        for x, y, r, b in ((left, top, right, y1), (left, y2, right, bottom),
+                           (left, y1, x1, y2), (x2, y1, right, y2))
+        if x < r and y < b
+    ]
+
+
+def _opaque_window_rect(hwnd: int) -> Optional[WindowRect]:
+    if not _USER32.IsWindowVisible(hwnd) or _USER32.IsIconic(hwnd) or _is_cloaked(hwnd):
+        return None
+    pid = ctypes.c_uint()
+    if not _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or pid.value == os.getpid():
+        return None
+    if _USER32.GetWindowLongW(hwnd, _GWL_EXSTYLE) & _WS_EX_LAYERED:
+        alpha, flags = ctypes.c_ubyte(), ctypes.c_uint()
+        if not _USER32.GetLayeredWindowAttributes(hwnd, None, ctypes.byref(alpha), ctypes.byref(flags)):
+            return None
+        if flags.value != _LWA_ALPHA or alpha.value != 255:
+            return None
+    return _try_get_extended_frame_bounds(hwnd)
+
+
+def is_league_window_occluded(window: LeagueWindow) -> bool:
+    if _USER32 is None or not window.hwnd:
+        return False
+    exposed: list[WindowRect] = []
+
+    @_MONITOR_CALLBACK
+    def add_monitor(_monitor, _dc, bounds, _data):
+        size = bounds.contents
+        overlap = _intersect_rect(window.rect, (size.left, size.top, size.right, size.bottom))
+        if overlap is not None:
+            exposed.append(overlap)
+        return 1
+
+    if not _USER32.EnumDisplayMonitors(None, None, add_monitor, 0):
+        return False
+    seen = {window.hwnd}
+    hwnd = window.hwnd
+    while exposed:
+        hwnd = _USER32.GetWindow(hwnd, _GW_HWNDPREV)
+        if not hwnd or hwnd in seen:
+            return False
+        seen.add(hwnd)
+        cover = _opaque_window_rect(hwnd)
+        if cover is not None:
+            exposed = [remaining for rect in exposed for remaining in _subtract_rect(rect, cover)]
+    return True
 
 
 def is_league_client_running() -> bool:

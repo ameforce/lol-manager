@@ -64,6 +64,10 @@ RANKED_FLEX_QUEUE_ID = 440
 ARAM_QUEUE_IDS = frozenset({450, 2400})
 RANKED_QUEUE_IDS = frozenset({RANKED_SOLO_DUO_QUEUE_ID, RANKED_FLEX_QUEUE_ID})
 GAMEFLOW_SESSION_ENDPOINT = "/lol-gameflow/v1/session"
+CHAMP_SELECT_SESSION_ENDPOINT = "/lol-champ-select/v1/session"
+TEAM_BUILDER_SESSION_ENDPOINT = "/lol-lobby-team-builder/champ-select/v1/session"
+ARAM_CARDS_ENDPOINT = "/lol-lobby-team-builder/champ-select/v1/subset-champion-list"
+CHAMP_SELECT_PICKABLE_IDS_ENDPOINT = "/lol-champ-select/v1/pickable-champion-ids"
 SIMPLE_DIALOG_MESSAGES_ENDPOINT = "/lol-simple-dialog-messages/v1/messages"
 REMEDY_NOTIFICATIONS_ENDPOINT = "/lol-remedy/v1/remedy-notifications"
 REMEDY_NOTIFICATION_ACK_ENDPOINT = "/lol-remedy/v1/ack-remedy-notification"
@@ -210,7 +214,7 @@ PickOrderSwapPayload = Mapping[str, Any]
 
 
 def _received_pick_order_swap_id(item: PickOrderSwapPayload) -> Optional[int]:
-    if _normalize_lookup_key(item.get("state")) != "received":
+    if _normalize_lookup_key(item.get("state")) != "received" or item.get("initiatedByLocalPlayer") is True:
         return None
     swap_id = _parse_optional_int(item.get("id"))
     if swap_id is None or swap_id <= 0:
@@ -561,6 +565,30 @@ class ChampSelectSnapshot:
     raw: dict[str, Any]
 
 
+@dataclass
+class _AramSelection:
+    session: tuple[Optional[str], int]
+    champion: Optional[int] = None
+    requested: Optional[int] = None
+    retry_at: float = 0.0
+    paused: bool = False
+
+    def observe(self, champion: int) -> None:
+        if champion == self.requested:
+            self.requested = None
+        elif champion > 0 and self.champion is not None and champion != self.champion:
+            self.paused = True
+        if champion > 0 or self.champion is None:
+            self.champion = champion
+
+
+def _aram_session_key(snapshot: ChampSelectSnapshot) -> tuple[Optional[str], int]:
+    return (
+        champ_select_session_identity(snapshot.raw) or _non_empty_identifier(snapshot.raw, "id"),
+        snapshot.local_player_cell_id,
+    )
+
+
 @dataclass(frozen=True)
 class HonorVoteCandidate:
     puuid: str
@@ -638,6 +666,11 @@ class LcuClient:
         )
         self._phase_cache: tuple[float, Optional[LcuDecision]] = (0.0, None)
         self._last_logged_phase: Optional[str] = None
+        self._aram_selection: Optional[_AramSelection] = None
+        self._aram_catalog: Optional[list[dict[str, Any]]] = None
+        self.background_swap_monitor = False
+        self._answered_swaps: dict[str, int] = {}
+        self._swap_session_id: Optional[str] = None
         self.last_champ_select_action_timings: dict[str, float] = {}
 
     def read_connection(self) -> Optional[LcuConnection]:
@@ -1041,7 +1074,6 @@ class LcuClient:
 
     def dismiss_blocking_modal_decision(self) -> LcuDecision:
         handlers = (
-            self._accept_received_pick_order_swap_decision,
             self._dismiss_simple_dialog_messages_decision,
             self._dismiss_remedy_notifications_decision,
             self._dismiss_player_behavior_v2_reporter_feedback_decision,
@@ -1050,6 +1082,8 @@ class LcuClient:
             self._dismiss_player_messaging_notification_decision,
             self._dismiss_ranked_notifications_decision,
         )
+        if not self.background_swap_monitor:
+            handlers = (self._accept_received_pick_order_swap_decision, *handlers)
         saw_supported_empty = False
         for handler in handlers:
             result = handler()
@@ -1074,6 +1108,63 @@ class LcuClient:
 
     def dismiss_blocking_modal(self) -> bool:
         return self.dismiss_blocking_modal_decision().ok
+
+    def respond_to_champ_select_swaps(self) -> list[str]:
+        session = self._champ_select_session_decision()
+        if not session.ok:
+            return []
+        raw = session.value
+        if raw.get("isSpectating") is True or raw.get("benchEnabled") is True:
+            return []
+        session_id = champ_select_session_identity(raw) or _non_empty_identifier(raw, "id")
+        if session_id != self._swap_session_id:
+            self.clear_champ_select_swaps()
+            self._swap_session_id = session_id
+
+        handled: list[str] = []
+        for kind, key, action in (
+            ("position", "positionSwaps", "decline"),
+            ("pick-order", "pickOrderSwaps", "accept"),
+        ):
+            received = self._received_champ_select_swap(raw, kind, key)
+            if received.status == LcuOutcome.NO_CURRENT_ACTION:
+                self._answered_swaps.pop(kind, None)
+            if not received.ok or self._answered_swaps.get(kind) == received.value:
+                continue
+            suffix = f"/{kind}-swaps/{received.value}/{action}"
+            result = self.request("POST", CHAMP_SELECT_SESSION_ENDPOINT + suffix)
+            if result.status_code in {404, 405}:
+                result = self.request("POST", TEAM_BUILDER_SESSION_ENDPOINT + suffix)
+            if result.ok:
+                self._answered_swaps[kind] = received.value
+                handled.append(kind)
+        return handled
+
+    def clear_champ_select_swaps(self) -> None:
+        self._answered_swaps.clear()
+        self._swap_session_id = None
+
+    def _received_champ_select_swap(self, session: Mapping[str, Any], kind: str, key: str) -> LcuDecision:
+        swaps = session.get(key)
+        if isinstance(swaps, list):
+            for item in swaps:
+                if isinstance(item, Mapping) and (swap_id := _received_pick_order_swap_id(item)) is not None:
+                    return LcuDecision(LcuOutcome.SUCCESS, value=swap_id)
+        notification = self.request("GET", f"/lol-champ-select/v1/ongoing-{kind}-swap")
+        if notification.ok and isinstance(notification.data, Mapping):
+            swap_id = _received_pick_order_swap_id(notification.data)
+            if swap_id is not None:
+                return LcuDecision(LcuOutcome.SUCCESS, value=swap_id)
+        if not isinstance(swaps, list):
+            collection = self.request("GET", f"{CHAMP_SELECT_SESSION_ENDPOINT}/{kind}-swaps")
+            if collection.ok and isinstance(collection.data, list):
+                for item in collection.data:
+                    if isinstance(item, Mapping) and (swap_id := _received_pick_order_swap_id(item)) is not None:
+                        return LcuDecision(LcuOutcome.SUCCESS, value=swap_id)
+                return LcuDecision(LcuOutcome.NO_CURRENT_ACTION)
+        if notification.ok or notification.status_code in {404, 405}:
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION)
+        return LcuDecision(LcuOutcome.REQUEST_FAILED)
 
     def _accept_received_pick_order_swap_decision(self) -> LcuDecision:
         result = self.request("GET", CHAMP_SELECT_PICK_ORDER_SWAPS_ENDPOINT)
@@ -1707,7 +1798,7 @@ class LcuClient:
         )
 
     def get_champ_select_session(self) -> Optional[dict[str, Any]]:
-        result = self.request("GET", "/lol-champ-select/v1/session")
+        result = self.request("GET", CHAMP_SELECT_SESSION_ENDPOINT)
         return result.data if result.ok and isinstance(result.data, dict) else None
 
     def get_champ_select_unavailable_champion_ids_decision(self) -> LcuDecision:
@@ -1727,7 +1818,7 @@ class LcuClient:
         return self._resolve_champion_id_decision(champion_name)
 
     def _champ_select_session_decision(self) -> LcuDecision:
-        result = self.request("GET", "/lol-champ-select/v1/session")
+        result = self.request("GET", CHAMP_SELECT_SESSION_ENDPOINT)
         if result.error:
             return LcuDecision(
                 _connection_outcome_for_error(result.error),
@@ -1858,42 +1949,218 @@ class LcuClient:
     def select_aram_preferred_champion_decision(
         self, preferred_champions: Sequence[str]
     ) -> LcuDecision:
-        """Choose an initial ARAM card or upgrade to a preferred bench champion.
-
-        Contract: the client's TeamBuilderDirect-ChampSelectSession and
-        ChampGridChampion schemas. The bench-swap route depends on whether the
-        active session uses legacy champ select.
-        https://github.com/KebsCS/lcu-and-riotclient-api/blob/main/lcu/swagger.json
-        """
+        """Pick from the client's offered cards, then upgrade while the player lets us."""
         if not preferred_champions:
             return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="empty ARAM preferences")
-        mode = self.get_game_mode_decision()
-        if not mode.ok:
-            return mode
-        if mode.value.mode != GameMode.ARAM:
-            return LcuDecision(LcuOutcome.UNSUPPORTED, reason="not an ARAM session")
-
-        # Fetch the catalog first: a reroll or teammate trade can change our
-        # champion while that request is in flight. Decide from the latest session.
-        champions = self._champ_select_grid_champions_decision()
-        if not champions.ok:
-            return champions
+        if self._aram_selection is None:
+            mode = self.get_game_mode_decision()
+            if not mode.ok:
+                return mode
+            if mode.value.mode != GameMode.ARAM:
+                return LcuDecision(LcuOutcome.UNSUPPORTED, reason="not an ARAM session")
+        if self._aram_catalog is None:
+            champions = self._champ_select_grid_champions_decision()
+            if not champions.ok:
+                return champions
+            if champions.value:
+                self._aram_catalog = champions.value
         result = self.get_champ_select_snapshot()
         if not result.ok:
             return result
         snapshot: ChampSelectSnapshot = result.value
         raw = snapshot.raw
-        if raw.get("benchEnabled") is not True or raw.get("isSpectating") is True:
-            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM bench unavailable")
+        queue_id = _parse_optional_int(raw.get("queueId"))
+        if queue_id and queue_id not in ARAM_QUEUE_IDS:
+            return LcuDecision(LcuOutcome.UNSUPPORTED, reason="not an ARAM session")
         if not snapshot.local_player:
             return LcuDecision(
                 LcuOutcome.NO_LOCAL_PLAYER,
                 reason="ARAM local player unavailable",
             )
         current_id = _parse_optional_int(snapshot.local_player.get("championId")) or 0
+        card_mode = raw.get("allowSubsetChampionPicks") is True
+        if raw.get("isSpectating") is True or (
+            raw.get("benchEnabled") is not True and not (card_mode and current_id <= 0)
+        ):
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM bench unavailable")
+        session_key = _aram_session_key(snapshot)
+        selection = self._aram_selection
+        if selection is None or selection.session != session_key:
+            if selection is not None and not queue_id:
+                mode = self.get_game_mode_decision()
+                if not mode.ok:
+                    return mode
+                if mode.value.mode != GameMode.ARAM:
+                    return LcuDecision(LcuOutcome.UNSUPPORTED, reason="not an ARAM session")
+            selection = self._aram_selection = _AramSelection(
+                session_key, paused=card_mode and current_id > 0
+            )
+        selection.observe(current_id)
+        if selection.paused:
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="player changed ARAM champion")
+        if time.monotonic() < selection.retry_at:
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM selection cooldown")
+        selection.requested = None
+
+        initial_pick = current_id <= 0
+        action_id: Optional[int] = None
+        if card_mode and initial_pick:
+            action_id = next((
+                action.id for action in snapshot.actions
+                if action.type == "pick" and action.is_in_progress and not action.completed
+            ), None)
+            if action_id is None:
+                return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="no ARAM cards offered")
+            card_ids = self._aram_champion_ids(ARAM_CARDS_ENDPOINT)
+            if not card_ids.ok:
+                return card_ids
+            offered_ids = card_ids.value
+            # Read the active action again after retrieving the cards. A player
+            # can lock a card during that request.
+            latest = self.get_champ_select_snapshot()
+            if not latest.ok:
+                return latest
+            updated: ChampSelectSnapshot = latest.value
+            if _aram_session_key(updated) != session_key:
+                return LcuDecision(LcuOutcome.NO_SESSION, reason="ARAM session changed during selection")
+            selection.observe(_parse_optional_int(updated.local_player.get("championId")) or 0)
+            if selection.paused or not any(
+                action.id == action_id and action.is_in_progress and not action.completed
+                for action in updated.actions
+            ):
+                return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM card action changed")
+        else:
+            # The current client's bench uses its live pickable champion list.
+            # Older sessions without the card flag still support the grid fallback.
+            pickable_ids = None
+            if card_mode:
+                timer = raw.get("timer")
+                if isinstance(timer, Mapping) and timer.get("phase") == "BAN_PICK":
+                    return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM bench is opening")
+                pickable = self._aram_champion_ids(CHAMP_SELECT_PICKABLE_IDS_ENDPOINT)
+                if not pickable.ok:
+                    return pickable
+                pickable_ids = set(pickable.value)
+                latest = self.get_champ_select_snapshot()
+                if not latest.ok:
+                    return latest
+                updated = latest.value
+                if _aram_session_key(updated) != session_key:
+                    return LcuDecision(LcuOutcome.NO_SESSION, reason="ARAM session changed during selection")
+                latest_id = _parse_optional_int(updated.local_player.get("championId"))
+                if latest_id is None or latest_id <= 0 or updated.raw.get("benchEnabled") is not True:
+                    return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="ARAM local selection changed")
+                selection.observe(latest_id)
+                if selection.paused or updated.raw.get("isSpectating") is True:
+                    return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="player changed ARAM champion")
+                raw = updated.raw
+            offered_ids = self._aram_bench_ids(raw, pickable_ids)
+            if offered_ids is None:
+                return LcuDecision(LcuOutcome.MALFORMED_SESSION, reason="invalid ARAM bench")
+
+        if not offered_ids:
+            reason = "no ARAM cards offered" if initial_pick else "empty ARAM bench"
+            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason=reason)
+
+        name_to_id: dict[str, int] = {}
+        id_to_name: dict[int, str] = {}
+        eligible_ids: set[int] = set()
+        for champion in self._aram_catalog or ():
+            champion_id = _parse_optional_int(champion.get("id"))
+            if champion_id is None or champion_id <= 0:
+                continue
+            names = [str(champion.get(key) or "").strip() for key in ("name", "displayName", "alias")]
+            for name in names:
+                if name:
+                    name_to_id[_normalize_lookup_key(name)] = champion_id
+            id_to_name[champion_id] = next((name for name in names if name), str(champion_id))
+            if champion.get("disabled") is not True and any(
+                champion.get(key) is True for key in (
+                    "owned", "freeToPlay", "freeToPlayForQueue", "rented", "loyaltyReward", "xboxGPReward",
+                )
+            ):
+                eligible_ids.add(champion_id)
+
+        preferred_ids = [
+            name_to_id[key] for name in preferred_champions
+            if (key := _normalize_lookup_key(name)) in name_to_id
+        ]
+        if not card_mode:
+            offered_ids = [champion_id for champion_id in offered_ids if champion_id in eligible_ids]
+        target_id = (
+            choose_aram_initial_champion(preferred_ids, offered_ids) if initial_pick
+            else choose_aram_bench_champion(preferred_ids, current_id, offered_ids)
+        )
+        if target_id is None:
+            return LcuDecision(
+                LcuOutcome.NO_CURRENT_ACTION,
+                reason="no eligible ARAM card" if initial_pick else "keep current ARAM champion",
+            )
+
+        selection.requested = target_id
+        selection.retry_at = time.monotonic() + 0.45
+        if action_id is not None:
+            response = self.request(
+                "PATCH", f"{CHAMP_SELECT_SESSION_ENDPOINT}/actions/{action_id}",
+                json_body={"championId": target_id, "completed": True},
+            )
+        else:
+            route = (
+                CHAMP_SELECT_SESSION_ENDPOINT if card_mode or raw.get("isLegacyChampSelect") is not False
+                else TEAM_BUILDER_SESSION_ENDPOINT
+            )
+            response = self.request("POST", f"{route}/bench/swap/{target_id}")
+        swap = _write_result_decision(
+            response,
+            success_reason="ARAM champion selection accepted",
+            rejected_reason="ARAM card selection rejected" if action_id is not None else "ARAM bench swap rejected",
+        )
+        if not swap.ok and swap.status != LcuOutcome.REQUEST_FAILED:
+            selection.requested = None
+        if not swap.ok:
+            return swap
+        selection.retry_at = time.monotonic() + 3.0
+        deadline = time.monotonic() + champ_select_action_confirm_timeout_sec()
+        while True:
+            confirmed = self.get_champ_select_snapshot()
+            if not confirmed.ok:
+                return confirmed
+            updated = confirmed.value
+            if _aram_session_key(updated) != session_key:
+                return LcuDecision(LcuOutcome.NO_SESSION, reason="ARAM session changed during selection")
+            confirmed_id = _parse_optional_int(updated.local_player.get("championId")) or 0
+            selection.observe(confirmed_id)
+            if confirmed_id == target_id:
+                return LcuDecision(
+                    LcuOutcome.SUCCESS,
+                    value=id_to_name.get(target_id, str(target_id)),
+                    reason="ARAM initial card selection confirmed" if initial_pick else "ARAM bench swap confirmed",
+                    status_code=swap.status_code,
+                )
+            if selection.paused:
+                return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason="player changed ARAM champion")
+            if time.monotonic() >= deadline:
+                return LcuDecision(LcuOutcome.REQUEST_FAILED, reason="ARAM champion selection not confirmed")
+            time.sleep(0.1)
+
+    def reset_aram_selection(self) -> None:
+        self._aram_selection = None
+        self._aram_catalog = None
+
+    def _aram_champion_ids(self, endpoint: str) -> LcuDecision:
+        result = self.request("GET", endpoint)
+        if not result.ok:
+            outcome = _connection_outcome_for_error(result.error) if result.error else LcuOutcome.REQUEST_FAILED
+            return LcuDecision(outcome, reason="ARAM champion IDs unavailable", status_code=result.status_code)
+        if not isinstance(result.data, list):
+            return LcuDecision(LcuOutcome.MALFORMED_RESPONSE, reason="invalid ARAM champion IDs")
+        ids = [champion_id for value in result.data if (champion_id := _parse_optional_int(value)) and champion_id > 0]
+        return LcuDecision(LcuOutcome.SUCCESS, value=ids)
+
+    def _aram_bench_ids(self, raw: Mapping[str, Any], pickable_ids: Optional[set[int]]) -> Optional[list[int]]:
         bench = raw.get("benchChampions")
         if not isinstance(bench, list):
-            return LcuDecision(LcuOutcome.MALFORMED_SESSION, reason="invalid ARAM bench")
+            return None
         bench_order: list[int] = []
         for item in bench:
             if not isinstance(item, dict):
@@ -1903,117 +2170,10 @@ class LcuClient:
                 champion_id is not None
                 and champion_id > 0
                 and champion_id not in bench_order
+                and (pickable_ids is None or champion_id in pickable_ids)
             ):
                 bench_order.append(champion_id)
-        bench_ids = set(bench_order)
-        if not bench_ids:
-            reason = "no ARAM cards offered" if current_id <= 0 else "empty ARAM bench"
-            return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason=reason)
-
-        name_to_id: dict[str, int] = {}
-        id_to_name: dict[int, str] = {}
-        eligible_ids: set[int] = set()
-        for champion in champions.value:
-            champion_id = _parse_optional_int(champion.get("id"))
-            if champion_id is None or champion_id <= 0:
-                continue
-            for key in ("name", "displayName", "alias"):
-                name = _normalize_lookup_key(champion.get(key))
-                if name:
-                    name_to_id[name] = champion_id
-            display_name = next(
-                (
-                    str(champion.get(key)).strip()
-                    for key in ("name", "displayName", "alias")
-                    if str(champion.get(key) or "").strip()
-                ),
-                str(champion_id),
-            )
-            id_to_name[champion_id] = display_name
-            if champion.get("disabled") is not True and any(
-                champion.get(key) is True
-                for key in (
-                    "owned", "freeToPlay", "freeToPlayForQueue", "rented",
-                    "loyaltyReward", "xboxGPReward",
-                )
-            ):
-                eligible_ids.add(champion_id)
-
-        preferred_ids: list[int] = []
-        for name in preferred_champions:
-            champion_id = name_to_id.get(_normalize_lookup_key(name))
-            if champion_id is None:
-                return LcuDecision(
-                    LcuOutcome.CHAMPION_NOT_FOUND,
-                    reason=f"ARAM preferred champion not found: {name}",
-                )
-            preferred_ids.append(champion_id)
-        available_ids = bench_ids & eligible_ids
-        initial_pick = current_id <= 0
-        if initial_pick:
-            target_id = choose_aram_initial_champion(
-                preferred_ids,
-                (champion_id for champion_id in bench_order if champion_id in available_ids),
-            )
-        else:
-            target_id = choose_aram_bench_champion(
-                preferred_ids, current_id, available_ids
-            )
-        if target_id is None:
-            return LcuDecision(
-                LcuOutcome.NO_CURRENT_ACTION,
-                reason="no eligible ARAM card" if initial_pick else "keep current ARAM champion",
-            )
-
-        # The client exposes separate mutation routes for its legacy and direct
-        # champ-select implementations. Older session payloads may omit the
-        # flag, so preserve the legacy route as the compatibility default.
-        bench_swap_route = (
-            "/lol-champ-select/v1/session/bench/swap"
-            if raw.get("isLegacyChampSelect") is not False
-            else "/lol-lobby-team-builder/champ-select/v1/session/bench/swap"
-        )
-        swap = _write_result_decision(
-            self.request("POST", f"{bench_swap_route}/{target_id}"),
-            success_reason="ARAM bench swap accepted",
-            rejected_reason="ARAM bench swap rejected",
-        )
-        if not swap.ok:
-            return swap
-        deadline = time.monotonic() + champ_select_action_confirm_timeout_sec()
-        while True:
-            confirmed = self.get_champ_select_snapshot()
-            if not confirmed.ok:
-                return confirmed
-            updated: ChampSelectSnapshot = confirmed.value
-            if (
-                champ_select_session_identity(updated.raw)
-                != champ_select_session_identity(raw)
-                or updated.local_player_cell_id != snapshot.local_player_cell_id
-            ):
-                return LcuDecision(
-                    LcuOutcome.NO_SESSION,
-                    reason="ARAM session changed during selection",
-                )
-            if _parse_optional_int(updated.local_player.get("championId")) == target_id:
-                return LcuDecision(
-                    LcuOutcome.SUCCESS,
-                    value=id_to_name.get(target_id, str(target_id)),
-                    reason=(
-                        "ARAM initial card selection confirmed"
-                        if initial_pick
-                        else "ARAM bench swap confirmed"
-                    ),
-                    status_code=swap.status_code,
-                )
-            if time.monotonic() >= deadline:
-                reason = (
-                    "ARAM initial card selection not confirmed"
-                    if initial_pick
-                    else "ARAM bench swap not confirmed"
-                )
-                return LcuDecision(LcuOutcome.REQUEST_FAILED, reason=reason)
-            time.sleep(0.1)
+        return bench_order
 
     def get_local_player_position(self) -> LcuDecision:
         result = self.get_champ_select_snapshot()

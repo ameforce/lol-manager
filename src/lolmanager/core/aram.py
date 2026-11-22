@@ -10,6 +10,7 @@ from lolmanager.core.champion_names import normalize_name
 class AramPreferences:
     enabled: bool = False
     preferred_champions: tuple[str, ...] = ()
+    manually_ranked_champions: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, value: object) -> AramPreferences:
@@ -26,12 +27,21 @@ class AramPreferences:
             if key and key not in seen:
                 seen.add(key)
                 names.append(name)
-        return cls(value.get("enabled") is True, tuple(names))
+        manual = value.get("manually_ranked_champions")
+        manual_keys = {
+            normalize_name(name) for name in manual if isinstance(name, str)
+        } if isinstance(manual, (list, tuple)) else set()
+        return cls(
+            value.get("enabled") is True,
+            tuple(names),
+            tuple(name for name in names if normalize_name(name) in manual_keys),
+        )
 
     def as_config(self) -> dict[str, object]:
         return {
             "enabled": self.enabled,
             "preferred_champions": list(self.preferred_champions),
+            "manually_ranked_champions": list(self.manually_ranked_champions),
         }
 
 

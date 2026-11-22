@@ -84,8 +84,8 @@ def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None
     <section>
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
-        <li><a href="/ko/lol/champions/vladimir/build/mid"><img alt="블라디미르" /><span>45.60%</span></a></li>
-        <li><a href="/ko/lol/champions/xerath/build/mid"><img alt="제라스" /><span>48.90%</span></a></li>
+        <li><a href="/ko/lol/champions/vladimir/build/mid"><img alt="블라디미르" /><span>45.60% 1,200 게임</span></a></li>
+        <li><a href="/ko/lol/champions/xerath/build/mid"><img alt="제라스" /><span>40.00% 8 게임</span></a></li>
       </ul>
     </section>
     """
@@ -106,28 +106,32 @@ def test_scoring_orders_counter_candidates_by_tier_and_matchup_winrate() -> None
     assert [r.champion for r in recommendations] == ["블라디미르", "제라스"]
     assert recommendations[0].tier == "2티어"
     assert recommendations[0].matchup_winrate == 45.6
+    assert recommendations[0].matchup_score == 18.9
+    assert recommendations[1].matchup_score == 1.9
     assert recommendations[0].total_score > recommendations[1].total_score
 
 
 def test_score_helpers_use_documented_defaults() -> None:
     assert tier_score("OP") == 50
-    assert tier_score("1티어") == 50
+    assert tier_score("1티어") == 45
     assert tier_score("2티어") == 40
     assert tier_score("5티어") == 10
     assert tier_score("unknown") == 0
 
-    assert matchup_winrate_score(42.82) == 35.9
-    assert matchup_winrate_score(45.0) == 25.0
-    assert matchup_winrate_score(57.18) == 0
+    assert matchup_winrate_score(44.0, 200) == 15
+    assert matchup_winrate_score(45.0, 200) == 12.5
+    assert matchup_winrate_score(57.18, 200) == 0
+    assert matchup_winrate_score(30.0) == 0
+    assert matchup_winrate_score(float("nan"), 200) == 0
 
 
-def test_sort_tie_break_uses_raw_matchup_winrate_after_score_clamp() -> None:
+def test_sort_tie_break_uses_larger_sample_after_score_clamp() -> None:
     html = """
     <section>
       <h3>상대하기 어려운 챔피언</h3>
       <ul>
-        <li><a href="/ko/lol/champions/neeko/build/top"><img alt="니코" /><span>39.00%</span></a></li>
-        <li><a href="/ko/lol/champions/quinn/build/top"><img alt="퀸" /><span>38.00%</span></a></li>
+        <li><a href="/ko/lol/champions/neeko/build/top"><img alt="니코" /><span>30.00% 500 게임</span></a></li>
+        <li><a href="/ko/lol/champions/quinn/build/top"><img alt="퀸" /><span>35.00% 900 게임</span></a></li>
       </ul>
     </section>
     """
@@ -144,6 +148,7 @@ def test_sort_tie_break_uses_raw_matchup_winrate_after_score_clamp() -> None:
     )
 
     assert [r.champion for r in recommendations] == ["퀸", "니코"]
+    assert all(r.matchup_score == 50 for r in recommendations)
 
 
 def test_parser_reads_difficult_matchups_and_name_only_fetch_stays_compatible(
@@ -340,7 +345,7 @@ def test_recommendation_refresh_rejects_cached_non_opgg_detail_href(
         max_age_sec=0.0,
     )
 
-    assert result.status == "fetch_failed"
+    assert result.status == "ranked_fallback"
     assert calls == []
 
 
@@ -431,8 +436,9 @@ def test_missing_detail_href_uses_role_rank_fallback(tmp_path: Path) -> None:
     ]
 
 
-def test_failed_counter_refresh_has_a_distinct_status_without_a_fallback(
-    tmp_path: Path,
+@pytest.mark.parametrize("with_rankings", [True, False])
+def test_failed_counter_refresh_only_uses_fallback_with_role_rankings(
+    tmp_path: Path, with_rankings: bool,
 ) -> None:
     cache_path = default_counter_cache_path(tmp_path / "champion_config.json")
 
@@ -440,15 +446,15 @@ def test_failed_counter_refresh_has_a_distinct_status_without_a_fallback(
         cache_path,
         role="mid",
         configured_pick="카타리나",
-        ranked_entries=[("애니", ("2티어", "green"), "/annie")],
+        ranked_entries=[("애니", ("2티어", "green"), "/annie")] if with_rankings else [],
         detail_href="/ko/lol/champions/katarina/build/mid",
         fetch_matchups=lambda _href, _limit: (_ for _ in ()).throw(
             RuntimeError("network down")
         ),
     )
 
-    assert result.status == "fetch_failed"
-    assert result.recommendations == ()
+    assert result.status == ("ranked_fallback" if with_rankings else "fetch_failed")
+    assert [r.champion for r in result.recommendations] == (["애니"] if with_rankings else [])
 
 
 def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
@@ -463,7 +469,7 @@ def test_label_mapping_formats_metadata_but_returns_plain_names() -> None:
     label = format_recommendation_label(recommendations[0])
     labels, label_to_name = build_label_name_map(recommendations)
 
-    assert label == "퀸 (1티어, 42.8%, score 85.9)"
+    assert label == "퀸 (1티어, 내 픽 42.8%, 376게임, score 68.4)"
     assert labels[0] == label
     assert label_to_name[label] == "퀸"
 

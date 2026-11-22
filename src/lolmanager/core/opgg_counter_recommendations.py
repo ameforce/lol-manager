@@ -19,6 +19,7 @@ DEFAULT_MAX_AGE_SEC = 12 * 60 * 60
 DEFAULT_DISPLAY_SEPARATOR_PREFIX = "────────"
 AUTO_BAN_VALUE = "__auto__"
 AUTO_BAN_LABEL = "자동 추천 (최고 score)"
+MATCHUP_PRIOR_GAMES = 200
 _AUTO_BAN_ALIASES = {
     AUTO_BAN_VALUE.casefold(),
     AUTO_BAN_LABEL.casefold(),
@@ -56,30 +57,39 @@ class RecommendationCacheResult:
 
 def tier_score(tier: object) -> float:
     text = str(tier or "").strip().casefold()
-    if text == "op":
-        return 50
-    if text.startswith("1"):
-        return 50
-    if text.startswith("2"):
-        return 40
-    if text.startswith("3"):
-        return 30
-    if text.startswith("4"):
-        return 20
-    if text.startswith("5"):
-        return 10
-    return 0
+    return {"op": 50, "1": 45, "2": 40, "3": 30, "4": 20, "5": 10}.get(text.removesuffix("티어"), 0)
 
 
 def candidate_winrate_from_pick_winrate(pick_winrate: float) -> float:
     return round(100.0 - float(pick_winrate), 2)
 
 
-def matchup_winrate_score(matchup_winrate: Optional[float]) -> float:
-    if matchup_winrate is None:
+def matchup_winrate_score(matchup_winrate: Optional[float], games: Optional[int] = None) -> float:
+    if matchup_winrate is None or not 0 <= matchup_winrate <= 100 or not games or games < 0:
         return 0
-    raw = (50.0 - float(matchup_winrate)) * 5.0
+    raw = (50.0 - matchup_winrate) * 5.0 * games / (games + MATCHUP_PRIOR_GAMES)
     return round(max(0.0, min(50.0, raw)), 1)
+
+
+def _matchup_fields(raw_winrate: object, raw_games: object) -> tuple[Optional[float], Optional[int]]:
+    try:
+        winrate = float(raw_winrate) if raw_winrate is not None else None
+        if winrate is not None and (isinstance(raw_winrate, bool) or not 0 <= winrate <= 100):
+            winrate = None
+    except (TypeError, ValueError, OverflowError):
+        winrate = None
+    games = raw_games if type(raw_games) is int and raw_games > 0 else None
+    return winrate, games
+
+
+def _counter_sort_key(recommendation: CounterRecommendation) -> tuple[float, float, int, int, str]:
+    return (
+        -recommendation.total_score,
+        -recommendation.matchup_score,
+        -(recommendation.games or 0),
+        recommendation.source_order,
+        recommendation.champion,
+    )
 
 
 def is_auto_ban_value(value: object) -> bool:
@@ -108,9 +118,12 @@ def display_value_to_champion_name(
 
     dot = text.find(". ")
     if dot > 0 and text[:dot].strip().isdigit():
-        return text[dot + 2 :].strip()
+        text = text[dot + 2 :].strip()
 
-    match = re.match(r"^(?P<name>.+?)\s+\([^()]*\bscore\s+[-+]?\d+(?:\.\d+)?\)$", text)
+    match = re.fullmatch(
+        r"(?P<name>.+?)\s+\((?:OP|[1-5]티어|[^()]*\bscore\s+[-+]?\d+(?:\.\d+)?)\)",
+        text,
+    )
     if match:
         return match.group("name").strip()
     return text
@@ -167,7 +180,7 @@ def build_recommendations(
 ) -> list[CounterRecommendation]:
     ranked_by_name = _ranked_entry_map(ranked_entries)
     recommendations: list[CounterRecommendation] = []
-    seen: set[str] = set()
+    seen = {normalize_name(configured_pick)}
 
     for fallback_order, matchup in enumerate(matchups):
         champion = str(getattr(matchup, "champion", "") or "").strip()
@@ -181,13 +194,9 @@ def build_recommendations(
         seen.add(key)
 
         tier, ranked_href = ranked_by_name.get(key, ("unknown", None))
-        pick_winrate = getattr(matchup, "pick_winrate", None)
-        if pick_winrate is None:
-            matchup_winrate = None
-        else:
-            matchup_winrate = round(float(pick_winrate), 2)
+        pick_winrate, games = _matchup_fields(getattr(matchup, "pick_winrate", None), getattr(matchup, "games", None))
         tier_points = tier_score(tier)
-        matchup_points = matchup_winrate_score(matchup_winrate)
+        matchup_points = matchup_winrate_score(pick_winrate, games)
         total_points = round(tier_points + matchup_points, 1)
 
         recommendations.append(
@@ -196,31 +205,20 @@ def build_recommendations(
                 configured_pick=str(configured_pick or "").strip(),
                 champion=champion,
                 tier=tier,
-                matchup_winrate=matchup_winrate,
-                pick_winrate=float(pick_winrate) if pick_winrate is not None else None,
+                matchup_winrate=pick_winrate,
+                pick_winrate=pick_winrate,
                 tier_score_value=tier_points,
                 matchup_score=matchup_points,
                 total_score=total_points,
-                source_order=int(
-                    getattr(matchup, "source_order", fallback_order) or fallback_order
-                ),
-                games=getattr(matchup, "games", None),
+                source_order=fallback_order,
+                games=games,
                 href=getattr(matchup, "href", None) or ranked_href,
                 source_url=source_url or getattr(matchup, "source_url", None),
                 raw_text=str(getattr(matchup, "raw_text", "") or ""),
             )
         )
 
-    return sorted(
-        recommendations,
-        key=lambda r: (
-            -r.total_score,
-            -r.tier_score_value,
-            r.matchup_winrate if r.matchup_winrate is not None else 101.0,
-            r.source_order,
-            r.champion,
-        ),
-    )
+    return sorted(recommendations, key=_counter_sort_key)
 
 
 def build_role_rank_fallback_recommendations(
@@ -286,10 +284,9 @@ def format_recommendation_label(recommendation: CounterRecommendation) -> str:
             f"({tier}, 포지션 순위 기반, 상성 정보 없음, "
             f"score {recommendation.total_score:.1f})"
         )
-    if recommendation.matchup_winrate is None:
-        winrate = "-"
-    else:
-        winrate = f"{recommendation.matchup_winrate:.1f}%"
+    winrate = "상성 정보 없음" if recommendation.matchup_winrate is None else f"내 픽 {recommendation.matchup_winrate:.1f}%"
+    if recommendation.games is not None:
+        winrate += f", {recommendation.games:,}게임"
     return (
         f"{recommendation.champion} "
         f"({tier}, {winrate}, score {recommendation.total_score:.1f})"
@@ -371,22 +368,22 @@ def _recommendation_from_dict(obj: object) -> Optional[CounterRecommendation]:
     if not is_plausible_champion_name(champion):
         return None
     try:
+        tier = str(obj.get("tier") or "unknown").strip() or "unknown"
+        tier_points = tier_score(tier)
+        winrate, games = _matchup_fields(obj.get("pick_winrate", obj.get("matchup_winrate")), obj.get("games"))
+        matchup_points = matchup_winrate_score(winrate, games)
         return CounterRecommendation(
             role=str(obj.get("role") or "").strip(),
             configured_pick=str(obj.get("configured_pick") or "").strip(),
             champion=champion,
-            tier=str(obj.get("tier") or "unknown").strip() or "unknown",
-            matchup_winrate=float(obj["matchup_winrate"])
-            if obj.get("matchup_winrate") is not None
-            else None,
-            pick_winrate=float(obj["pick_winrate"])
-            if obj.get("pick_winrate") is not None
-            else None,
-            tier_score_value=float(obj.get("tier_score_value") or 0),
-            matchup_score=float(obj.get("matchup_score") or 0),
-            total_score=float(obj.get("total_score") or 0),
+            tier=tier,
+            matchup_winrate=winrate,
+            pick_winrate=winrate,
+            tier_score_value=tier_points,
+            matchup_score=matchup_points,
+            total_score=round(tier_points + matchup_points, 1),
             source_order=int(obj.get("source_order") or 0),
-            games=int(obj["games"]) if obj.get("games") is not None else None,
+            games=games,
             href=str(obj.get("href") or "").strip() or None,
             source_url=str(obj.get("source_url") or "").strip() or None,
             raw_text=str(obj.get("raw_text") or ""),
@@ -438,6 +435,7 @@ def load_recommendation_cache(
     configured_pick: str,
     max_age_sec: float = DEFAULT_MAX_AGE_SEC,
     now: Optional[float] = None,
+    excluded_champions: Iterable[object] = (),
 ) -> RecommendationCacheResult:
     payload = _read_cache_payload(path)
     if payload is None:
@@ -474,7 +472,9 @@ def load_recommendation_cache(
             <= float(max_age_sec)
             else "cache_stale"
         )
-        return RecommendationCacheResult(status, recommendations, float(fetched_at))
+        excluded = {normalize_name(name) for name in (configured_pick, *excluded_champions)}
+        usable = tuple(r for r in sorted(recommendations, key=_counter_sort_key) if normalize_name(r.champion) not in excluded)
+        return RecommendationCacheResult(status, usable, float(fetched_at))
 
     return RecommendationCacheResult("cache_miss", tuple(), None)
 
@@ -500,6 +500,7 @@ def get_counter_recommendations(
         configured_pick=configured_pick,
         max_age_sec=max_age_sec,
         now=now,
+        excluded_champions=excluded_champions,
     )
 
     def cached_for_current_exclusions() -> RecommendationCacheResult:
@@ -591,7 +592,9 @@ def get_counter_recommendations(
             ranked_entries=ranked_entries,
             source_url=str(detail_href),
         )
-        if not recommendations:
+        excluded = {normalize_name(name) for name in excluded_champions}
+        usable = [r for r in recommendations if normalize_name(r.champion) not in excluded]
+        if not usable:
             if cached.status == "cache_stale" and cached.recommendations:
                 stale = cached_for_current_exclusions()
                 if stale.recommendations:
@@ -628,10 +631,24 @@ def get_counter_recommendations(
             recommendations=recommendations,
             fetched_at_unix=fetched_at,
         )
-        return RecommendationCacheResult("opgg", tuple(recommendations), fetched_at)
+        return RecommendationCacheResult("opgg", tuple(usable), fetched_at)
     except Exception:
         if cached.status == "cache_stale" and cached.recommendations:
             stale = cached_for_current_exclusions()
             if stale.recommendations:
                 return stale
+        fallback = build_role_rank_fallback_recommendations(
+            role=role, configured_pick=configured_pick, ranked_entries=ranked_entries,
+            excluded_champions=excluded_champions, limit=limit,
+        )
+        if fallback:
+            fetched_at = time.time() if now is None else float(now)
+            try:
+                save_recommendation_cache(
+                    cache_path, role=role, configured_pick=configured_pick,
+                    recommendations=fallback, fetched_at_unix=fetched_at,
+                )
+            except OSError:
+                pass
+            return RecommendationCacheResult("ranked_fallback", tuple(fallback), fetched_at)
         return RecommendationCacheResult("fetch_failed", tuple(), None)

@@ -17,6 +17,19 @@ _TIER_DISPLAY_ORDER: Final[dict[str, int]] = {
 }
 
 
+def champion_tier_display(name: str, tier: str) -> str:
+    return f"{name} ({tier})" if name and tier in _TIER_DISPLAY_ORDER else name
+
+
+def champion_rank_keys(
+    ranked_entries: Iterable[tuple[str, str, str]],
+) -> dict[str, tuple[int, int]]:
+    return {
+        normalize_name(name): (_TIER_DISPLAY_ORDER.get(tier, len(_TIER_DISPLAY_ORDER)), rank)
+        for rank, (name, tier, _href) in enumerate(ranked_entries)
+    }
+
+
 def build_champion_candidate_values(
     *,
     ranked_entries: Iterable[tuple[str, str, str]],
@@ -54,7 +67,7 @@ def build_champion_candidate_values(
     ):
         values.append(f"{DISPLAY_SEPARATOR_PREFIX} {tier} {DISPLAY_SEPARATOR_PREFIX}")
         for champion_name in ranked_by_tier[tier]:
-            values.append(f"{rank:>3}. {champion_name}")
+            values.append(f"{rank:>3}. {champion_tier_display(champion_name, tier)}")
             rank += 1
 
     tail = [
