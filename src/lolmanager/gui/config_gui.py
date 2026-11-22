@@ -14,6 +14,7 @@ from lolmanager.core.opgg_aram_list import default_aram_cache_path, get_aram_cha
 from lolmanager.core.opgg_champion_list import (
     build_normalized_index,
     default_cache_path,
+    find_champion_detail_href,
     get_champion_dataset,
     load_champion_list_cache,
     normalize_name,
@@ -299,7 +300,6 @@ def run_config_gui(
     role_widgets: Dict[str, _RoleWidgets] = {}
 
     role_ranked_entries: Dict[str, List[Tuple[str, str, str]]] = {}
-    role_href_index: Dict[str, Dict[str, str]] = {}
     role_tier_index: Dict[str, Dict[str, str]] = {}
     counter_cache: Dict[Tuple[str, str, Tuple[str, ...]], BanCandidateValues] = {}
     ban_label_to_name: Dict[str, str] = {}
@@ -624,13 +624,11 @@ def run_config_gui(
         by_position: Dict[str, List[Tuple[str, str, str]]], source: str
     ) -> None:
         role_ranked_entries.clear()
-        role_href_index.clear()
         role_tier_index.clear()
         for role, entries in (by_position or {}).items():
             if not isinstance(role, str) or not entries:
                 continue
             ranked: List[Tuple[str, str, str]] = []
-            href_map: Dict[str, str] = {}
             for name, tier_label, href in entries:
                 n = str(name or "").strip()
                 t = str(tier_label or "").strip() or "unknown"
@@ -638,13 +636,9 @@ def run_config_gui(
                 if not n:
                     continue
                 ranked.append((n, t, h))
-                if h:
-                    href_map[normalize_name(n)] = h
             if ranked:
                 role_ranked_entries[role] = ranked
                 role_tier_index[role] = {normalize_name(name): tier for name, tier, _href in ranked}
-            if href_map:
-                role_href_index[role] = href_map
 
         for role in ROLE_ORDER:
             rv = role_vars[role]
@@ -718,11 +712,9 @@ def run_config_gui(
         threading.Thread(target=_worker, daemon=True).start()
 
     def _resolve_opgg_href(role: str, champion_name: str) -> Optional[str]:
-        href_map = role_href_index.get(role)
-        if href_map:
-            href = href_map.get(normalize_name(champion_name))
-            if href:
-                return href
+        href = find_champion_detail_href(role, champion_name, role_ranked_entries)
+        if href:
+            return href
 
         try:
             from lolmanager.core.champion_fetcher import fetch_champion_slug

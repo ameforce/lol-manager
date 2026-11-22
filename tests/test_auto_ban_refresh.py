@@ -290,6 +290,33 @@ def test_refresh_coordinator_treats_missing_href_as_retryable_failure(
     assert scheduled_ms == [0, AUTO_BAN_REFRESH_RETRY_MS]
 
 
+def test_refresh_resolves_a_pick_absent_from_its_position_ranking(tmp_path: Path) -> None:
+    config_path = tmp_path / "champion_config.json"
+    _write_config(config_path, {"top": {"champion": "베인", "ban": AUTO_BAN_VALUE}})
+    top_entries = [("말파이트", "1티어", "/ko/lol/champions/malphite/build/top")]
+    requested = []
+
+    def capture_request(_path, **kwargs):
+        requested.append((kwargs["detail_href"], kwargs["ranked_entries"]))
+        return RecommendationCacheResult("no_candidates", (), None)
+
+    coordinator = AutoBanRefreshCoordinator(
+        config_path=config_path,
+        schedule_after_ms=lambda delay, callback: callback() if delay == 0 else None,
+        run_background=lambda callback: callback(),
+        on_updated=lambda: None,
+        get_champion_dataset=lambda _path, **_kwargs: (
+            ["베인", "말파이트"],
+            {"top": top_entries, "adc": [("베인", "3티어", "/ko/lol/champions/vayne/build/adc")]},
+            "opgg",
+        ),
+        get_counter_recommendations=capture_request,
+        fetch_champion_slug=None,
+    )
+    coordinator.start()
+    assert requested == [("/ko/lol/champions/vayne/build/top", top_entries)]
+
+
 def test_refresh_coordinator_accepts_role_rank_fallback_without_detail_href(
     tmp_path: Path,
 ) -> None:

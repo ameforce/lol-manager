@@ -12,6 +12,7 @@ from lolmanager.core.champion_config import ChampionConfig
 from lolmanager.core.champion_fetcher import fetch_champion_slug
 from lolmanager.core.opgg_champion_list import (
     default_cache_path as default_champion_cache_path,
+    find_champion_detail_href,
     get_champion_dataset,
 )
 from lolmanager.core.opgg_counter_recommendations import (
@@ -138,17 +139,6 @@ def _ranked_entries_for_role(
         if name:
             ranked.append((name, tier, href))
     return ranked
-
-
-def _href_for_target(
-    ranked_entries: Iterable[tuple[str, str, str]],
-    target: AutoBanRefreshTarget,
-) -> Optional[str]:
-    target_key = normalize_name(target.champion_name)
-    for name, _tier, href in ranked_entries:
-        if normalize_name(name) == target_key and href:
-            return href
-    return None
 
 
 class AutoBanRefreshCoordinator:
@@ -309,8 +299,8 @@ class AutoBanRefreshCoordinator:
 
     def _refresh_target(self, target: AutoBanRefreshTarget) -> bool:
         by_position = self._get_ranked_dataset()
-        ranked_entries = _ranked_entries_for_role(by_position, target.role)
-        detail_href = _href_for_target(ranked_entries, target)
+        ranked_entries = by_position.get(target.role, [])
+        detail_href = find_champion_detail_href(target.role, target.champion_name, by_position)
         if not detail_href and self._fetch_champion_slug is not None:
             detail_href = self._fetch_champion_slug(target.role, target.champion_name)
         result = self._get_counter_recommendations(
@@ -341,14 +331,10 @@ class AutoBanRefreshCoordinator:
             )
             if isinstance(by_position, dict) and by_position:
                 normalized = {
-                    str(role): list(entries)
-                    for role, entries in by_position.items()
-                    if isinstance(role, str) and isinstance(entries, (list, tuple))
+                    role: _ranked_entries_for_role(by_position, role)
+                    for role in by_position if isinstance(role, str)
                 }
-                if any(
-                    _ranked_entries_for_role(normalized, role)
-                    for role in normalized
-                ):
+                if any(normalized.values()):
                     self._ranked_dataset_cache = (
                         time.monotonic(),
                         DEFAULT_MAX_AGE_SEC,
