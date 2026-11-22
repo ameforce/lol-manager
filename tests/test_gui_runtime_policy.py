@@ -90,6 +90,15 @@ class _LogWindow:
     def state(self) -> str:
         return "iconic" if self.iconic else "normal"
 
+    def winfo_exists(self) -> bool:
+        return True
+
+    def winfo_viewable(self) -> bool:
+        return not self.iconic
+
+    def winfo_id(self) -> int:
+        return 0
+
     def iconify(self) -> None:
         self.iconic = True
         self.iconify_calls += 1
@@ -113,6 +122,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui.proc = None
         gui.root = _Root()
         gui._log_window = _LogWindow()
+        gui._auto_hidden_windows = []
         gui._external_sync_q = queue.Queue(maxsize=1)
         gui._external_sync_last = None
         gui._last_confirmed_league_running = None
@@ -143,6 +153,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         minimized: bool = False,
         league_running: bool | None = True,
         league_foreground: bool = False,
+        occluded: bool = False,
     ) -> _ExternalSyncSnapshot:
         return _ExternalSyncSnapshot(
             config_mtime_ns=0,
@@ -151,6 +162,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             minimized=minimized,
             league_running=league_running,
             league_foreground=league_foreground,
+            occluded=occluded,
         )
 
     def test_external_sync_uses_slower_delay_in_game(self) -> None:
@@ -522,10 +534,11 @@ class GuiRuntimePolicyTests(unittest.TestCase):
                 "lolmanager.gui.app_gui.is_game_client_active", return_value=True
             ),
             mock.patch(
-                "lolmanager.gui.app_gui.find_league_window_rect", return_value=rect
+                "lolmanager.gui.app_gui.find_league_window",
+                return_value=mock.Mock(rect=rect, minimized=False, visible=True, hwnd=1),
             ),
             mock.patch(
-                "lolmanager.gui.app_gui.is_rect_minimized", return_value=False
+                "lolmanager.gui.app_gui.is_league_window_occluded", return_value=False
             ),
             mock.patch(
                 "lolmanager.gui.app_gui.is_league_client_foreground",
@@ -587,7 +600,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(gui.root.iconify_calls, 0)
         self.assertEqual(gui._log_window.iconify_calls, 0)
 
-    def test_visible_client_hides_manager_when_another_app_has_focus(self) -> None:
+    def test_client_occlusion_hides_manager_and_exposure_restores_it_without_focus(self) -> None:
         gui = self._make_windowing_gui()
         rect = (10, 20, 1290, 740)
         gui._external_sync_q.put(
@@ -601,28 +614,32 @@ class GuiRuntimePolicyTests(unittest.TestCase):
         gui._sync_external_state()
 
         self.assertEqual(gui.client_visible_var.value, "Visible")
-        self.assertEqual(gui.root.iconify_calls, 1)
-        self.assertEqual(gui._log_window.iconify_calls, 1)
-        self.assertTrue(gui._auto_iconified)
+        self.assertEqual(gui.root.iconify_calls, 0)
+        self.assertEqual(gui._log_window.iconify_calls, 0)
+        self.assertFalse(gui._auto_iconified)
         gui._show_root_noactivate.assert_not_called()
-        gui._snap_to_client.assert_not_called()
+        gui._snap_to_client.assert_called_once_with(rect)
+        gui._snap_to_client.reset_mock()
 
         gui._external_sync_q.put(
             self._snapshot(
                 in_game=False,
                 rect=rect,
                 league_foreground=False,
+                occluded=True,
             )
         )
         gui._sync_external_state()
+        self.assertEqual(gui.client_visible_var.value, "Hidden")
         self.assertEqual(gui.root.iconify_calls, 1)
+        self.assertEqual(gui._log_window.iconify_calls, 1)
         gui._show_root_noactivate.assert_not_called()
 
         gui._external_sync_q.put(
             self._snapshot(
                 in_game=False,
                 rect=rect,
-                league_foreground=True,
+                league_foreground=False,
             )
         )
         gui._sync_external_state()
@@ -687,6 +704,7 @@ class GuiRuntimePolicyTests(unittest.TestCase):
             in_game=False,
             rect=(10, 20, 1290, 740),
             league_foreground=False,
+            occluded=True,
         )
         gui._external_sync_q.put(snapshot)
 

@@ -55,7 +55,7 @@ def test_cli_ban_prompt_displays_recommendation_labels_and_returns_plain_name(
 
     out = capsys.readouterr().out
     assert selected == "퀸"
-    assert "퀸 (1티어, 42.8%, score 85.9)" in out
+    assert "퀸 (1티어, 내 픽 42.8%, 376게임, score 68.4)" in out
 
 
 def test_cli_ban_prompt_uses_transparent_role_rank_fallback_when_counter_list_is_empty(
@@ -177,7 +177,7 @@ def test_auto_ban_label_helper_uses_current_top_recommendation_detail() -> None:
         ]
     )
 
-    assert label == "자동 추천 (현재 최고: 퀸, 1티어, 42.8%, score 85.9)"
+    assert label == "자동 추천 (현재 최고: 퀸, 1티어, 내 픽 42.8%, score 85.9)"
     assert build_auto_ban_label_from_recommendations([]) == AUTO_BAN_LABEL
 
 
@@ -274,9 +274,9 @@ def test_role_setting_data_displays_cached_auto_ban_recommendation_details(
         now=1000.0,
     )
 
-    assert data["ban"] == "자동 추천 (현재 최고: 퀸, 1티어, 42.8%, score 85.9)"
+    assert data["ban"] == "자동 추천 (현재 최고: 퀸, 1티어, 내 픽 42.8%, score 45.0)"
     assert data["reserves"] == [
-        ("오리아나", "자동 추천 (현재 최고: 제라스, 1티어, 48.9%, score 55.5)"),
+        ("오리아나", "자동 추천 (현재 최고: 제라스, 1티어, 내 픽 48.9%, score 45.0)"),
         ("아리", "제드"),
     ]
 

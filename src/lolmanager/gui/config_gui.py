@@ -4,6 +4,7 @@ import ctypes
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import threading
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ from lolmanager.core.opgg_counter_recommendations import (
 from lolmanager.gui.champion_candidate_values import (
     DISPLAY_SEPARATOR_PREFIX,
     build_champion_candidate_values,
+    champion_tier_display,
 )
 from lolmanager.gui.log_view_model import ROLE_LABEL_KO
 from lolmanager.platform.paths import champion_config_path, resource_path
@@ -205,7 +207,9 @@ def _normalize_reserves(
     return out
 
 
-def run_config_gui(config_path: Optional[Path] = None) -> None:
+def run_config_gui(
+    config_path: Optional[Path] = None, *, parent: Optional["tk.Tk"] = None
+) -> Optional["tk.Toplevel"]:
     try:
         import tkinter as tk
         from tkinter import messagebox, ttk
@@ -221,8 +225,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     try:
         config = ChampionConfig(path=selected_config_path)
     except ChampionConfigError as exc:
-        error_root = tk.Tk()
-        error_root.withdraw()
+        error_root = parent if parent is not None else tk.Tk()
+        if parent is None:
+            error_root.withdraw()
         try:
             messagebox.showerror(
                 "설정 파일 오류",
@@ -230,22 +235,22 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 parent=error_root,
             )
         finally:
-            error_root.destroy()
+            if parent is None:
+                error_root.destroy()
         return
     counter_cache_path = default_counter_cache_path(config.path.resolve())
 
     _set_app_user_model_id()
-    root = tk.Tk()
+    root = tk.Toplevel(parent) if parent is not None else tk.Tk()
     root.title("LOLManager 설정")
-    root.minsize(720, 480)
+    root.minsize(600, 450)
 
     try:
         family = "맑은 고딕"
-        tkfont.nametofont("TkDefaultFont").configure(family=family, size=10)
-        tkfont.nametofont("TkTextFont").configure(family=family, size=10)
-        tkfont.nametofont("TkHeadingFont").configure(
-            family=family, size=10, weight="bold"
-        )
+        if parent is None:
+            tkfont.nametofont("TkDefaultFont").configure(family=family, size=10)
+            tkfont.nametofont("TkTextFont").configure(family=family, size=10)
+            tkfont.nametofont("TkHeadingFont").configure(family=family, size=10, weight="bold")
     except Exception:
         pass
     try:
@@ -258,7 +263,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     try:
         from lolmanager.gui.ui_theme import apply_modern_theme
 
-        apply_modern_theme(root)
+        if parent is None:
+            apply_modern_theme(root)
     except Exception:
         pass
 
@@ -271,7 +277,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             "설정 변경은 여기서만 수행하세요.\n"
             "변경은 자동 저장되며, 실제 적용은 메인 앱(LOLManager)에서 Stop→Start 또는 재실행 후 반영됩니다."
         ),
-        wraplength=900,
+        wraplength=560,
     ).pack(side=tk.TOP, anchor=tk.W)
 
     path_row = ttk.Frame(top)
@@ -294,7 +300,8 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
     role_ranked_entries: Dict[str, List[Tuple[str, str, str]]] = {}
     role_href_index: Dict[str, Dict[str, str]] = {}
-    counter_cache: Dict[Tuple[str, str], BanCandidateValues] = {}
+    role_tier_index: Dict[str, Dict[str, str]] = {}
+    counter_cache: Dict[Tuple[str, str, Tuple[str, ...]], BanCandidateValues] = {}
     ban_label_to_name: Dict[str, str] = {}
     _ban_update_after: Dict[str, str] = {}
     _ban_update_token: Dict[str, int] = {}
@@ -302,6 +309,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     _autosave_suspended = False
     tab_to_role: Dict[str, str] = {}
     _last_valid_raw: Dict[str, str] = {}
+    background_results: SimpleQueue[Callable[[], None]] = SimpleQueue()
+    results_after: Optional[str] = None
+    docking_after: Optional[str] = None
 
     _SEP_PREFIX = DISPLAY_SEPARATOR_PREFIX
 
@@ -323,6 +333,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             return ""
         return AUTO_BAN_LABEL if is_auto_ban_value(raw) else raw
 
+    def _ranked_pick_display(role: str, name: str) -> str:
+        return champion_tier_display(name, role_tier_index.get(role, {}).get(normalize_name(name), ""))
+
     def _refine_selected_to_name(field_key: str, var: "tk.StringVar") -> None:
         raw = str(var.get() or "").strip()
         if not raw:
@@ -343,9 +356,10 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         canonical = (
             champion_index.get(normalize_name(name), name) if champion_index else name
         )
-        _last_valid_raw[field_key] = canonical
-        if canonical != raw:
-            var.set(canonical)
+        display = _ranked_pick_display(field_key.split(":", 1)[0], canonical)
+        _last_valid_raw[field_key] = display
+        if display != raw:
+            var.set(display)
 
     def _remember_or_restore_display_value(
         field_key: str, var: "tk.StringVar"
@@ -566,7 +580,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         while cleaned and _is_separator_value(cleaned[-1]):
             cleaned.pop()
 
-        if keep_raw and keep_raw not in cleaned:
+        if keep_raw and not any(normalize_name(_display_to_champion_name(v)) == keep_key for v in cleaned):
             cleaned.insert(0, keep_raw)
         return cleaned
 
@@ -611,6 +625,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     ) -> None:
         role_ranked_entries.clear()
         role_href_index.clear()
+        role_tier_index.clear()
         for role, entries in (by_position or {}).items():
             if not isinstance(role, str) or not entries:
                 continue
@@ -627,10 +642,19 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     href_map[normalize_name(n)] = h
             if ranked:
                 role_ranked_entries[role] = ranked
+                role_tier_index[role] = {normalize_name(name): tier for name, tier, _href in ranked}
             if href_map:
                 role_href_index[role] = href_map
 
         for role in ROLE_ORDER:
+            rv = role_vars[role]
+            for field, var in (("primary", rv.champion), ("reserve1", rv.reserve1_champion),
+                               ("reserve2", rv.reserve2_champion)):
+                raw = var.get()
+                display = _ranked_pick_display(role, _display_to_champion_name(raw))
+                if raw != display and display:
+                    _set_var_silently(var, display)
+                    _last_valid_raw[f"{role}:{field}"] = display
             _apply_ranked_values_for_role(role)
 
         if by_position:
@@ -664,10 +688,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         def _aram_worker() -> None:
             entries, source = get_aram_champion_entries(default_aram_cache_path(cfg_path))
-            try:
-                root.after(0, lambda: aram_panel.set_ranked_entries(entries, source))
-            except (RuntimeError, tk.TclError):
-                pass  # The settings window may have closed during the request.
+            background_results.put(lambda: aram_panel.set_ranked_entries(entries, source))
 
         threading.Thread(target=_aram_worker, daemon=True).start()
 
@@ -688,10 +709,10 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 )
             except Exception as exc:
                 msg = f"챔피언 목록 로드 실패: {exc}"
-                root.after(0, lambda: status_var.set(msg))
+                background_results.put(lambda: status_var.set(msg))
                 return
-            root.after(0, lambda: _set_champion_list(names, source))
-            root.after(0, lambda: _set_role_dataset(by_position, source))
+            background_results.put(lambda: _set_champion_list(names, source))
+            background_results.put(lambda: _set_role_dataset(by_position, source))
 
         status_var.set("챔피언 목록 불러오는 중...")
         threading.Thread(target=_worker, daemon=True).start()
@@ -711,6 +732,14 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             return fetch_champion_slug(role, champion_name)
         except Exception:
             return None
+
+    def _role_pick_keys(role: str) -> Tuple[str, ...]:
+        rv = role_vars[role]
+        picks = {
+            normalize_name(_display_to_champion_name(var.get()))
+            for var in (rv.champion, rv.reserve1_champion, rv.reserve2_champion)
+        }
+        return tuple(sorted(picks - {""}))
 
     def _build_recommendation_values(
         role: str,
@@ -736,6 +765,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                 role=role,
                 configured_pick=champion_name,
                 max_age_sec=COUNTER_RECOMMENDATION_MAX_AGE_SEC,
+                excluded_champions=excluded_champions,
             )
 
         recommendations = result.recommendations
@@ -877,6 +907,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         _ban_update_token[field_key] = token
 
         def _kick() -> None:
+            _ban_update_after.pop(field_key, None)
             champ_raw = str(champion_var.get() or "").strip()
             if _is_separator_value(champ_raw):
                 prev_raw = _last_valid_raw.get(field_key, "")
@@ -903,24 +934,12 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
             champ = canon if canon else champ_name_raw
 
-            rv = role_vars.get(role)
-            excluded_champions: list[str] = [champ]
-            if rv is not None:
-                for own_pick_var in (
-                    rv.champion,
-                    rv.reserve1_champion,
-                    rv.reserve2_champion,
-                ):
-                    own_pick = _display_to_champion_name(
-                        str(own_pick_var.get() or "").strip()
-                    )
-                    if own_pick:
-                        excluded_champions.append(own_pick)
+            excluded_champions = _role_pick_keys(role)
 
             if canon and canon != champ_name_raw and champ_raw == champ_name_raw:
                 champion_var.set(canon)
 
-            cache_key = (role, normalize_name(champ))
+            cache_key = (role, normalize_name(champ), excluded_champions)
             cached = counter_cache.get(cache_key)
             if (
                 cached is not None
@@ -949,16 +968,16 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     role,
                     champ,
                     allow_refresh=allow_refresh,
-                    excluded_champions=tuple(excluded_champions),
+                    excluded_champions=excluded_champions,
                 )
-                if should_reuse_ban_candidate_values(values):
-                    counter_cache[cache_key] = values
-                else:
-                    counter_cache.pop(cache_key, None)
                 labels, label_to_name, source = values
-                root.after(
-                    0,
-                    lambda: _set_ban_candidates(
+
+                def apply() -> None:
+                    if should_reuse_ban_candidate_values(values):
+                        counter_cache[cache_key] = values
+                    else:
+                        counter_cache.pop(cache_key, None)
+                    _set_ban_candidates(
                         field_key=field_key,
                         token=token,
                         role=role,
@@ -968,8 +987,9 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                         labels=labels,
                         label_to_name=label_to_name,
                         source=source,
-                    ),
-                )
+                    )
+
+                background_results.put(apply)
 
             threading.Thread(target=_worker, daemon=True).start()
 
@@ -989,7 +1009,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
 
         canon = champion_index.get(normalize_name(champ)) if champion_index else None
         champ_name = canon if canon else champ
-        cache_key = (role, normalize_name(champ_name))
+        cache_key = (role, normalize_name(champ_name), _role_pick_keys(role))
         cached = counter_cache.get(cache_key)
         if cached is not None and should_reuse_ban_candidate_values(cached):
             return
@@ -1353,7 +1373,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
             for role in ROLE_ORDER:
                 info = config.get(role) or {}
                 v = role_vars[role]
-                v.champion.set(str(info.get("champion") or "").strip())
+                v.champion.set(_ranked_pick_display(role, str(info.get("champion") or "").strip()))
                 v.ban.set(
                     _display_ban_config_value(str(info.get("ban") or "").strip())
                 )
@@ -1366,7 +1386,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     v.pick_y.set("")
                 reserves = config.get_reserve_picks(role)
                 v.reserve1_champion.set(
-                    str(reserves[0][0]).strip() if len(reserves) >= 1 else ""
+                    _ranked_pick_display(role, str(reserves[0][0]).strip()) if len(reserves) >= 1 else ""
                 )
                 v.reserve1_ban.set(
                     _display_ban_config_value(str(reserves[0][1]).strip())
@@ -1374,7 +1394,7 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
                     else ""
                 )
                 v.reserve2_champion.set(
-                    str(reserves[1][0]).strip() if len(reserves) >= 2 else ""
+                    _ranked_pick_display(role, str(reserves[1][0]).strip()) if len(reserves) >= 2 else ""
                 )
                 v.reserve2_ban.set(
                     _display_ban_config_value(str(reserves[1][1]).strip())
@@ -1392,9 +1412,22 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
         lambda _role, _field: _schedule_autosave(),
     )
 
+    def _poll_background_results() -> None:
+        nonlocal results_after
+        results_after = root.after(50, _poll_background_results)
+        while True:
+            try:
+                result = background_results.get_nowait()
+            except Empty:
+                return
+            result()
+
     def _close() -> None:
         if _cancel_pending_autosave():
             _apply_save()
+        for after_id in (results_after, docking_after, *_ban_update_after.values()):
+            if after_id is not None:
+                root.after_cancel(after_id)
         root.destroy()
 
     ttk.Button(btns, text="다시 불러오기", command=_reload).pack(side=tk.LEFT, padx=6)
@@ -1402,8 +1435,28 @@ def run_config_gui(config_path: Optional[Path] = None) -> None:
     root.protocol("WM_DELETE_WINDOW", _close)
 
     _load_champion_list_async()
+    results_after = root.after(50, _poll_background_results)
 
+    if parent is not None:
+        return root
+    if os.name == "nt":
+        from lolmanager.gui.app_gui import dock_config_window
+        from lolmanager.platform.resolution_detector import find_league_window, is_league_window_occluded
+
+        moved_client_hwnd = 0
+
+        def follow_client() -> None:
+            nonlocal moved_client_hwnd, docking_after
+            docking_after = root.after(250, follow_client)
+            client = find_league_window()
+            if client and not is_league_window_occluded(client) and dock_config_window(
+                root, client, can_move_client=moved_client_hwnd != client.hwnd
+            ):
+                moved_client_hwnd = client.hwnd
+
+        docking_after = root.after(250, follow_client)
     root.mainloop()
+    return None
 
 
 if __name__ == "__main__":

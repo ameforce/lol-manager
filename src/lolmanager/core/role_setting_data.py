@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Optional
 
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.champion_names import normalize_name
+from lolmanager.core.opgg_champion_list import default_cache_path, load_champion_list_cache
 from lolmanager.core.opgg_counter_recommendations import (
     AUTO_BAN_LABEL,
     DEFAULT_MAX_AGE_SEC,
@@ -29,6 +31,7 @@ def _display_ban_value(
     counter_cache_path: Path,
     max_age_sec: float,
     now: Optional[float],
+    excluded_champions: tuple[str, ...],
 ) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -45,6 +48,7 @@ def _display_ban_value(
                 configured_pick=champ,
                 max_age_sec=max_age_sec,
                 now=now,
+                excluded_champions=excluded_champions,
             )
         except Exception:
             result = None
@@ -82,6 +86,8 @@ def load_role_setting_data(
         else default_counter_cache_path(config_path)
     )
 
+    reserves = cfg.get_reserve_picks(role_key) if role_key else []
+    excluded = (primary_champ, *(champ for champ, _ban in reserves))
     ban = _display_ban_value(
         info.get("ban"),
         role_key=role_key,
@@ -89,8 +95,8 @@ def load_role_setting_data(
         counter_cache_path=resolved_counter_cache_path,
         max_age_sec=max_age_sec,
         now=now,
+        excluded_champions=excluded,
     )
-    reserves = cfg.get_reserve_picks(role_key) if role_key else []
     reserve_pairs: list[tuple[str, str]] = []
 
     seen_norms: set[str] = set()
@@ -117,6 +123,7 @@ def load_role_setting_data(
                     counter_cache_path=resolved_counter_cache_path,
                     max_age_sec=max_age_sec,
                     now=now,
+                    excluded_champions=excluded,
                 ),
             )
         )
@@ -129,9 +136,14 @@ def load_role_setting_data(
         except Exception:
             coord = None
 
-    return {
+    data: dict[str, object] = {
         "primary": primary_champ,
         "ban": ban,
         "reserves": reserve_pairs,
         "coord": coord,
     }
+    if ranked := load_champion_list_cache(default_cache_path(config_path)):
+        entries = ranked.by_position.get(role_key, ())
+        if entries:
+            data["tiers"] = {normalize_name(name): tier for name, tier, _href in entries}
+    return data

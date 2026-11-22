@@ -1,11 +1,30 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
+
+from bs4 import BeautifulSoup
 
 
 MAX_OPGG_RESPONSE_BYTES = 1_000_000
 MAX_OPGG_CHAMPION_ROWS = 250
 MAX_OPGG_COUNTER_LINK_SCAN = 100
+
+
+def next_page_stream(soup: BeautifulSoup) -> str:
+    decoder = json.JSONDecoder()
+    chunks: list[str] = []
+    for script in soup.select("script:not([src])"):
+        text = script.get_text()
+        for match in re.finditer(r"self\.__next_f\.push\(", text):
+            try:
+                value, _ = decoder.raw_decode(text[match.end():].lstrip())
+            except ValueError:
+                continue
+            if isinstance(value, list) and len(value) == 2 and value[0] == 1 and isinstance(value[1], str):
+                chunks.append(value[1])
+    return "".join(chunks)
 
 
 def _content_length(headers: object) -> int | None:
