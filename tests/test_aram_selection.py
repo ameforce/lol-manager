@@ -249,8 +249,9 @@ def card_session(champion_id=0, bench=()):
 
 def test_modern_aram_picks_the_offered_card_and_preserves_later_manual_change():
     initial = LcuResult(200, card_session())
+    grid = [*GRID, {"id": 60103, "name": "아리", "owned": True}]
     client = client_with(
-        mode(), LcuResult(200, GRID), initial, LcuResult(200, [99, 103]), initial,
+        mode(), LcuResult(200, grid), initial, LcuResult(200, [99, 103]), initial,
         LcuResult(204), LcuResult(200, card_session(103, (99,))),
         LcuResult(200, card_session(22, (99, 103))),
         LcuResult(200, card_session(22, (103,))),
@@ -263,6 +264,38 @@ def test_modern_aram_picks_the_offered_card_and_preserves_later_manual_change():
     for _ in range(2):
         assert client.select_aram_preferred_champion_decision(prefs).reason == "player changed ARAM champion"
     assert writes(client) == [("PATCH", "/lol-champ-select/v1/session/actions/8")]
+
+
+def test_bench_upgrade_uses_the_available_id_when_the_catalog_repeats_a_name(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(entrypoint.time, "monotonic", lambda: clock[0])
+    grid = [
+        {"id": 875, "name": "세트", "owned": True},
+        {"id": 72, "name": "스카너", "owned": True},
+        {"id": 20, "name": "누누와 윌럼프", "owned": True},
+        {"id": 60020, "name": "누누와 윌럼프", "owned": True},
+    ]
+    initial = LcuResult(200, card_session())
+    bench = LcuResult(200, card_session(875, (72, 20)))
+    equivalent_bench = LcuResult(200, card_session(20, (60020, 875)))
+    client = client_with(
+        mode(2400), LcuResult(200, grid), initial, LcuResult(200, [875, 72]), initial,
+        LcuResult(204), LcuResult(200, card_session(875, (72,))),
+        bench, LcuResult(200, [72, 20]), bench, LcuResult(204),
+        equivalent_bench,
+        equivalent_bench, LcuResult(200, [60020, 875]), equivalent_bench,
+    )
+    preferences = ("누누와 윌럼프",)
+    assert client.select_aram_preferred_champion_decision(preferences).value == "세트"
+    clock[0] = 4.0
+    assert client.select_aram_preferred_champion_decision(preferences).value == "누누와 윌럼프"
+    clock[0] = 8.0
+    kept = client.select_aram_preferred_champion_decision(preferences)
+    assert kept.reason == "keep current ARAM champion"
+    assert writes(client) == [
+        ("PATCH", "/lol-champ-select/v1/session/actions/8"),
+        ("POST", "/lol-champ-select/v1/session/bench/swap/20"),
+    ]
 
 
 def test_manual_card_click_during_offer_read_prevents_automation():

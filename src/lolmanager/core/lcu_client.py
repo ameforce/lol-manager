@@ -2062,7 +2062,7 @@ class LcuClient:
             reason = "no ARAM cards offered" if initial_pick else "empty ARAM bench"
             return LcuDecision(LcuOutcome.NO_CURRENT_ACTION, reason=reason)
 
-        name_to_id: dict[str, int] = {}
+        ids_by_name: dict[str, set[int]] = {}
         id_to_name: dict[int, str] = {}
         eligible_ids: set[int] = set()
         for champion in self._aram_catalog or ():
@@ -2072,7 +2072,7 @@ class LcuClient:
             names = [str(champion.get(key) or "").strip() for key in ("name", "displayName", "alias")]
             for name in names:
                 if name:
-                    name_to_id[_normalize_lookup_key(name)] = champion_id
+                    ids_by_name.setdefault(_normalize_lookup_key(name), set()).add(champion_id)
             id_to_name[champion_id] = next((name for name in names if name), str(champion_id))
             if champion.get("disabled") is not True and any(
                 champion.get(key) is True for key in (
@@ -2081,12 +2081,16 @@ class LcuClient:
             ):
                 eligible_ids.add(champion_id)
 
-        preferred_ids = [
-            name_to_id[key] for name in preferred_champions
-            if (key := _normalize_lookup_key(name)) in name_to_id
-        ]
         if not card_mode:
             offered_ids = [champion_id for champion_id in offered_ids if champion_id in eligible_ids]
+        # Catalog variants can share a name. Match the IDs that are actually
+        # offered, and keep the current champion ahead of same-name variants.
+        candidates = [current_id, *offered_ids]
+        preferred_ids: list[int] = []
+        for name in preferred_champions:
+            matching_ids = ids_by_name.get(_normalize_lookup_key(name))
+            if matching_ids:
+                preferred_ids.extend(cid for cid in candidates if cid in matching_ids)
         target_id = (
             choose_aram_initial_champion(preferred_ids, offered_ids) if initial_pick
             else choose_aram_bench_champion(preferred_ids, current_id, offered_ids)
