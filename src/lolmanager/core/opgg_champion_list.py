@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 import requests
@@ -31,6 +32,7 @@ OPGG_CHAMPIONS_BY_POSITION_URLS_KO: Tuple[str, ...] = (
     "https://op.gg/ko/lol/champions?position=adc",
     "https://op.gg/ko/lol/champions?position=support",
 )
+_BUILD_PATH = re.compile(r"/ko/lol/champions/([a-z0-9]+(?:-[a-z0-9]+)*)/build/(?:top|jungle|mid|adc|support)/?")
 
 
 _CACHE_VERSION = 4
@@ -112,6 +114,37 @@ def _href_matches_position(href: str, position: str) -> bool:
     parts = urlsplit(raw)
     path = parts.path if (parts.scheme or parts.netloc) else raw.split("?", 1)[0]
     return path.startswith("/ko/lol/champions/") and f"/build/{position}" in path
+
+
+def find_champion_detail_href(
+    position: str,
+    champion_name: str,
+    by_position: Mapping[str, Iterable[tuple[str, str, str]]],
+) -> Optional[str]:
+    champion_key = normalize_name(champion_name)
+    for name, _tier, href in by_position.get(position, ()):
+        if href and normalize_name(name) == champion_key:
+            return href
+
+    # A position's ranking can omit a champion even when its build page has data.
+    if position not in {"top", "jungle", "mid", "adc", "support"}:
+        return None
+    for other_position, entries in by_position.items():
+        if other_position == position:
+            continue
+        for name, _tier, href in entries:
+            if not href or normalize_name(name) != champion_key:
+                continue
+            try:
+                parts = urlsplit(href)
+            except ValueError:
+                continue
+            if (parts.scheme or parts.netloc) and (parts.scheme, parts.netloc) != ("https", "op.gg"):
+                continue
+            match = _BUILD_PATH.fullmatch(parts.path)
+            if match:
+                return f"/ko/lol/champions/{match[1]}/build/{position}"
+    return None
 
 
 def _anchor_champion_name(anchor: object) -> str:
