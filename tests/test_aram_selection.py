@@ -229,9 +229,49 @@ def test_unusable_first_preference_falls_back_to_next_available_champion(blocked
     assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/99")]
 
 
-def test_unknown_preference_does_not_guess_or_swap():
-    client = client_with(mode(), LcuResult(200, GRID), LcuResult(200, session()))
-    assert client.select_aram_preferred_champion_decision(("없는 챔피언", "럭스")).status == LcuOutcome.CHAMPION_NOT_FOUND
+def test_unknown_preference_does_not_block_known_preference():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, session()),
+        LcuResult(204), LcuResult(200, session(current=99)),
+    )
+    assert client.select_aram_preferred_champion_decision(("없는 챔피언", "럭스")).value == "럭스"
+    assert writes(client) == [("POST", "/lol-champ-select/v1/session/bench/swap/99")]
+
+
+def card_session(champion_id=0, bench=()):
+    return session(
+        current=champion_id, bench=bench, allowSubsetChampionPicks=True, queueId=450,
+        benchEnabled=champion_id > 0, isLegacyChampSelect=False,
+        actions=[[{"id": 8, "actorCellId": 0, "type": "pick", "isInProgress": champion_id == 0,
+                   "completed": champion_id > 0, "championId": champion_id}]],
+    )
+
+
+def test_modern_aram_picks_the_offered_card_and_preserves_later_manual_change():
+    initial = LcuResult(200, card_session())
+    client = client_with(
+        mode(), LcuResult(200, GRID), initial, LcuResult(200, [99, 103]), initial,
+        LcuResult(204), LcuResult(200, card_session(103, (99,))),
+        LcuResult(200, card_session(22, (99, 103))),
+        LcuResult(200, card_session(22, (103,))),
+    )
+    prefs = ("아리", "럭스")
+    assert client.select_aram_preferred_champion_decision(prefs).value == "아리"
+    client.request.assert_any_call("GET", "/lol-lobby-team-builder/champ-select/v1/subset-champion-list")
+    client.request.assert_any_call("PATCH", "/lol-champ-select/v1/session/actions/8",
+                                   json_body={"completed": True, "championId": 103})
+    for _ in range(2):
+        assert client.select_aram_preferred_champion_decision(prefs).reason == "player changed ARAM champion"
+    assert writes(client) == [("PATCH", "/lol-champ-select/v1/session/actions/8")]
+
+
+def test_manual_card_click_during_offer_read_prevents_automation():
+    client = client_with(
+        mode(), LcuResult(200, GRID), LcuResult(200, card_session()), LcuResult(200, [99, 103]),
+        LcuResult(200, card_session(99, (103,))), LcuResult(200, card_session(99, (103,))),
+    )
+    assert client.select_aram_preferred_champion_decision(("아리",)).reason == "ARAM card action changed"
+    assert client.select_aram_preferred_champion_decision(("아리",)).reason == "player changed ARAM champion"
     assert not writes(client)
 
 
@@ -314,7 +354,7 @@ def test_catalog_request_race_rechecks_current_champion_and_bench(changed_sessio
     assert not writes(client)
 
 
-@pytest.mark.parametrize("enabled,expected", [(True, 2), (False, 0)])
+@pytest.mark.parametrize("enabled,expected", [(True, 6), (False, 0)])
 def test_game_start_loop_polls_aram_with_throttle_and_preserves_game_monitor(monkeypatch, enabled, expected):
     now = [0.0]
     monkeypatch.setattr(entrypoint.time, "monotonic", lambda: now[0])
@@ -331,6 +371,7 @@ def test_game_start_loop_polls_aram_with_throttle_and_preserves_game_monitor(mon
     lcu.select_aram_preferred_champion_decision.side_effect = [
         RuntimeError("temporarily disconnected"),
         LcuDecision(LcuOutcome.SUCCESS, value="아리"),
+        *[LcuDecision(LcuOutcome.NO_CURRENT_ACTION)] * 4,
     ]
     result = entrypoint._wait_for_game_start_and_monitor(
         lcu=lcu, tpl_end_next=Path("end"), tpl_end_one_more=Path("more"),

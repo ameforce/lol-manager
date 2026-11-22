@@ -58,14 +58,13 @@ def test_tier_candidates_save_plain_names_without_changing_preference_priority(t
     for action in actions if names_first else reversed(actions):
         action()
     assert panel.champion_combo.cget("values") == (
-        "──────── OP ────────", "  1. 스웨인",
-        "──────── 1티어 ────────", "  2. 럭스",
-        "──────── 3티어 ────────", "  3. 가렌",
+        "──────── OP ────────", "  1. 스웨인 (OP)",
         "──────── 기타 ────────", "아리",
     )
+    assert panel.champions.get(0, "end") == ("가렌 (3티어)", "럭스 (1티어)")
     assert panel.get_preferences() == preferences
     changed.assert_not_called()
-    for value in ("──────── OP ────────", "  2. 럭스", "  1. 스웨인"):
+    for value in ("──────── OP ────────", "  2. 럭스 (1티어)", "  1. 스웨인 (OP)"):
         panel.champion.set(value)
         panel._add()
     assert panel.get_preferences().preferred_champions == ("가렌", "럭스", "스웨인")
@@ -73,6 +72,7 @@ def test_tier_candidates_save_plain_names_without_changing_preference_priority(t
     panel.set_ranked_entries(entries[::-1], "cache_stale")
     assert panel.get_preferences().preferred_champions == ("가렌", "럭스", "스웨인")
     assert "갱신 실패" in panel.tier_status.get()
+    assert panel.champion_combo.cget("values") == ("아리",)
 
 
 def test_tier_failure_keeps_alphabetical_candidates_and_existing_preferences(tk_root):
@@ -82,9 +82,31 @@ def test_tier_failure_keeps_alphabetical_candidates_and_existing_preferences(tk_
     panel = AramSettingsPanel(tk_root, preferences=preferences, on_change=mock.Mock())
     panel.set_champion_names(["아리", "가렌", "럭스"])
     panel.set_ranked_entries([], "unavailable")
-    assert panel.champion_combo.cget("values") == ("가렌", "럭스", "아리")
+    assert panel.champion_combo.cget("values") == ("아리",)
     assert "이름순" in panel.tier_status.get()
     assert panel.get_preferences() == preferences
+
+
+def test_tier_sort_preserves_manually_swapped_slots_after_reload(tk_root):
+    from lolmanager.gui.aram_settings import AramSettingsPanel
+
+    panel = AramSettingsPanel(
+        tk_root, preferences=AramPreferences(True, ("가렌", "럭스", "애쉬", "아리", "제드")),
+        on_change=mock.Mock(),
+    )
+    panel.set_ranked_entries([
+        ("아리", "OP", "/ahri"), ("제드", "1티어", "/zed"), ("가렌", "2티어", "/garen"),
+        ("럭스", "3티어", "/lux"), ("애쉬", "5티어", "/ashe"),
+    ], "opgg")
+    panel.champions.selection_set(2)
+    panel._move(-1)
+    panel.set_preferences(AramPreferences.from_config(panel.get_preferences().as_config()))
+    panel.sort_button.invoke()
+    assert panel.get_preferences().preferred_champions == ("아리", "애쉬", "럭스", "제드", "가렌")
+    assert panel.get_preferences().manually_ranked_champions == ("애쉬", "럭스")
+    panel.champions.selection_set(1)
+    panel._remove()
+    assert "  1. 애쉬 (5티어)" in panel.champion_combo.cget("values")
 
 
 def test_settings_window_persists_aram_edits_on_close_with_ranked_settings_intact(tk_root, tmp_path, monkeypatch):

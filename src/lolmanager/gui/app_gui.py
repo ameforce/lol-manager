@@ -35,6 +35,7 @@ from lolmanager.core.auto_updater import (
 )
 from lolmanager.core.app_version import format_app_version_label, get_app_version
 from lolmanager.core.champion_config import ChampionConfig
+from lolmanager.core.champion_names import normalize_name
 from lolmanager.core.gui_preferences import (
     load_continue_after_game_preference,
     save_continue_after_game_preference,
@@ -42,6 +43,8 @@ from lolmanager.core.gui_preferences import (
 from lolmanager.core.role_setting_data import load_role_setting_data
 from lolmanager.core.runtime_events import RuntimeEvent, parse_runtime_event
 from lolmanager.core.match_timing import format_duration_mmss, load_match_timing_stats
+from lolmanager.core.opgg_rank import monitor_opgg_rank
+from lolmanager.gui.champion_candidate_values import champion_tier_display
 from lolmanager.gui.log_view_model import (
     ROLE_CLEAR_STATES,
     ROLE_LABEL_KO,
@@ -63,10 +66,11 @@ from lolmanager.platform.external_apps import (
     league_client_exe_path,
 )
 from lolmanager.platform.resolution_detector import (
-    find_league_window_rect,
+    LeagueWindow,
+    find_league_window,
     is_game_client_active,
     is_league_client_foreground,
-    is_rect_minimized,
+    is_league_window_occluded,
 )
 from lolmanager.gui.ui_theme import (
     apply_frameless_window,
@@ -230,6 +234,8 @@ try:
     _USER32.GetAncestor.restype = ctypes.c_void_p
     _USER32.GetForegroundWindow.argtypes = []
     _USER32.GetForegroundWindow.restype = ctypes.c_void_p
+    _USER32.IsZoomed.argtypes = [ctypes.c_void_p]
+    _USER32.IsZoomed.restype = ctypes.c_int
     _USER32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
     _USER32.ShowWindow.restype = ctypes.c_int
     _USER32.SetWindowPos.argtypes = [
@@ -285,6 +291,8 @@ class _ExternalSyncSnapshot:
     minimized: bool
     league_running: Optional[bool]
     league_foreground: bool
+    occluded: bool = False
+    client_hwnd: int = 0
 
 
 class _MONITORINFO(ctypes.Structure):
@@ -294,6 +302,12 @@ class _MONITORINFO(ctypes.Structure):
         ("rcWork", _RECT),
         ("dwFlags", ctypes.c_ulong),
     ]
+
+
+_USER32.MonitorFromRect.argtypes = [ctypes.POINTER(_RECT), ctypes.c_uint]
+_USER32.MonitorFromRect.restype = ctypes.c_void_p
+_USER32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+_USER32.GetMonitorInfoW.restype = ctypes.c_int
 
 
 def _virtual_screen() -> _VirtualScreen:
@@ -438,6 +452,95 @@ def _clamp(n: int, lo: int, hi: int) -> int:
     return n
 
 
+def _config_dock_positions(
+    client: tuple[int, int, int, int],
+    size: tuple[int, int],
+    bounds: _VirtualScreen,
+    *,
+    can_move_client: bool,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    left, top, right, bottom = client
+    width, height = size
+    client_width, client_height = right - left, bottom - top
+    config_x = _clamp(left, bounds.left, max(bounds.left, bounds.right - width))
+    config_y = _clamp(top, bounds.top, max(bounds.top, bounds.bottom - height))
+    left_x = max(left, bounds.left + width)
+    right_x = min(left, bounds.right - width - client_width)
+    above_y = max(top, bounds.top + height)
+    below_y = min(top, bounds.bottom - height - client_height)
+
+    options = (
+        ((left_x, top), (left_x - width, config_y), left_x + client_width <= bounds.right),
+        ((right_x, top), (right_x + client_width, config_y), right_x >= bounds.left),
+        ((left, above_y), (config_x, above_y - height), above_y + client_height <= bounds.bottom),
+        ((left, below_y), (config_x, below_y + client_height), below_y >= bounds.top),
+    )
+    for position, dock, _fits in options:
+        if position == (left, top):
+            return position, dock
+    if can_move_client:
+        possible = [(position, dock) for position, dock, fits in options if fits]
+        if possible:
+            return min(possible, key=lambda pair: abs(pair[0][0] - left) + abs(pair[0][1] - top))
+
+    # On a small monitor, use the edge with the most space and keep Config on-screen.
+    _space, dock = max((
+        (left - bounds.left, (left - width, config_y)),
+        (bounds.right - right, (right, config_y)),
+        (top - bounds.top, (config_x, top - height)),
+        (bounds.bottom - bottom, (config_x, bottom)),
+    ), key=lambda item: item[0])
+    return (left, top), (
+        _clamp(dock[0], bounds.left, max(bounds.left, bounds.right - width)),
+        _clamp(dock[1], bounds.top, max(bounds.top, bounds.bottom - height)),
+    )
+
+
+def dock_config_window(
+    window: tk.Misc,
+    client: LeagueWindow,
+    *,
+    can_move_client: bool,
+    manager_hwnd: int = 0,
+) -> bool:
+    if not window.winfo_viewable() or client.minimized or not client.visible:
+        return False
+    hwnd = _top_hwnd(window.winfo_id())
+    frame = _get_hwnd_rect(hwnd)
+    if frame is None or not client.hwnd:
+        return False
+    width, height = frame[2] - frame[0], frame[3] - frame[1]
+    if width <= 0 or height <= 0:
+        return False
+    bounds = _work_area_for_rect(client.rect)
+    client_xy, config_xy = _config_dock_positions(
+        client.rect, (width, height), bounds,
+        can_move_client=can_move_client and not _USER32.IsZoomed(client.hwnd),
+    )
+    moved_client = False
+    if client_xy != client.rect[:2]:
+        moved_client = _move_hwnd_frame_to(client.hwnd, client.rect, *client_xy)
+        if not moved_client:
+            _, config_xy = _config_dock_positions(client.rect, (width, height), bounds, can_move_client=False)
+
+    x, y = config_xy
+    manager = _get_hwnd_rect(manager_hwnd) if manager_hwnd else None
+    client_width = client.rect[2] - client.rect[0]
+    left = client_xy[0] if moved_client else client.rect[0]
+    if (
+        manager and manager[0] < x + width and manager[2] > x
+        and manager[1] < y + height and manager[3] > y
+        and (x + width <= left or x >= left + client_width)
+    ):
+        if manager[3] + height <= bounds.bottom:
+            y = int(manager[3])
+        elif manager[1] - height >= bounds.top:
+            y = int(manager[1]) - height
+    if (x, y) != frame[:2]:
+        _move_hwnd_frame_to(hwnd, frame, x, y)
+    return moved_client
+
+
 def _apply_readable_fonts(root: tk.Tk) -> None:
     family = "맑은 고딕"
     try:
@@ -529,6 +632,9 @@ class LolManagerGui:
 
         self._log_buf: "deque[str]" = deque(maxlen=MAX_LOG_LINES)
         self._log_window: Optional[tk.Toplevel] = None
+        self._config_window: Optional[tk.Toplevel] = None
+        self._config_moved_client_hwnd = 0
+        self._auto_hidden_windows: list[tk.Toplevel] = []
         self._log_text: Optional[ScrolledText] = None
         self._log_last_line: str = ""
         self._last_msg_full: str = ""
@@ -545,6 +651,7 @@ class LolManagerGui:
         )
         self._external_sync_thread: Optional[threading.Thread] = None
         self._external_sync_last: Optional[_ExternalSyncSnapshot] = None
+        self._rank_updates: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._last_confirmed_league_running: Optional[bool] = None
         self._stop_requested_at: Optional[float] = None
         self._restart_after_exit = False
@@ -593,6 +700,7 @@ class LolManagerGui:
         self.client_state_var = tk.StringVar(value="UNKNOWN")
         self.my_turn_var = tk.StringVar(value="False")
         self.client_visible_var = tk.StringVar(value="Unknown")
+        self.account_rank_var = tk.StringVar(value="솔로 랭크 · LoL 로그인 대기")
         self.proc_usage_var = tk.StringVar(value="CPU -  MEM -")
         self.last_msg_var = tk.StringVar(value="")
         self.app_version_var = tk.StringVar(
@@ -733,6 +841,10 @@ class LolManagerGui:
         self._auto_ban_refresher.start()
 
         self._start_external_sync_worker()
+        threading.Thread(
+            target=monitor_opgg_rank, args=(self._external_sync_stop, self._rank_updates.put),
+            name="opgg-rank", daemon=True,
+        ).start()
         self._initialize_update_lifecycle()
 
         try:
@@ -1209,26 +1321,35 @@ class LolManagerGui:
             handles.add(_top_hwnd(int(self.root.winfo_id())))
         except Exception:
             pass
-        win = getattr(self, "_log_window", None)
-        if win is not None:
-            try:
-                handles.add(_top_hwnd(int(win.winfo_id())))
-            except Exception:
-                pass
-        return int(foreground) in handles
+        for name in ("_log_window", "_config_window"):
+            win = getattr(self, name, None)
+            if win is not None:
+                try:
+                    handles.add(_top_hwnd(int(win.winfo_id())))
+                except Exception:
+                    pass
+        return _top_hwnd(foreground) in handles
 
     def _auto_iconify_manager_if_unfocused(
         self,
         *,
-        league_has_focus: bool,
+        league_visible: bool,
         manager_has_focus: bool,
     ) -> None:
         root_iconic = self._is_root_iconic()
         if manager_has_focus:
             if not root_iconic:
                 self._auto_iconified = False
-            return
-        if league_has_focus:
+        if league_visible or manager_has_focus:
+            if league_visible and self._auto_iconified:
+                self._show_root_noactivate()
+                self._auto_iconified = False
+                self._enforce_compact_root_size()
+            if league_visible:
+                for win in getattr(self, "_auto_hidden_windows", ()):
+                    if win.winfo_exists() and win.state() == "iconic":
+                        _show_hwnd_noactivate(_top_hwnd(win.winfo_id()))
+                self._auto_hidden_windows = []
             return
 
         if (
@@ -1244,13 +1365,12 @@ class LolManagerGui:
             except Exception:
                 pass
 
-        win = getattr(self, "_log_window", None)
-        if win is not None:
-            try:
-                if str(win.state() or "").strip().casefold() != "iconic":
-                    win.iconify()
-            except Exception:
-                pass
+        for name in ("_log_window", "_config_window"):
+            win = getattr(self, name, None)
+            if win is not None and win.winfo_exists() and win.winfo_viewable():
+                win.iconify()
+                if win not in self._auto_hidden_windows:
+                    self._auto_hidden_windows.append(win)
 
     def _enforce_compact_root_size(self) -> None:
         target = getattr(self, "_compact_root_size", None)
@@ -1288,14 +1408,10 @@ class LolManagerGui:
         if hwnd_root:
             _set_hwnd_topmost_noactivate(hwnd_root, want)
 
-        win = getattr(self, "_log_window", None)
-        if win is not None:
-            try:
-                hwnd_log = _top_hwnd(int(win.winfo_id()))
-            except Exception:
-                hwnd_log = 0
-            if hwnd_log:
-                _set_hwnd_topmost_noactivate(hwnd_log, want)
+        for name in ("_log_window", "_config_window"):
+            win = getattr(self, name, None)
+            if win is not None and win.winfo_exists():
+                _set_hwnd_topmost_noactivate(_top_hwnd(win.winfo_id()), want)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self.root, padding=10)
@@ -1391,11 +1507,8 @@ class LolManagerGui:
 
         self._render_role_setting()
 
-        cfg = ttk.Frame(root)
-        cfg.pack(side=tk.TOP, fill=tk.X, pady=(8, 0))
-        ttk.Label(cfg, text="Config").pack(side=tk.LEFT)
-        ttk.Label(cfg, text=self.config_path.name, foreground="#555555").pack(
-            side=tk.LEFT, padx=(6, 0)
+        ttk.Label(root, textvariable=self.account_rank_var).pack(
+            side=tk.TOP, anchor=tk.W, pady=(8, 0)
         )
 
         btns = ttk.Frame(root)
@@ -1935,6 +2048,9 @@ class LolManagerGui:
         active_champ = pool[active_idx][0] if 0 <= active_idx < len(pool) else ""
         active_ban = pool[active_idx][1] if 0 <= active_idx < len(pool) else ""
         active_ban_display = compact_role_ban_label_for_main_ui(active_ban)
+        tiers = data.get("tiers")
+        tiers = tiers if isinstance(tiers, dict) else {}
+        active_ban_display = champion_tier_display(active_ban_display, tiers.get(normalize_name(active_ban), ""))
 
         blocked_norms = tuple(self._blocked_pick_norms)
         blocked_set = self._blocked_pick_norms_set
@@ -1946,6 +2062,7 @@ class LolManagerGui:
             primary_ban,
             active_ban_display,
             tuple(reserve_pairs),
+            tuple(tiers.items()),
             coord,
             active_norm,
             active_idx,
@@ -1968,7 +2085,7 @@ class LolManagerGui:
 
             if active_champ:
                 tag = "blocked" if active_norm in blocked_set else "active"
-                txt.insert(tk.END, active_champ, (tag,))
+                txt.insert(tk.END, champion_tier_display(active_champ, tiers.get(normalize_name(active_champ), "")), (tag,))
             else:
                 txt.insert(tk.END, "설정 없음")
 
@@ -2014,7 +2131,7 @@ class LolManagerGui:
                             else self._norm_champ_name(nm)
                         )
                         tag = "blocked" if n in blocked_set else "inactive"
-                        txt.insert(tk.END, nm, (tag,))
+                        txt.insert(tk.END, champion_tier_display(nm, tiers.get(normalize_name(nm), "")), (tag,))
 
             if isinstance(coord, tuple) and len(coord) >= 2:
                 try:
@@ -2328,22 +2445,22 @@ class LolManagerGui:
             pass
 
     def open_config(self) -> None:
-        if is_frozen():
-            cmd = [sys.executable, "--config-gui"]
-        else:
-            cmd = [sys.executable, "-m", "lolmanager", "--config-gui"]
-        flags = _windows_create_no_window_flag()
+        from lolmanager.gui.config_gui import run_config_gui
+
+        window = self._config_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
         try:
-            subprocess.Popen(
-                cmd,
-                cwd=str(self.work_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=flags,
-            )
+            self._config_window = run_config_gui(self.config_path, parent=self.root)
+            if self._config_window is not None and self._lol_topmost_enabled:
+                self._config_window.update_idletasks()
+                _set_hwnd_topmost_noactivate(_top_hwnd(self._config_window.winfo_id()), True)
         except Exception as exc:
             messagebox.showerror(
-                "Open Config 실패", f"설정 GUI를 열지 못했습니다:\n{exc}"
+                "설정 열기 실패", f"설정 GUI를 열지 못했습니다:\n{exc}", parent=self.root
             )
 
     def clear_log(self) -> None:
@@ -2720,11 +2837,12 @@ class LolManagerGui:
 
         in_game = bool(is_game_client_active())
 
-        try:
-            rect = find_league_window_rect(visible_only=False)
-        except Exception:
-            rect = None
-        minimized = bool(rect is not None and is_rect_minimized(rect))
+        client = find_league_window(visible_only=False)
+        rect = client.rect if client else None
+        minimized = bool(client and client.minimized)
+        occluded = bool(client and (
+            not client.visible or (not minimized and is_league_window_occluded(client))
+        ))
 
         try:
             league_running = self._league_exit_guard.poll_is_running()
@@ -2743,6 +2861,8 @@ class LolManagerGui:
             minimized=minimized,
             league_running=league_running,
             league_foreground=league_foreground,
+            occluded=occluded,
+            client_hwnd=client.hwnd if client else 0,
         )
 
     def _external_sync_worker(self) -> None:
@@ -2781,6 +2901,15 @@ class LolManagerGui:
     def _sync_external_state(self) -> None:
         if bool(getattr(self, "_closing", False)):
             return
+        rank_updates = getattr(self, "_rank_updates", None)
+        if rank_updates is not None:
+            rank = None
+            try:
+                while True:
+                    rank = rank_updates.get_nowait()
+            except queue.Empty:
+                if rank is not None:
+                    self.account_rank_var.set(rank)
         state = None
         try:
             while True:
@@ -2875,7 +3004,7 @@ class LolManagerGui:
                 self._client_close_cleanup_deadline = None
             if self._client_seen_once:
                 self._auto_iconify_manager_if_unfocused(
-                    league_has_focus=False,
+                    league_visible=False,
                     manager_has_focus=self._is_manager_window_foreground(),
                 )
             if not self._is_ui_busy():
@@ -2883,75 +3012,33 @@ class LolManagerGui:
             self.root.after(EXTERNAL_SYNC_MS, self._sync_external_state)
             return
 
-        if in_game:
-            self._client_closed_at = None
-            self._client_close_cleanup_deadline = None
-            try:
-                self.client_visible_var.set("InGame")
-            except Exception:
-                pass
-
-            manager_has_focus = self._is_manager_window_foreground()
-            self._auto_iconify_manager_if_unfocused(
-                league_has_focus=False,
-                manager_has_focus=manager_has_focus,
-            )
-
-            want_topmost = False
-            self._apply_lol_topmost(want_topmost)
-            self.root.after(
-                external_sync_delay_ms(in_game=True), self._sync_external_state
-            )
-            return
-
         rect = state.rect
-        minimized = bool(state.minimized)
-        league_foreground = bool(state.league_foreground)
-        manager_has_focus = self._is_manager_window_foreground()
-        if rect is not None and not isinstance(rect, tuple):
-            rect = None
-        want_topmost = False
-
-        if rect is not None:
-            self._client_seen_once = True
-            self._client_closed_at = None
-            self._client_close_cleanup_deadline = None
-
-            if minimized:
-                self.client_visible_var.set("Minimized")
-                want_topmost = False
-                self._auto_iconify_manager_if_unfocused(
-                    league_has_focus=False,
-                    manager_has_focus=manager_has_focus,
-                )
-            else:
-                self.client_visible_var.set("Visible")
-                want_topmost = bool(league_foreground)
-                if league_foreground and self._auto_iconified:
-                    self._show_root_noactivate()
-                    self._auto_iconified = False
-                    self._enforce_compact_root_size()
-                self._auto_iconify_manager_if_unfocused(
-                    league_has_focus=league_foreground,
-                    manager_has_focus=manager_has_focus,
-                )
-                if (
-                    league_foreground or manager_has_focus
-                ) and not self._is_ui_busy():
-                    self._snap_to_client(rect)
-        else:
-            if league_running:
-                self.client_visible_var.set("Hidden")
-                self._client_seen_once = True
-                want_topmost = False
-                self._auto_iconify_manager_if_unfocused(
-                    league_has_focus=False,
-                    manager_has_focus=manager_has_focus,
-                )
-                self._client_closed_at = None
-                self._client_close_cleanup_deadline = None
+        minimized = state.minimized
+        visible = isinstance(rect, tuple) and not minimized and not state.occluded
+        self._client_seen_once = True
+        self._client_closed_at = None
+        self._client_close_cleanup_deadline = None
+        self.client_visible_var.set(
+            "InGame" if in_game else "Minimized" if minimized else "Visible" if visible else "Hidden"
+        )
+        self._auto_iconify_manager_if_unfocused(
+            league_visible=visible,
+            manager_has_focus=self._is_manager_window_foreground(),
+        )
         if not self._is_ui_busy():
-            self._apply_lol_topmost(want_topmost)
+            self._apply_lol_topmost(visible and state.league_foreground and not in_game)
+            if visible and rect is not None:
+                if not self._is_root_iconic():
+                    self._snap_to_client(rect)
+                window = getattr(self, "_config_window", None)
+                if window is not None and window.winfo_exists() and state.client_hwnd:
+                    hwnd = state.client_hwnd
+                    if dock_config_window(
+                        window, LeagueWindow(hwnd, rect, False, True),
+                        can_move_client=self._config_moved_client_hwnd != hwnd,
+                        manager_hwnd=0 if self._is_root_iconic() else _top_hwnd(self.root.winfo_id()),
+                    ):
+                        self._config_moved_client_hwnd = hwnd
         self.root.after(
             external_sync_delay_ms(in_game=in_game), self._sync_external_state
         )
@@ -3143,6 +3230,9 @@ class LolManagerGui:
                     close_after_launch=False,
                 )
         self._closing = True
+        window = getattr(self, "_config_window", None)
+        if window is not None and window.winfo_exists():
+            window.tk.call(window.protocol("WM_DELETE_WINDOW"))
         try:
             refresher = getattr(self, "_auto_ban_refresher", None)
             if refresher is not None:

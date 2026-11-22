@@ -148,3 +148,34 @@ def test_real_frameless_window_snaps_flush_after_chrome_removal(layout_root, mon
     assert frame is not None
     assert frame[2] == 640
     assert frame[1] == 336
+
+
+def test_config_can_make_room_once_and_uses_existing_space_afterward():
+    client = (320, 180, 1600, 900)
+    size = (600, 450)
+    bounds = app_gui._VirtualScreen(0, 0, 1920, 1040)
+    assert app_gui._config_dock_positions(client, size, bounds, can_move_client=True) == (
+        (600, 180), (0, 180),
+    )
+    assert app_gui._config_dock_positions(client, size, bounds, can_move_client=False) == (
+        (320, 180), (0, 180),
+    )
+    assert app_gui._config_dock_positions((600, 180, 1880, 900), size, bounds, can_move_client=True) == (
+        (600, 180), (0, 180),
+    )
+
+
+@pytest.mark.parametrize("last_edge,occluded", [(99, False), (100, True)])
+def test_multiple_overlapping_windows_only_hide_a_fully_covered_client(monkeypatch, last_edge, occluded):
+    from lolmanager.platform import resolution_detector as windows
+
+    def monitors(_dc, _clip, callback, _data):
+        extent = windows._RECT(0, 0, 200, 200)
+        return callback(None, None, ctypes.pointer(extent), 0)
+
+    user32 = mock.Mock()
+    user32.EnumDisplayMonitors.side_effect = monitors
+    user32.GetWindow.side_effect = [11, 12, None]
+    monkeypatch.setattr(windows, "_USER32", user32)
+    monkeypatch.setattr(windows, "_opaque_window_rect", {11: (0, 0, 51, 100), 12: (50, 0, last_edge, 100)}.get)
+    assert windows.is_league_window_occluded(windows.LeagueWindow(10, (0, 0, 100, 100), False, True)) is occluded

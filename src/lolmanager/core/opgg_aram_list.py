@@ -13,7 +13,11 @@ from lolmanager.core.opgg_champion_list import (
     load_champion_list_cache,
     save_champion_list_cache,
 )
-from lolmanager.core.opgg_http import MAX_OPGG_CHAMPION_ROWS, read_limited_text_response
+from lolmanager.core.opgg_http import (
+    MAX_OPGG_CHAMPION_ROWS,
+    next_page_stream,
+    read_limited_text_response,
+)
 
 
 OPGG_ARAM_URL_KO = "https://op.gg/ko/lol/modes/aram"
@@ -34,21 +38,7 @@ def parse_aram_entries_from_opgg_html(html: str) -> list[ChampionEntry]:
     its source order is alphabetical, so it must be sorted by rank explicitly.
     """
     decoder = json.JSONDecoder()
-    chunks: list[str] = []
-    for script in BeautifulSoup(html, "lxml").select("script:not([src])"):
-        text = script.get_text()
-        for match in re.finditer(r"self\.__next_f\.push\(", text):
-            try:
-                value, _ = decoder.raw_decode(text[match.end():].lstrip())
-            except ValueError:
-                continue
-            if (
-                isinstance(value, list) and len(value) == 2
-                and value[0] == 1 and isinstance(value[1], str)
-            ):
-                chunks.append(value[1])
-
-    stream = "".join(chunks)
+    stream = next_page_stream(BeautifulSoup(html, "lxml"))
     for match in re.finditer(r'"champions"\s*:\s*', stream):
         try:
             champions, _ = decoder.raw_decode(stream[match.end():])
